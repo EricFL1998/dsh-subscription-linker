@@ -288,6 +288,20 @@ export class AutoAdapter extends LlmAdapter {
     for (const entry of host.providers()) {
       // Auto cannot chain to itself; that would be a loop, not a fallback.
       if (entry.id === AUTO_PROVIDER_ID) continue
+      // A route this plugin owns but has not signed in offers nothing, even though
+      // the harness still answers with its catalog: the harness has no notion of an
+      // account, so Auto is the layer that has to ask. Host providers are left
+      // alone — Auto has no way to judge somebody else's readiness, and dropping
+      // them would silently empty the chain.
+      const owned = this.options.registry.get(entry.id)
+      if (owned !== undefined) {
+        try {
+          if (!(await owned.status()).loggedIn) continue
+        } catch (error: unknown) {
+          this.options.onWarn?.(`auto could not read ${entry.id}'s account state (${errorChain(error)})`)
+          continue
+        }
+      }
       try {
         for (const model of await host.models(entry.id)) {
           const resolved = await host.resolve(entry.id, model.id)

@@ -355,4 +355,60 @@ describe('auto across the whole harness roster', () => {
     const ids = (await adapter.summaries()).map((model) => model.id)
     assert.deepEqual(ids, ['deepseek/deepseek-v4', 'huanling/custom-1'])
   })
+
+  test('a route this plugin owns but has not signed in is left out', async () => {
+    // The harness answers `listModels` for a registered route whether or not it has
+    // an account — it has no notion of one — so Auto has to ask the registry. This
+    // is the case a signed-out GLM card produced: its models were still offered.
+    const preferences = new ModelPreferences(path.join(directory, `signed-out-${String(Math.random()).slice(2)}.json`))
+    const signedOut = {
+      ...stubRoute('glm', ['glm-5.3']).route,
+      status: async () => ({
+        provider: 'glm', displayName: 'GLM', loggedIn: false, busy: false,
+        accounts: [], credentialFile: '—', discovery: true, models: [], details: [],
+      }),
+    } as unknown as ProviderRoute
+    const registry = new SubscriptionRegistry([signedOut])
+    const route = createAutoProvider({
+      preferences,
+      registry,
+      host: {
+        providers: () => [{ id: 'glm', name: 'GLM' }, { id: 'deepseek', name: 'DeepSeek' }],
+        // The harness still reports the signed-out route's models.
+        models: async (provider) => provider === 'glm' ? [{ id: 'glm-5.3' }] : [{ id: 'deepseek-v4' }],
+        resolve: async () => ({ contextWindow: 100_000 }),
+        stream: () => (async function* (): AsyncIterable<StreamChunk> { /* unused */ })(),
+      },
+    })
+    registry.register(route)
+    const keys = (await (route.adapter as AutoAdapter).chain())
+      .map((candidate) => autoKey(candidate.provider, candidate.model))
+    assert.deepEqual(keys, ['deepseek/deepseek-v4'])
+  })
+
+  test('a signed-in owned route keeps its models in the chain', async () => {
+    const preferences = new ModelPreferences(path.join(directory, `signed-in-${String(Math.random()).slice(2)}.json`))
+    const signedIn = {
+      ...stubRoute('glm', ['glm-5.3']).route,
+      status: async () => ({
+        provider: 'glm', displayName: 'GLM', loggedIn: true, busy: false,
+        accounts: [], credentialFile: '—', discovery: true, models: [], details: [],
+      }),
+    } as unknown as ProviderRoute
+    const registry = new SubscriptionRegistry([signedIn])
+    const route = createAutoProvider({
+      preferences,
+      registry,
+      host: {
+        providers: () => [{ id: 'glm', name: 'GLM' }],
+        models: async () => [{ id: 'glm-5.3' }],
+        resolve: async () => ({ contextWindow: 100_000 }),
+        stream: () => (async function* (): AsyncIterable<StreamChunk> { /* unused */ })(),
+      },
+    })
+    registry.register(route)
+    const keys = (await (route.adapter as AutoAdapter).chain())
+      .map((candidate) => autoKey(candidate.provider, candidate.model))
+    assert.deepEqual(keys, ['glm/glm-5.3'])
+  })
 })
