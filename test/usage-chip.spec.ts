@@ -82,16 +82,16 @@ describe('shortWindow', () => {
 describe('balanceOf', () => {
   test('lists topped-up wallets before bonus wallets', () => {
     const wallets = balanceOf({
-      value: [{ currency: 'CNY', balance: '6.89' }],
+      wallets: [{ currency: 'CNY', balance: '6.89' }],
       bonusWallets: [{ currency: 'CNY', balance: '2' }],
     })
     assert.deepEqual(wallets?.map((wallet) => `${wallet.currency}:${wallet.balance}:${wallet.bonus}`), ['CNY:6.89:false', 'CNY:2:true'])
   })
 
-  test('reduces a failed read or no account to nothing', () => {
+  test('reduces no balance, an empty read, or no wallets to nothing', () => {
+    assert.equal(balanceOf(undefined), undefined)
     assert.equal(balanceOf(null), undefined)
-    assert.equal(balanceOf({ status: 'failed' }), undefined)
-    assert.equal(balanceOf({ value: [] }), undefined)
+    assert.equal(balanceOf({ wallets: [], bonusWallets: [] }), undefined)
   })
 })
 

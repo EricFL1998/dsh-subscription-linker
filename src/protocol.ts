@@ -28,6 +28,7 @@ export const RPC_ENDPOINTS = [
   'removeModel',
   'usage',
   'reload',
+  'deepseek-balance',
   'ccswitch-balance',
 ] as const
 
@@ -312,6 +313,7 @@ export interface RpcMap {
   removeModel: { payload: ModelIdRequest, value: SubscriptionStatus }
   usage: { payload: DiscoverRequest, value: UsageResult }
   reload: { payload: undefined, value: SubscriptionStatus }
+  'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
 }
 
@@ -337,6 +339,37 @@ export type BalanceResult =
   | { ok: true, balance: AccountBalance }
   /** The account is signed out, or the read failed. */
   | { ok: false }
+
+/** Payload of `deepseek-balance`. */
+export interface DeepSeekBalanceRequest {
+  /** Client metadata the host's account service expects. */
+  version?: string
+  locale?: string
+  timezoneOffsetSeconds?: number
+}
+
+/** One currency's wallet, as the host's account service reports it. */
+export interface DeepSeekWallet {
+  /** ISO currency the balance is denominated in. */
+  currency: string
+  /** Remaining balance, as a decimal string. */
+  balance: string
+}
+
+/**
+ * Result of `deepseek-balance`.
+ *
+ * `undefined` means the account is signed out or the read failed, so a chip stays
+ * silent rather than showing a wrong figure.
+ */
+export type DeepSeekBalanceResult =
+  | {
+    /** Normal (topped-up) wallets, one per currency. */
+    wallets: readonly DeepSeekWallet[]
+    /** Bonus / promotional wallets, one per currency. */
+    bonusWallets: readonly DeepSeekWallet[]
+  }
+  | undefined
 
 /** Payload of `ccswitch-balance`. */
 export interface CcSwitchBalanceRequest {

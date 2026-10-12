@@ -19,6 +19,8 @@ export interface BalanceContext {
   readonly credentialRefs: Readonly<Record<string, string>>
   /** Resolve one credential reference to its key. */
   readonly resolveCredential?: CredentialResolver
+  /** The host's DeepSeek account service, when the composition provides one. */
+  readonly deepseekAccount?: DeepSeekAccountService | undefined
 }
 
 /**
@@ -37,6 +39,8 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { BAD_REQUEST, ProviderError } from '../errors.js'
 import { queryCcSwitchBalance } from './ccswitch.js'
+import { readDeepSeekBalance } from './deepseek-balance.js'
+import type { DeepSeekAccountService } from './deepseek-balance.js'
 import { RPC_ENDPOINTS, RPC_PREFIX } from '../protocol.js'
 import type { RpcError, RpcRequest, RpcResult } from '../protocol.js'
 import type { SubscriptionRegistry } from './registry.js'
@@ -92,6 +96,26 @@ function stringField(payload: unknown, field: string): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * Read the client metadata a balance endpoint forwards to the host service.
+ *
+ * The host's account service expects a version / locale / timezone object; a missing or
+ * partial one is tolerated by building a default rather than failing the read.
+ *
+ * @param payload - the request payload.
+ * @returns the client metadata object.
+ */
+function payloadClient(payload: unknown): Record<string, unknown> {
+  const record = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
+  return {
+    version: typeof record.version === 'string' ? record.version : '1',
+    locale: typeof record.locale === 'string' ? record.locale : 'en-US',
+    timezoneOffsetSeconds: typeof record.timezoneOffsetSeconds === 'number'
+      ? record.timezoneOffsetSeconds
+      : 0,
+  }
 }
 
 /** Read a boolean field from a payload, defaulting to false when absent. */
@@ -213,6 +237,14 @@ async function runEndpoint(
     }
     case 'usage':
       return registry.usage(requiredProvider(payload, endpoint), booleanField(payload, 'force'))
+    case 'deepseek-balance': {
+      // The DeepSeek account's balance, read on the node half through the host's own
+      // account service. The browser cannot call that service directly (it sits behind
+      // the host's Remote controller, not a /api fetch route), so the node half reads it
+      // and serves it here, on the same channel as the rest of the chip's data.
+      const client = payloadClient(payload)
+      return await readDeepSeekBalance(balance?.deepseekAccount, client)
+    }
     case 'ccswitch-balance': {
       // A non-subscription provider's balance, by cc-switch's query. The caller names
       // the provider; the configured map turns that into the credential reference the

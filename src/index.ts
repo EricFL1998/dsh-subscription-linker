@@ -260,21 +260,30 @@ export function apply(ctx: Context, config: Config = {}): void {
   // of the plugin's wiring is, and the client learns a provider's balance by id, never
   // by its credential reference.
   const credentialRefs = config.balanceCredentialRefs ?? {}
-  const balanceContext = Object.keys(credentialRefs).length === 0
-    ? undefined
-    : {
-        credentialRefs,
-        resolveCredential: async (ref: string): Promise<string | undefined> => {
-          try {
-            const credentials = ctx.get('credentials') as
-              | { resolve?: (r: string) => Promise<{ value: string } | undefined> }
-              | undefined
-            return (await credentials?.resolve?.(ref))?.value
-          } catch {
-            return undefined
-          }
-        },
+  // The DeepSeek account's balance is read on the node half through the host's
+  // `deepseekAccount` service; the browser reaches it through the plugin's own RPC, the
+  // same channel as the rest of the chip's data. The service is optional — a composition
+  // without it still serves everything else, and the balance endpoint answers nothing.
+  let deepseekAccount: { getBalance: (client: unknown) => Promise<unknown> } | undefined
+  try {
+    deepseekAccount = ctx.get('deepseekAccount') as { getBalance: (client: unknown) => Promise<unknown> } | undefined
+  } catch {
+    deepseekAccount = undefined
+  }
+  const balanceContext = {
+    credentialRefs,
+    deepseekAccount,
+    resolveCredential: async (ref: string): Promise<string | undefined> => {
+      try {
+        const credentials = ctx.get('credentials') as
+          | { resolve?: (r: string) => Promise<{ value: string } | undefined> }
+          | undefined
+        return (await credentials?.resolve?.(ref))?.value
+      } catch {
+        return undefined
       }
+    },
+  }
   registerSubscriptionRpc(ctx, registry, balanceContext)
 
   // Warm each route's live catalog for an install that is already signed in.

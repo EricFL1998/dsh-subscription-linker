@@ -142,20 +142,18 @@ export interface ChipBalance {
 }
 
 /**
- * Reduce the host's account-balance payload to the wallets the chip shows.
+ * Reduce the node half's balance payload to the wallets the chip shows.
  *
  * Bonus wallets are shown after the topped-up ones, so a reader sees their own credit
  * first and any promotional credit as a secondary figure.
  *
- * @param value - the host's ready balance, or undefined when there is none.
+ * @param value - the node half's balance, or undefined when there is none.
  * @returns the wallets, topped-up first then bonus, or undefined when nothing is usable.
  */
-export function balanceOf(value: { value?: readonly { currency: string, balance: string }[], bonusWallets?: readonly { currency: string, balance: string }[] } | { status: string } | null | undefined): readonly ChipBalance[] | undefined {
-  // A failed read or no account (`{status:'failed'}` or `null`) reduces to nothing, as
-  // does a ready payload that names no wallet.
-  if (value === null || value === undefined || !('value' in value) || value.value === undefined) return undefined
+export function balanceOf(value: { wallets?: readonly { currency: string, balance: string }[], bonusWallets?: readonly { currency: string, balance: string }[] } | null | undefined): readonly ChipBalance[] | undefined {
+  if (value === null || value === undefined) return undefined
   const wallets: ChipBalance[] = [
-    ...value.value.map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: false })),
+    ...(value.wallets ?? []).map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: false })),
     ...(value.bonusWallets ?? []).map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: true })),
   ]
   return wallets.length === 0 ? undefined : wallets
