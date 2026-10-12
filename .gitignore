@@ -20,3 +20,7 @@ packs/
 # Tarballs produced by `npm pack`, which the release flow creates and publishes.
 *.tgz
 
+# An npm config file, which is where `npm login` puts the registry token. It
+# belongs in the user's home directory, never in the repository.
+.npmrc
+
