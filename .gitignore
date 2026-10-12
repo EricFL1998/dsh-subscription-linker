@@ -4,6 +4,10 @@ lib-test/
 probe/
 *.tsbuildinfo
 
+# Scratch space for one-off analysis scripts and their dumps. These are working
+# notes, not this project's code, and a single dump runs to megabytes.
+.tmp/
+
 # Vendored references, kept out of the published tree.
 #
 # `refs-*` are third-party sources read while implementing a provider — the
