@@ -96,6 +96,14 @@ export interface ArkSession extends SessionBase {
    * every model request carries.
    */
   apiKey: string
+  /**
+   * Temporary STS credentials, used to sign control-plane calls.
+   *
+   * The SSO endpoint returns these in its `access_token`, which is where the plan
+   * allowance is read from; without them the route still serves models but states
+   * no quota.
+   */
+  sts?: ArkStsCredentials
   /** Identity token the key was minted under, for the control plane. */
   idToken?: string
   /** API base recorded at login time (diagnostics only). */
@@ -119,18 +127,34 @@ export function parseArkSession(value: unknown): ArkSession | undefined {
   const apiBase = nonEmpty(record.apiBase)
   const accountId = nonEmpty(record.accountId)
   const email = nonEmpty(record.email)
+  const sts = stsFromSession(record.sts)
   return {
     // The data plane carries the API key; `accessToken` is the same value so the
     // shared token machinery has one bearer to resolve.
     accessToken: apiKey,
     apiKey,
     expiresAt,
+    ...sts === undefined ? {} : { sts },
     ...idToken === undefined ? {} : { idToken },
     ...refreshToken === undefined ? {} : { refreshToken },
     ...apiBase === undefined ? {} : { apiBase },
     ...accountId === undefined ? {} : { accountId },
     ...email === undefined ? {} : { email },
   }
+}
+
+/** Read a stored STS credential set, tolerating a partial one. */
+function stsFromSession(value: unknown): ArkStsCredentials | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const accessKeyId = nonEmpty(record.accessKeyId)
+  const secretAccessKey = nonEmpty(record.secretAccessKey)
+  const sessionToken = nonEmpty(record.sessionToken)
+  const expiresAt = finiteInstant(record.expiresAt)
+  if (accessKeyId === undefined || secretAccessKey === undefined || sessionToken === undefined || expiresAt === undefined) {
+    return undefined
+  }
+  return { accessKeyId, secretAccessKey, sessionToken, expiresAt }
 }
 
 /** Everything the adapter needs from the route. */

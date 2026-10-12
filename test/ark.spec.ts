@@ -88,6 +88,34 @@ describe('Ark sign-in', () => {
     assert.equal(tokens.expiresAt, 1_900_000_000_000)
   })
 
+  test('the access_token is read as the STS credential it is', () => {
+    // The live endpoint answers `token_type: urn:ietf:params:oauth:token-type:
+    // access_token_sts` and puts the credentials in `access_token` as JSON. This is
+    // what signs the control plane, so it must survive parsing.
+    const tokens = parseArkTokenPayload({
+      id_token: jwt(1_900_000_000),
+      expires_in: 900,
+      token_type: 'urn:ietf:params:oauth:token-type:access_token_sts',
+      access_token: JSON.stringify({
+        access_key_id: 'AKTtest',
+        secret_access_key: 'secret',
+        session_token: 'session',
+      }),
+    })
+    assert.equal(tokens.sts?.accessKeyId, 'AKTtest')
+    assert.equal(tokens.sts?.secretAccessKey, 'secret')
+    assert.equal(tokens.sts?.sessionToken, 'session')
+    // The lifetime comes from the same `expires_in` the id token is issued with.
+    assert.ok((tokens.sts?.expiresAt ?? 0) > Date.now())
+  })
+
+  test('an opaque access token yields no STS rather than a broken one', () => {
+    // Not every reply carries STS; a plain opaque token must not be mistaken for one.
+    const tokens = parseArkTokenPayload({ id_token: jwt(1_900_000_000), access_token: 'opaque-token' })
+    assert.equal(tokens.sts, undefined)
+    assert.equal(tokens.idToken, jwt(1_900_000_000))
+  })
+
   test('a reply that omits a refresh token keeps the stored one', () => {
     const tokens = parseArkTokenPayload({ id_token: jwt(1_900_000_000) }, 'kept-refresh')
     assert.equal(tokens.refreshToken, 'kept-refresh')

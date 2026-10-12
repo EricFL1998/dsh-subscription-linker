@@ -34,6 +34,7 @@
 
 import { attributedHeaders } from './headers.js'
 import type { PkcePair } from './pkce-flow.js'
+import type { ArkStsCredentials } from './ark-control.js'
 import type { FetchFn } from '../http.js'
 
 /** Identity host both the authorize and token endpoints live on. */
@@ -78,8 +79,19 @@ export const ARK_CALLBACK_PORTS = [51789, 51790, 51791, 51792] as const
 
 /** What one completed sign-in yields. */
 export interface ArkTokenSet {
-  /** Identity token the SSO issued; the control plane is called with it. */
+  /** Identity token the SSO issued. */
   readonly idToken: string
+  /**
+   * Temporary STS credentials, when the service returned them.
+   *
+   * The SSO endpoint's `access_token` is not an opaque bearer: it is a JSON document
+   * — `token_type: urn:ietf:params:oauth:token-type:access_token_sts` — carrying
+   * `access_key_id` / `secret_access_key` / `session_token`. Those sign the control
+   * plane, which is where the plan allowance lives, so this is the credential the
+   * quota reader needs. It is obtained from the same call as the id token; the
+   * account's broker is not involved.
+   */
+  readonly sts?: ArkStsCredentials
   /** Refresh token, when the service issued one. */
   readonly refreshToken?: string
   /** Epoch milliseconds the id token stops being usable. */
@@ -114,6 +126,43 @@ function jwtExpiry(token: string): number | undefined {
 const ASSUMED_ID_TOKEN_TTL_MS = 60 * 60 * 1000
 
 /**
+ * Read the STS credentials the SSO endpoint hands back.
+ *
+ * The `access_token` is a JSON document rather than an opaque string, and its
+ * `token_type` says what it is. A service that answers with an ordinary opaque
+ * access token yields nothing here, which is not an error: the id token still works
+ * for the sign-in, only the quota becomes unreadable.
+ *
+ * @param payload - the decoded token response.
+ * @returns the credentials, or undefined when the reply carried none.
+ */
+function stsFrom(payload: Record<string, unknown>): ArkStsCredentials | undefined {
+  const accessToken = text(payload.access_token)
+  if (accessToken === undefined) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(accessToken)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const record = parsed as Record<string, unknown>
+  const accessKeyId = text(record.access_key_id)
+  const secretAccessKey = text(record.secret_access_key)
+  const sessionToken = text(record.session_token)
+  if (accessKeyId === undefined || secretAccessKey === undefined || sessionToken === undefined) {
+    return undefined
+  }
+  const stated = finite(payload.expires_in)
+  return {
+    accessKeyId,
+    secretAccessKey,
+    sessionToken,
+    expiresAt: Date.now() + (stated === undefined ? 900 : stated) * 1000,
+  }
+}
+
+/**
  * Normalise the identity service's token response.
  *
  * @param payload - the decoded body.
@@ -129,6 +178,7 @@ export function parseArkTokenPayload(payload: unknown, previousRefreshToken?: st
   const idToken = text(record.id_token) ?? text(record.access_token)
   if (idToken === undefined) throw new Error('Ark sign-in returned an empty id_token')
   const refreshToken = text(record.refresh_token) ?? previousRefreshToken
+  const sts = stsFrom(record)
   const stated = finite(record.id_token_expires_at)
   const expiresAt = stated === undefined
     // The JWT states its own expiry; a reply that omits both is assumed short-lived
@@ -137,6 +187,7 @@ export function parseArkTokenPayload(payload: unknown, previousRefreshToken?: st
     : stated < 1e12 ? stated * 1000 : stated
   return {
     idToken,
+    ...sts === undefined ? {} : { sts },
     ...refreshToken === undefined ? {} : { refreshToken },
     expiresAt,
   }
