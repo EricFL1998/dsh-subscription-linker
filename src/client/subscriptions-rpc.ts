@@ -129,11 +129,6 @@ export function createCcSwitchBalanceCall(rpc: ConnectionHandle['rpc']): CcSwitc
       throw new SubscriptionsRpcError(messageOf(error), 'RPC_TRANSPORT')
     }
     if (!result.ok) throw new SubscriptionsRpcError(result.error.message, result.error.code)
-    // TEMP diagnostics: surface the node half's cc-switch read outcome in the browser,
-    // where the desktop shell's DevTools can show it — the node half's own stdout is
-    // unreachable there.
-    const value = result.value as { balance?: unknown, diag?: unknown }
-    console.warn(`[subscription-oauth] ccswitch '${provider}'`, JSON.stringify(value?.diag))
-    return value?.balance as CcSwitchBalanceResult
+    return result.value as CcSwitchBalanceResult
   }
 }

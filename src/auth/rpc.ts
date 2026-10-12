@@ -263,27 +263,15 @@ async function runEndpoint(
       // fabricated zero.
       const provider = requiredProvider(payload, endpoint)
       const credentialRef = balance?.credentialRefs[provider]
-      // TEMP diagnostics: the cc-switch balance is silent for huanling and the node half's
-      // stdout is unreachable in the desktop shell, so the read's outcome is returned to
-      // the browser, where DevTools can show it.
-      const diag: Record<string, unknown> = { provider, credentialRef }
-      if (credentialRef === undefined || balance?.resolveCredential === undefined) {
-        diag.stage = credentialRef === undefined ? 'no-credential-ref' : 'no-resolver'
-        return { diag }
-      }
+      if (credentialRef === undefined || balance?.resolveCredential === undefined) return undefined
       const apiKey = await balance.resolveCredential(credentialRef)
-      diag.keyResolved = apiKey !== undefined
-      diag.keyPrefix = apiKey === undefined ? undefined : `${apiKey.slice(0, 4)}…(${apiKey.length})`
-      if (apiKey === undefined) return { diag }
+      if (apiKey === undefined) return undefined
       const baseUrl = balance?.baseUrls[provider] ?? 'https://api.deepseek.com'
-      diag.baseUrl = baseUrl
       // A provider that answers the OpenAI-compatible `/v1/usage` (the shape cc-switch's
       // custom template reads, `{ remaining, unit }`) is asked that first; one that
       // answers the DeepSeek `balance_infos` shape is asked that as a fallback.
-      const result = await queryUsageBalance({ apiKey, baseUrl })
+      return await queryUsageBalance({ apiKey, baseUrl })
         ?? await queryCcSwitchBalance({ apiKey, baseUrl })
-      diag.queryResult = result === undefined ? 'undefined' : result
-      return { balance: result, diag }
     }
     case 'reload':
       return registry.reload()
