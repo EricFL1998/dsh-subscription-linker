@@ -25,7 +25,7 @@ after(async () => {
 function tokenManager(): TokenManager<KimiSession> {
   return {
     resolve: async () => ({ account: 'user-1', accessToken: 'token', expiresAt: Date.now() + 60_000 }),
-    session: async () => undefined,
+    session: async () => ({ account: 'user-1', session: { accessToken: 'token', expiresAt: Date.now() + 60_000 } }),
     accounts: async () => [],
     defaultAccount: async () => undefined,
   } as unknown as TokenManager<KimiSession>

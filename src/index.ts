@@ -190,6 +190,28 @@ export function apply(ctx: Context, config: Config = {}): void {
     const auto = createAutoProvider({
       preferences,
       registry,
+      // Auto spans every provider the harness serves — the built-in DeepSeek
+      // routes and any provider the user adds included — so it is enumerated
+      // through the runtime rather than through this plugin's own registry. The
+      // runtime is read per call, so a provider that registers later (another
+      // plugin, a route the user configures) joins the chain without a restart.
+      host: {
+        providers: () => ctx.llm.listProviders().map((entry) => ({ id: entry.id, name: entry.name })),
+        models: (provider) => ctx.llm.listModels(provider),
+        resolve: async (provider, model) => {
+          const resolved = await ctx.llm.resolveModelInfo(provider, model)
+          return {
+            ...resolved.context?.contextWindow === undefined ? {} : { contextWindow: resolved.context.contextWindow },
+            ...resolved.reasoning === undefined
+              ? {}
+              : { reasoningEfforts: resolved.reasoning.efforts.map((effort) => String(effort.id)) },
+            ...resolved.inputModalities === undefined ? {} : { inputModalities: resolved.inputModalities },
+          }
+        },
+        // Dispatch through the harness, which selects the adapter that owns the
+        // provider. Auto's own adapter is never asked to guess.
+        stream: (options) => ctx.llm.stream(options),
+      },
       onCatalogChanged: () => { reannounce(AUTO_PROVIDER_ID) },
       onWarn,
     })

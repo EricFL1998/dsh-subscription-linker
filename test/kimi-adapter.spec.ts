@@ -17,7 +17,7 @@ import { KIMI_CONTEXT_WINDOW, KIMI_LONG_CONTEXT_WINDOW } from '../src/constants.
 function tokenManager(resolve?: TokenManager<KimiSession>['resolve']): TokenManager<KimiSession> {
   const manager = {
     resolve: resolve ?? (async () => ({ account: 'user-1', accessToken: 'token', expiresAt: Date.now() + 60_000 })),
-    session: async () => undefined,
+    session: async () => ({ account: 'user-1', session: { accessToken: 'token', expiresAt: Date.now() + 60_000 } }),
     accounts: async () => ['user-1'],
     defaultAccount: async () => 'user-1',
   }

@@ -37,7 +37,7 @@ function jwtWithClaims(claims: Record<string, unknown>): string {
 function tokenManager(resolve?: TokenManager<GrokSession>['resolve']): TokenManager<GrokSession> {
   const manager = {
     resolve: resolve ?? (async () => ({ account: 'user-1', accessToken: 'token', expiresAt: Date.now() + 60_000 })),
-    session: async () => undefined,
+    session: async () => ({ account: 'user-1', session: { accessToken: 'token', expiresAt: Date.now() + 60_000 } }),
     accounts: async () => ['user-1'],
     defaultAccount: async () => 'user-1',
   }

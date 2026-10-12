@@ -670,6 +670,9 @@ function ProviderCard(props: {
         </div>
       ))}
 
+      {/* A signed-out route has nothing to configure here, and listing models it
+          cannot call would only invite picker entries that fail. */}
+      {status.loggedIn && (
       <div style={styles.catalog}>
         <div style={styles.catalogHeader}>
           <button
@@ -838,6 +841,7 @@ function ProviderCard(props: {
           </div>
         )}
       </div>
+      )}
 
       <UsageBlock
         usage={status.usage ?? []}

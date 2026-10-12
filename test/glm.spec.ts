@@ -33,7 +33,7 @@ function adapter(options: Partial<GlmAdapterOptions> = {}): GlmAdapter {
     apiBase: 'https://open.bigmodel.cn/api/coding/paas/v4',
     discovery: true,
     streamIdleTimeoutMs: 5_000,
-    tokens: {} as never,
+    tokens: { session: async () => ({ account: 'user-1', session: {} }) } as never,
     ...options,
   })
 }

@@ -117,13 +117,22 @@ grip is focused) to re-order the list; that order is what the picker follows for
 that route.
 
 **`auto` is a provider of its own** (route `auto`), not a model inside each one: it
-stands in for the enabled models of *every* route in one list, each row badged with
-the route that owns it. It leads both the Settings section and the model picker,
-because it is the one entry that reaches every route. It has no account, so its card
-offers no connect or manage — only the list. A switch takes a model out of Auto
-**without** hiding it from the picker, drag re-orders what Auto tries first, and the
-arrangement is stored separately (`auto.order` / `auto.off`). Switch every model off
-and Auto is simply not offered in the picker.
+stands in for the enabled models of *every* provider the harness serves in one list,
+each row badged with the provider that owns it. That includes the routes this plugin
+registers **and** the ones it does not — the built-in DeepSeek providers and any
+provider you added yourself — because it enumerates the harness roster
+(`ctx.llm.listProviders()` / `listModels()`) and dispatches through it rather than
+looking only at its own routes. It leads both the Settings section and the model
+picker, because it is the one entry that reaches every route. It has no account, so
+its card offers no connect or manage — only the list. A switch takes a model out of
+Auto **without** hiding it from the picker, drag re-orders what Auto tries first, and
+the arrangement is stored separately (`auto.order` / `auto.off`). Switch every model
+off and Auto is simply not offered in the picker.
+
+A provider with no signed-in account contributes no rows: `listModels` answers with
+nothing until a route has a session, so signing out removes that route's models from
+the picker and from Auto at the same time, and its card hides the catalog instead of
+offering models that cannot be called.
 
 Auto falls through to the next model when the provider refuses the preferred one
 (renamed or gone, rate-limited, out of allowance, or a transport failure). A

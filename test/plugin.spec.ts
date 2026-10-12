@@ -70,6 +70,10 @@ function stubContext(): { ctx: Context, registrations: Registration[], warnings:
         handle.replace = (next: string[]) => { record.replaced.push(next) }
         return handle
       },
+      // The roster `auto` enumerates. Empty in this stub: it mounts the plugin, it
+      // does not serve models, so Auto has nothing to chain to.
+      listProviders: () => [],
+      listModels: async () => [],
     },
   }
   return { ctx: ctx as unknown as Context, registrations, warnings, injections }

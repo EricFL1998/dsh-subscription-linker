@@ -83,12 +83,45 @@ function isCandidateFallbackWorthy(status: number): boolean {
   return status === 402 || status === 404 || status === 408 || status === 429 || status >= 500
 }
 
+/**
+ * The harness's own provider roster.
+ *
+ * `auto` spans everything the session can pick, not only the routes this plugin
+ * registered: the built-in DeepSeek providers and any provider the user added are
+ * models Auto is expected to fall back to. The runtime offers exactly the three
+ * facts that needs — which providers exist, what each one serves, and the call
+ * entry point that selects the owning adapter — so it is injected as a port rather
+ * than reached for directly.
+ */
+export interface AutoHost {
+  /** Every provider the harness serves, in picker order. */
+  providers(): readonly { id: string, name: string }[]
+  /** Models one provider currently offers. */
+  models(provider: string): Promise<readonly { id: string, name?: string }[]>
+  /** One model's context window, reasoning ladder and input kinds, when stated. */
+  resolve(provider: string, model: string): Promise<{
+    contextWindow?: number
+    reasoningEfforts?: readonly string[]
+    inputModalities?: readonly ModelModality[]
+  }>
+  /** Run one call, letting the harness select that provider's adapter. */
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+}
+
 /** Everything the `auto` route needs. */
 export interface AutoProviderOptions {
   /** Shared model preferences, where `auto`'s own order and switches live. */
   preferences: ModelPreferences
   /** Every other route, read per call so registration order stays free. */
   registry: SubscriptionRegistry
+  /**
+   * The harness's own roster, when the route is mounted in a running harness.
+   *
+   * Present, this is what `auto` enumerates — it already contains this plugin's
+   * routes as well, so enumerating both would list every model twice. Absent (a
+   * unit test with no runtime), the registry alone is used.
+   */
+  host?: AutoHost
   onWarn?: (message: string) => void
   /** Invoked when the list changed, so the picker re-queries. */
   onCatalogChanged?: () => void
@@ -168,21 +201,23 @@ export class AutoAdapter extends LlmAdapter {
     for (const [index, candidate] of chain.entries()) {
       const route = this.options.registry.get(candidate.provider)
       const next = chain[index + 1]
-      if (route === undefined) {
-        lastError = new LlmError(`Auto refers to the unknown provider ${candidate.provider}`, EMPTY_RESPONSE_CODE)
-        if (next === undefined) break
-        continue
-      }
       // A chain may advance only while nothing has been produced: once a chunk
       // has been yielded the turn belongs to that model, and a later failure is
       // reported rather than papered over by a second model's text.
       let produced = false
       try {
-        for await (const chunk of route.adapter.stream({
-          ...options,
-          provider: candidate.provider,
-          model: candidate.model,
-        })) {
+        // A route this plugin owns streams through its own adapter. Anything else
+        // — a built-in provider, a provider the user added — goes through the
+        // harness, which is the only thing that knows which adapter serves it.
+        const source = route !== undefined
+          ? route.adapter.stream({ ...options, provider: candidate.provider, model: candidate.model })
+          : this.options.host?.stream({ ...options, provider: candidate.provider, model: candidate.model })
+        if (source === undefined) {
+          lastError = new LlmError(`Auto refers to the unknown provider ${candidate.provider}`, EMPTY_RESPONSE_CODE)
+          if (next === undefined) break
+          continue
+        }
+        for await (const chunk of source) {
           produced = true
           yield chunk
         }
@@ -239,8 +274,44 @@ export class AutoAdapter extends LlmAdapter {
     return out
   }
 
-  /** Every model the other routes currently offer the picker. */
+  /**
+   * Every model the picker currently offers, from every provider.
+   *
+   * In a running harness that means the whole roster, which is where the built-in
+   * DeepSeek providers and any provider the user added come from. Without a host —
+   * a unit test — this plugin's own routes are the roster.
+   */
   private async candidates(): Promise<AutoCandidate[]> {
+    const host = this.options.host
+    if (host === undefined) return await this.registryCandidates()
+    const out: AutoCandidate[] = []
+    for (const entry of host.providers()) {
+      // Auto cannot chain to itself; that would be a loop, not a fallback.
+      if (entry.id === AUTO_PROVIDER_ID) continue
+      try {
+        for (const model of await host.models(entry.id)) {
+          const resolved = await host.resolve(entry.id, model.id)
+          out.push({
+            provider: entry.id,
+            model: model.id,
+            name: model.name ?? model.id,
+            contextWindow: resolved.contextWindow ?? AUTO_FALLBACK_CONTEXT_WINDOW,
+            ...resolved.reasoningEfforts === undefined || resolved.reasoningEfforts.length === 0
+              ? {}
+              : { reasoningEfforts: resolved.reasoningEfforts },
+            ...resolved.inputModalities === undefined ? {} : { inputModalities: resolved.inputModalities },
+          })
+        }
+      } catch (error: unknown) {
+        // One unreachable provider must not empty Auto: the others still stand in.
+        this.options.onWarn?.(`auto could not read ${entry.id}'s models (${errorChain(error)})`)
+      }
+    }
+    return out
+  }
+
+  /** The same list built from this plugin's own routes, for a host-less build. */
+  private async registryCandidates(): Promise<AutoCandidate[]> {
     const out: AutoCandidate[] = []
     for (const route of this.options.registry.all()) {
       if (route.id === AUTO_PROVIDER_ID) continue

@@ -199,6 +199,9 @@ function autoStatus(): ProviderStatus {
     credentialFile: '—',
     discovery: true,
     models: [
+      // Auto spans the whole harness roster, so a built-in provider's model sits in
+      // the same list as this plugin's own routes.
+      { id: 'deepseek/deepseek-v4', name: 'DeepSeek V4', description: 'deepseek · deepseek-v4', contextWindow: 131_072, visible: true, source: 'deepseek' },
       { id: 'kimi/kimi-for-coding', name: 'Kimi for Coding', description: 'kimi · kimi-for-coding', contextWindow: 1_048_576, visible: true, source: 'kimi' },
       { id: 'grok/grok-4.6', name: 'Grok 4.6', description: 'grok · grok-4.6', contextWindow: 256_000, visible: true, source: 'grok' },
       { id: 'antigravity/gemini-3-pro', name: 'Gemini 3 Pro', description: 'antigravity · gemini-3-pro', contextWindow: 1_048_576, visible: true, source: 'antigravity' },

@@ -513,6 +513,9 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    // Nothing to offer without a signed-in account: a model that cannot be called
+    // must not appear in the picker, and Auto must not try it.
+    if (await this.options.tokens.session() === undefined) return []
     await this.syncUserModels()
     const hidden = await this.hidden()
     return resolveCatalog(this.catalog(), [], hidden).entries.map((entry) => ({

@@ -267,3 +267,92 @@ describe('the auto provider', () => {
     assert.equal(warnings.length, 1)
   })
 })
+
+describe('auto across the whole harness roster', () => {
+  /**
+   * A host port standing in for `ctx.llm`.
+   *
+   * Its roster is what the harness serves: the built-in providers, whatever the
+   * user added, and this plugin's own routes — which is why Auto must read from
+   * here rather than from a registry that only knows the last of those.
+   */
+  function withHost(): {
+    route: ProviderRoute
+    adapter: AutoAdapter
+    preferences: ModelPreferences
+    runs: { provider: string, model: string }[]
+    warnings: string[]
+  } {
+    const runs: { provider: string, model: string }[] = []
+    const warnings: string[] = []
+    const preferences = new ModelPreferences(path.join(directory, `host-${String(Math.random()).slice(2)}.json`))
+    const route = createAutoProvider({
+      preferences,
+      registry: new SubscriptionRegistry([]),
+      host: {
+        providers: () => [
+          { id: AUTO_PROVIDER_ID, name: 'Auto' },
+          { id: 'deepseek', name: 'DeepSeek' },
+          { id: 'huanling', name: 'huanling' },
+          { id: 'offline', name: 'Offline' },
+        ],
+        models: async (provider) => {
+          if (provider === 'offline') throw new Error('unreachable')
+          return provider === 'deepseek'
+            ? [{ id: 'deepseek-v4', name: 'DeepSeek V4' }]
+            : [{ id: 'custom-1', name: 'Custom One' }]
+        },
+        resolve: async (_provider, model) => ({
+          contextWindow: 128_000,
+          ...model === 'deepseek-v4' ? { reasoningEfforts: ['low', 'high'] } : {},
+        }),
+        stream: (options) => {
+          runs.push({ provider: options.provider, model: options.model })
+          return (async function* (): AsyncIterable<StreamChunk> {
+            yield { type: 'text-delta', text: 'ok' } as StreamChunk
+          })()
+        },
+      },
+      onWarn: (message) => { warnings.push(message) },
+    })
+    return { route, adapter: route.adapter as AutoAdapter, preferences, runs, warnings }
+  }
+
+  test('the chain spans every provider in the roster, and never itself', async () => {
+    const { adapter } = withHost()
+    const keys = (await adapter.chain()).map((candidate) => autoKey(candidate.provider, candidate.model))
+    assert.deepEqual(keys, ['deepseek/deepseek-v4', 'huanling/custom-1'])
+    // A provider Auto cannot read is reported, not fatal.
+    assert.ok(!keys.some((key) => key.startsWith('auto/')))
+  })
+
+  test('a provider that cannot be read is warned about and skipped', async () => {
+    const { adapter, warnings } = withHost()
+    await adapter.chain()
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0] ?? '', /offline/)
+  })
+
+  test('host models keep their declared metadata', async () => {
+    const { adapter } = withHost()
+    const chain = await adapter.chain()
+    const deepseek = chain.find((candidate) => candidate.provider === 'deepseek')
+    assert.equal(deepseek?.contextWindow, 128_000)
+    assert.deepEqual(deepseek?.reasoningEfforts, ['low', 'high'])
+  })
+
+  test('a call for a provider this plugin does not own goes through the harness', async () => {
+    const { adapter, runs } = withHost()
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(call())) chunks.push(chunk)
+    assert.deepEqual(chunks.map((chunk) => chunk.type), ['text-delta'])
+    // Dispatched to the first candidate of the chain, by the harness.
+    assert.deepEqual(runs, [{ provider: 'deepseek', model: 'deepseek-v4' }])
+  })
+
+  test('the card lists the host providers rows too', async () => {
+    const { adapter } = withHost()
+    const ids = (await adapter.summaries()).map((model) => model.id)
+    assert.deepEqual(ids, ['deepseek/deepseek-v4', 'huanling/custom-1'])
+  })
+})
