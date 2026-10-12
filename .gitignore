@@ -20,6 +20,11 @@ packs/
 # Tarballs produced by `npm pack`, which the release flow creates and publishes.
 *.tgz
 
+# Scratch space for a capture or a diagnostic run against a live endpoint: tool
+# and schema dumps, probe output, one-off analysis scripts. Nothing here is part
+# of the plugin or of what it publishes.
+.tmp/
+
 # An npm config file, which is where `npm login` puts the registry token. It
 # belongs in the user's home directory, never in the repository.
 .npmrc
