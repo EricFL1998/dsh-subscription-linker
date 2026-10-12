@@ -58,7 +58,8 @@ function kimiStatus(overrides: Partial<ProviderStatus> = {}): ProviderStatus {
       account: 'kimi-user-1',
       plan: 'Kimi Code Pro',
       windows: [
-        { label: '5h', usedPercent: 34, resetsAt: Date.now() + 3 * 60 * 60 * 1000 },
+        // Under the hour, so the harness shows the minutes form the page uses.
+      { label: '5h', usedPercent: 34, resetsAt: Date.now() + 40 * 60 * 1000 },
         { label: 'weekly', usedPercent: 71, resetsAt: Date.now() + 4 * 24 * 60 * 60 * 1000 },
       ],
       fetchedAt: Date.now() - 40_000,

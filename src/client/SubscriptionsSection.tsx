@@ -96,6 +96,37 @@ function formatTime(at: number): string {
   }
 }
 
+/** How far ahead a reset is still stated as hours rather than a date. */
+const RESET_RELATIVE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * One allowance reset, in the form a reader acts on.
+ *
+ * How far off it is decides how it is said: minutes inside the hour, hours inside
+ * the day, and the date beyond that — "137 小时后" would be arithmetic rather than
+ * information, and a window that comes back in forty minutes is better described in
+ * minutes than as "1 小时后". Every route's windows go through here, so all of them
+ * read the same way.
+ *
+ * @param at - epoch milliseconds the window resets.
+ * @param t - translator, so the wording follows the page language.
+ * @returns the reset text.
+ */
+function formatReset(
+  at: number,
+  t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string,
+): string {
+  const remaining = at - Date.now()
+  if (remaining <= 0) return t('usageResetDue')
+  if (remaining >= RESET_RELATIVE_MS) return t('usageReset', { time: formatTime(at) })
+  // Rounded, and never below one: "0 分钟后重置" would read as a bug rather than as
+  // "any moment now".
+  if (remaining < 60 * 60 * 1000) {
+    return t('usageResetsInMinutes', { minutes: Math.max(1, Math.round(remaining / 60_000)) })
+  }
+  return t('usageResetsInHours', { hours: Math.max(1, Math.round(remaining / 3_600_000)) })
+}
+
 /** Compact token count for a context window. */
 function formatTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${String(Math.round(tokens / 100_000) / 10)}M`
@@ -328,7 +359,7 @@ function UsageBlock(props: {
                   {windowAmount(window)}
                 </span>
                 <span style={styles.modelMeta}>
-                  {window.resetsAt === undefined ? '' : t('usageReset', { time: formatTime(window.resetsAt) })}
+                  {window.resetsAt === undefined ? '' : formatReset(window.resetsAt, t)}
                 </span>
               </div>
               {window.usedPercent !== undefined && (

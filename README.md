@@ -151,6 +151,13 @@ back to the per-model `quotaInfo` of `fetchAvailableModels` (worst-spent model p
 family, classified by id, display name and tier, so an `Opus` row counts as
 Claude). A provider that states nothing says so instead of inventing a figure.
 
+A reset is stated by how far off it is, on every route: **minutes** within the hour
+(`40 分钟后重置`), **hours** within the day (`4 小时后重置`), and the date beyond that
+(`重置时间 2026/10/17 13:54`) — the count is what a reader acts on when deciding whether
+there is room left, and a date is what they need when it is a week away. Because the
+page re-reads the figures on a slow interval, the count follows along while it is
+open.
+
 **Manage** opens a dialog with per-account token refresh, the credential-file
 path, and the resolved endpoints.
 
@@ -171,7 +178,7 @@ The CLI forwards its arguments to pnpm, so a pinned version, a git URL and a loc
 path are all spelled the same way:
 
 ```sh
-dsh plugin --profile web add dsh-plugin-subscription-oauth@0.2.0
+dsh plugin --profile web add dsh-plugin-subscription-oauth@0.2.1
 dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
 dsh plugin --profile web add /path/to/dsh-plugin-subscription-oauth
 ```
