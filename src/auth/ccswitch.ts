@@ -36,6 +36,54 @@ function num(value: unknown): string | undefined {
 }
 
 /**
+ * Query the balance endpoint some OpenAI-compatible providers expose at `{base}/v1/usage`.
+ *
+ * huanling is one: it answers `GET {base}/v1/usage` with `{ remaining, unit, … }`, which is
+ * the figure cc-switch shows for it. This is the provider's own shape, not cc-switch's
+ * `balance_infos`, so it is read separately. The base has any trailing `/v1` stripped before
+ * the path is added, so both `https://api.huanling.icu` and `https://api.huanling.icu/v1`
+ * resolve to the same `{base}/v1/usage`.
+ *
+ * @param input - the provider's API key and base URL.
+ * @returns the balance, or undefined when the provider did not answer with one.
+ */
+export async function queryUsageBalance(input: {
+  apiKey: string
+  baseUrl: string
+  fetchFn?: FetchFn
+}): Promise<CcSwitchBalance | undefined> {
+  const fetchFn = input.fetchFn ?? proxiedFetch
+  const base = input.baseUrl.replace(/\/+$/, '').replace(/\/v1$/i, '')
+  const url = `${base}/v1/usage`
+  let response: Response
+  try {
+    response = await fetchFn(url, {
+      headers: { authorization: `Bearer ${input.apiKey}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch {
+    return undefined
+  }
+  if (!response.ok) return undefined
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    return undefined
+  }
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const record = payload as Record<string, unknown>
+  const total = num(record.remaining)
+  if (total === undefined) return undefined
+  const currency = typeof record.unit === 'string' && record.unit.trim() !== '' ? record.unit.trim() : 'USD'
+  return {
+    currency,
+    total,
+    available: record.isValid !== false && record.is_active !== false,
+  }
+}
+
+/**
  * Query one provider's balance the way cc-switch does.
  *
  * cc-switch reads a DeepSeek-compatible provider's balance with `GET <base>/user/balance`

@@ -46,7 +46,7 @@ export interface BalanceContext {
 import type { Context } from '@deepseek-ai/cordis'
 
 import { BAD_REQUEST, ProviderError } from '../errors.js'
-import { queryCcSwitchBalance } from './ccswitch.js'
+import { queryCcSwitchBalance, queryUsageBalance } from './ccswitch.js'
 import { readDeepSeekBalance } from './deepseek-balance.js'
 import type { DeepSeekAccountService } from './deepseek-balance.js'
 import { RPC_ENDPOINTS, RPC_PREFIX } from '../protocol.js'
@@ -277,7 +277,11 @@ async function runEndpoint(
       if (apiKey === undefined) return { diag }
       const baseUrl = balance?.baseUrls[provider] ?? 'https://api.deepseek.com'
       diag.baseUrl = baseUrl
-      const result = await queryCcSwitchBalance({ apiKey, baseUrl })
+      // A provider that answers the OpenAI-compatible `/v1/usage` (the shape cc-switch's
+      // custom template reads, `{ remaining, unit }`) is asked that first; one that
+      // answers the DeepSeek `balance_infos` shape is asked that as a fallback.
+      const result = await queryUsageBalance({ apiKey, baseUrl })
+        ?? await queryCcSwitchBalance({ apiKey, baseUrl })
       diag.queryResult = result === undefined ? 'undefined' : result
       return { balance: result, diag }
     }
