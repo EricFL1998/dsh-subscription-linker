@@ -1,3 +1,5 @@
+[English](README.md) · [简体中文](README.zh.md)
+
 # dsh-plugin-subscription-oauth
 
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/EricFL1998/dsh-subscription-oauth)
