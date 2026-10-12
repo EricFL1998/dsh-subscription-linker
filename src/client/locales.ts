@@ -97,6 +97,8 @@ export const en = {
   lastError: 'Last login attempt failed: {message}',
   loginFailed: 'Could not start the sign-in: {message}',
   actionFailed: 'Action failed: {message}',
+  usageChipTitle: '{provider} subscription usage',
+  usageChipFull: '{provider} allowance',
 } as const
 
 /** The Subscriptions namespace key union. */
@@ -193,4 +195,6 @@ export const zh = {
   lastError: '上次登录失败：{message}',
   loginFailed: '无法开始登录：{message}',
   actionFailed: '操作失败：{message}',
+  usageChipTitle: '{provider} 订阅用量',
+  usageChipFull: '{provider} 额度',
 } satisfies Record<SubscriptionsKey, string>

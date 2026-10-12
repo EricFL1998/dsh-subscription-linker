@@ -257,3 +257,122 @@ ${scope} .dsh-subscription-meter > span[data-exhausted="true"] {
   background: var(--dsw-alias-state-error-primary, #b42318);
 }
 `
+
+/**
+ * The composer usage chip's stylesheet.
+ *
+ * Separate from the page's, because the chip renders in the composer's own bar rather
+ * than inside either page container — the page stylesheet is scoped to those
+ * containers on purpose, so nothing here may leak into the shell.
+ *
+ * The chip inherits the bar's type and only draws a meter, so it sits beside the shell's
+ * own stats pills without looking like a second design. The trigger is a bare control:
+ * the host gives plugin markup no control classes, and a default `<button>` would
+ * otherwise read as a raised chip. Every token carries a fallback for hosts that do not
+ * define it.
+ */
+export const usageChipCss = `
+.dsh-subscription-usage-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  /* The bar is a centred flex row whose children are this slot's entries followed by the
+     shell's context meter, and a list slot renders its entries as bare children (no
+     wrapper). So the chip is itself a flex item: a higher order places it after the
+     context meter, and no auto margin is set, so it sits immediately beside it rather
+     than being pushed to the edge of the bar. */
+  order: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+}
+.dsh-subscription-usage-chip-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #8a8f98);
+  font: inherit;
+  cursor: pointer;
+}
+.dsh-subscription-usage-chip-trigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover, #ffffff14);
+}
+.dsh-subscription-usage-chip-trigger:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-focus, #4d6bfe);
+  outline-offset: 1px;
+}
+.dsh-subscription-usage-chip-label {
+  overflow: hidden;
+  max-width: 6ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-subscription-usage-chip-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.dsh-subscription-usage-chip-window {
+  opacity: 0.75;
+}
+.dsh-subscription-usage-chip-value {
+  color: var(--dsw-alias-label-primary, #e8e8e8);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-subscription-usage-chip-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 168px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-secondary, #ffffff1f);
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--dsw-alias-bg-layer-2, #26262a);
+  box-shadow: var(--dsw-elevation-prominent, 0 12px 32px #0007);
+  color: var(--dsw-alias-label-primary, #e8e8e8);
+  white-space: nowrap;
+}
+.dsh-subscription-usage-chip-full {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #8a8f98);
+}
+.dsh-subscription-usage-chip-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dsh-subscription-usage-chip-meterHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.dsh-subscription-usage-chip-detail {
+  color: var(--dsw-alias-label-secondary, #8a8f98);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-subscription-usage-chip-track {
+  display: block;
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3, #3a3a3a);
+  overflow: hidden;
+}
+.dsh-subscription-usage-chip-fill {
+  display: block;
+  height: 100%;
+  background: var(--dsw-alias-state-success-primary, #067647);
+}
+`

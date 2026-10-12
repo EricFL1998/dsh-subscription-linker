@@ -11,6 +11,8 @@ import { StrictMode } from 'react'
 
 import { SubscriptionsSection } from '../src/client/SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from '../src/client/SubscriptionsSection.js'
+import { UsageChip } from '../src/client/UsageChip.js'
+import type { UsageChipInjected } from '../src/client/UsageChip.js'
 import { zh } from '../src/client/locales.js'
 import type { SubscriptionsKey } from '../src/client/locales.js'
 import type { ProviderStatus, SubscriptionStatus } from '../src/protocol.js'
@@ -325,11 +327,61 @@ const call = (async (endpoint: string, payload?: unknown) => {
 const container = document.getElementById('root')
 if (container === null) throw new Error('preview root is missing')
 
-createRoot(container).render(
-  <StrictMode>
-    <SubscriptionsSection call={call} t={t} />
-  </StrictMode>,
-)
+// `?chip=<provider>` mounts the composer usage chip in a row that mimics the real bar:
+// the shell's pills, then the slot's entries, then the context meter — which is the
+// sibling order the shell renders. A report element records the measured positions so
+// the layout can be asserted rather than eyeballed.
+const chipProvider = params.get('chip')
+if (chipProvider !== null) {
+  createRoot(container).render(
+    <StrictMode>
+      <div
+        id="bar"
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, width: 860, maxWidth: '100%', paddingTop: 4 }}
+      >
+        <span style={{ fontSize: 12, color: '#8a8f98' }}>241 tok/s</span>
+        <span style={{ fontSize: 12, color: '#8a8f98' }}>缓存命中 96%</span>
+        <UsageChip
+          call={call}
+          t={t as unknown as UsageChipInjected['t']}
+          currentProvider={() => chipProvider}
+          isOwnProvider={() => true}
+        />
+        <span id="meter" style={{ fontSize: 12, color: '#8a8f98' }}>16%</span>
+      </div>
+      <pre id="report" />
+    </StrictMode>,
+  )
+  setTimeout(() => {
+    const chip = document.querySelector('.dsh-subscription-usage-chip')
+    const meter = document.getElementById('meter')
+    const bar = document.getElementById('bar')
+    const report = document.getElementById('report')
+    if (chip === null || meter === null || bar === null || report === null) return
+    const c = chip.getBoundingClientRect()
+    const m = meter.getBoundingClientRect()
+    const b = bar.getBoundingClientRect()
+    const trigger = chip.querySelector('.dsh-subscription-usage-chip-trigger')
+    report.textContent = JSON.stringify({
+      chipText: (trigger?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      chipLeft: Math.round(c.left),
+      meterLeft: Math.round(m.left),
+      meterRight: Math.round(m.right),
+      barLeft: Math.round(b.left),
+      barRight: Math.round(b.right),
+      chipRight: Math.round(c.right),
+      chipIsRightOfMeter: c.left >= m.right,
+      chipGapFromMeter: Math.round(c.left - m.right),
+      chipRightGap: Math.round(b.right - c.right),
+    })
+  }, 600)
+} else {
+  createRoot(container).render(
+    <StrictMode>
+      <SubscriptionsSection call={call} t={t} />
+    </StrictMode>,
+  )
+}
 
 // Drive the states a screenshot has to show. Each is a user action, so it is
 // replayed as a click on the real control.
