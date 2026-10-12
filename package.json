@@ -6,11 +6,11 @@
   "author": "EricFL1998",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/EricFL1998/dsh-subscription-linker.git"
+    "url": "git+https://github.com/EricFL1998/dsh-subscription-oauth.git"
   },
-  "homepage": "https://github.com/EricFL1998/dsh-subscription-linker#readme",
+  "homepage": "https://github.com/EricFL1998/dsh-subscription-oauth#readme",
   "bugs": {
-    "url": "https://github.com/EricFL1998/dsh-subscription-linker/issues"
+    "url": "https://github.com/EricFL1998/dsh-subscription-oauth/issues"
   },
   "engines": {
     "node": ">=20"

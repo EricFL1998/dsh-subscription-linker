@@ -1,9 +1,29 @@
 # dsh-plugin-subscription-oauth
 
-Use subscription accounts as LLM providers in
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API key.
-Sign in once per provider from **Settings → Subscriptions** (订阅), and that
-account's models join the session model picker.
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/EricFL1998/dsh-subscription-oauth)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
+**Use the AI subscriptions you already pay for as LLM providers in DeepSeek
+Harness — no API key.** Sign in once per provider from **Settings →
+Subscriptions** (订阅) and that account's models join the session model picker,
+with its plan quota shown next to the connection.
+
+```sh
+dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
+```
+
+The same package is published to npm as `dsh-plugin-subscription-oauth`, so
+`dsh plugin --profile web add dsh-plugin-subscription-oauth` installs it too; the
+git form above works without depending on a registry publish.
+
+| | |
+| --- | --- |
+| **Capability** | 模型与推理 / Model & inference — it registers LLM provider routes |
+| **Licence** | [MIT](LICENSE) |
+| **Built for** | DeepSeek Harness `0.2.0-rc.2` (`@deepseek-ai/dsh-llm`), Node ≥ 20 |
+| **Platforms** | Windows, macOS and Linux; nothing platform-specific beyond Node itself |
+| **Accounts** | your own subscriptions only — credentials stay on your machine |
+| **Network** | the providers' own hosts and the OAuth endpoints listed below; no telemetry, no third-party relay |
 
 | Route | Provider | Login | Wire |
 | --- | --- | --- | --- |
@@ -128,24 +148,24 @@ provider (Grok) instead shows a sign-in link and waits for the browser redirect.
 
 ## Install
 
-From npm:
-
 ```sh
-dsh plugin --profile desktop add dsh-plugin-subscription-oauth
+dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
 ```
 
-The CLI forwards its arguments to pnpm, so a version, a tag, a git URL and a local
-path are all spelled the same way. Restart `dsh web` (or the desktop app) afterwards
-so the new bundle loads.
+`web` is the profile that serves the Settings page; use `desktop` (or any other
+profile name) if that is the one you run.
 
-From a checkout:
+The CLI forwards its arguments to pnpm, so a registry version, a git URL and a local
+path are all spelled the same way:
 
 ```sh
-dsh plugin --profile desktop add /path/to/dsh-plugin-subscription-oauth
+dsh plugin --profile web add dsh-plugin-subscription-oauth@0.1.0   # once published to npm
+dsh plugin --profile web add /path/to/dsh-plugin-subscription-oauth
 ```
 
-A local directory is installed as a `link:`, so afterwards `npm run build` in the
-checkout is enough to publish a change; restart again to pick it up.
+Restart `dsh web` (or the desktop app) afterwards so the new bundle loads. A local
+directory is installed as a `link:`, so afterwards `npm run build` in the checkout
+is enough to publish a change; restart again to pick it up.
 
 The host packages (`@deepseek-ai/dsh-llm` and the rest) are **optional** peers: the
 harness provides them at runtime, so installing this plugin does not fetch a second
@@ -235,6 +255,12 @@ bare base or the full `.../responses` URL.
 
 ## How it works
 
+The package is a standard DeepSeek Harness plugin: `lib/index.js` exports
+`apply(ctx)`, which registers one `ctx.llm` adapter per route and mounts the
+Settings section through `ctx.slots`. `lib/client.js` is the browser half — the
+section itself, loaded by the harness bundle loader. Nothing runs outside the
+harness process, and uninstalling the bundle removes every route it added.
+
 **Login** is the RFC 8628 device authorization grant against
 `auth.kimi.com`. The plugin requests a device code, shows it, and polls the
 token endpoint with `authorization_pending` / `slow_down` / `access_denied` /
@@ -285,17 +311,53 @@ caller-supplied `temperature` is dropped rather than rejected upstream.
 
 ## Security notes
 
+### What it stores, and where
+
+| Path | Contents | Mode |
+| --- | --- | --- |
+| `~/.dsh/plugins/kimi-oauth/auth.json` | one section per provider: access token, refresh token, expiry, account id, plan | `0600`, written atomically |
+| `~/.dsh/plugins/kimi-oauth/preferences.json` | model visibility, your ordering, and Auto's chain — no secrets | `0600` |
+| `~/.dsh/plugins/kimi-oauth/kimi-device-id` | the stable device id Kimi's API expects | `0600` |
+
+The directory keeps the name this plugin had when it served Kimi Code alone: it
+holds **live logins**, so renaming it would sign everyone out. Nothing is stored
+outside `~/.dsh`, and nothing is uploaded anywhere except to the providers
+themselves.
+
+### What it talks to
+
+| Route | Hosts contacted | Why |
+| --- | --- | --- |
+| `kimi` | `auth.kimi.com`, `api.kimi.com` | device-flow sign-in, then the coding API |
+| `grok` | `auth.x.ai`, `api.x.ai`, `cli-chat-proxy.grok.com` | OIDC sign-in, the Responses API, the plan's credit figure |
+| `antigravity` | `accounts.google.com`, `oauth2.googleapis.com`, `cloudcode-pa.googleapis.com` | Google sign-in, the account's project, then Cloud Code Assist (including its quota accounting) |
+| `glm` | `bigmodel.cn`, `zcode.z.ai`, `open.bigmodel.cn` | browser sign-in brokered by ZCode, then the coding-plan API and its allowance |
+
+There is no analytics, no update ping and no relay through anyone else's server:
+every request goes to the host that owns the account. No request body, prompt or
+token is ever logged.
+
+### Boundaries worth knowing
+
 * The token file is written with mode `0600`; only the account id, email, host,
   and device id are ever shown in the UI — never a token.
-* The Kimi device flow performs no loopback listener, so nothing new is exposed
-  on this machine. Grok and Antigravity hold one loopback listener **only** while
-  a login attempt is pending, on `127.0.0.1:56121` and `127.0.0.1:51121`, and it
-  is closed as soon as the attempt settles or lapses.
+* The Kimi and GLM flows need no listener on this machine at all: Kimi polls, and
+  GLM's browser callback is completed server-side by the provider. Grok and
+  Antigravity hold one loopback listener **only** while a login attempt is pending,
+  on `127.0.0.1:56121` and `127.0.0.1:51121`, and it is closed as soon as the
+  attempt settles or lapses. A loopback destination is never proxied.
 * Outbound requests honour `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` and
-  `NO_PROXY`; a loopback destination is never proxied.
-* Signing in authorizes this machine for that account — the device code or the
-  provider's consent screen is the consent step, and it is never completed on
-  your behalf.
+  `NO_PROXY`.
+* Signing in authorizes this machine for that account — the provider's own consent
+  screen is the consent step, and it is never completed on your behalf.
+* A plugin cannot unregister another bundle's provider (`ctx.llm` has no unregister
+  API), so this plugin never hides anything you had before; see
+  [Hiding a built-in provider from the picker](#hiding-a-built-in-provider-from-the-picker)
+  if that is what you want.
+* **Known limits**: OpenAI-compatible API keys are not supported by design (this is
+  a subscription plugin); GLM's flow has no refresh grant, so a lapsed sign-in asks
+  you to sign in again rather than renewing silently; Antigravity ships no curated
+  model list and depends on its endpoint answering.
 
 ## Develop
 
