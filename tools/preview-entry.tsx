@@ -140,7 +140,7 @@ function antigravityStatus(): ProviderStatus {
         windows: [
           { label: 'gemini', usedPercent: 75, resetsAt: Date.now() + 6 * 60 * 60 * 1000 },
           { label: 'gemini_weekly', usedPercent: 41, resetsAt: Date.now() + 4 * 24 * 60 * 60 * 1000 },
-          { label: 'claude', usedPercent: 32, resetsAt: Date.now() + 6 * 60 * 60 * 1000 },
+          { label: 'claude', usedPercent: 0, resetsAt: Date.now() + 5 * 60 * 60 * 1000 },
           { label: 'claude_weekly', usedPercent: 18, resetsAt: Date.now() + 4 * 24 * 60 * 60 * 1000 },
         ],
         fetchedAt: Date.now() - 20_000,
@@ -368,18 +368,25 @@ if (chipProvider !== null) {
     const m = meter.getBoundingClientRect()
     const b = bar.getBoundingClientRect()
     const trigger = chip.querySelector('.dsh-subscription-usage-chip-trigger')
-    report.textContent = JSON.stringify({
-      chipText: (trigger?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      chipLeft: Math.round(c.left),
-      meterLeft: Math.round(m.left),
-      meterRight: Math.round(m.right),
-      barLeft: Math.round(b.left),
-      barRight: Math.round(b.right),
-      chipRight: Math.round(c.right),
-      chipIsRightOfMeter: c.left >= m.right,
-      chipGapFromMeter: Math.round(c.left - m.right),
-      chipRightGap: Math.round(b.right - c.right),
-    })
+    // Open the detail, then report both the compact line and the meters it draws, so an
+    // unspent window's track can be checked the same way as the settings page's.
+    if (trigger instanceof HTMLElement) trigger.click()
+    setTimeout(() => {
+      const tracks = [...document.querySelectorAll('.dsh-subscription-usage-chip-track')].map((track) => {
+        const style = getComputedStyle(track)
+        const fill = track.firstElementChild
+        return {
+          fillWidth: Math.round(fill === null ? 0 : Number.parseFloat(getComputedStyle(fill).width)),
+          trackPainted: style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.boxShadow !== 'none',
+        }
+      })
+      report.textContent = JSON.stringify({
+        chipText: (trigger?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        chipIsRightOfMeter: c.left >= m.right,
+        chipGapFromMeter: Math.round(c.left - m.right),
+        tracks,
+      })
+    }, 250)
   }, 600)
 } else {
   createRoot(container).render(
@@ -412,3 +419,28 @@ setTimeout(() => {
   }
   if (params.get('manage') === '1') clickByText('管理')
 }, 60)
+
+// `?meters=1` reports every usage meter the page drew, so "the empty one is missing" can
+// be checked against measurements rather than a picture. `painted` is whether anything
+// inside the meter actually covers pixels: a 0 % fill covers none, so the track itself has
+// to be visible.
+if (params.get('meters') === '1') {
+  setTimeout(() => {
+    const report = document.getElementById('report') ?? document.body.appendChild(document.createElement('pre'))
+    report.id = 'report'
+    const meters = [...document.querySelectorAll('.dsh-subscription-meter')].map((meter) => {
+      const track = getComputedStyle(meter)
+      const fill = meter.firstElementChild
+      const fillWidth = fill === null ? 0 : Number.parseFloat(getComputedStyle(fill).width)
+      const row = meter.previousElementSibling?.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+      return {
+        row,
+        trackBackground: track.backgroundColor,
+        trackShadow: track.boxShadow === 'none' ? 'none' : 'ring',
+        fillWidth: Math.round(fillWidth),
+        trackPainted: track.backgroundColor !== 'rgba(0, 0, 0, 0)' || track.boxShadow !== 'none',
+      }
+    })
+    report.textContent = JSON.stringify(meters, null, 1)
+  }, 700)
+}

@@ -245,7 +245,13 @@ ${scope} .dsh-subscription-disclosure:hover:not(:disabled) {
 ${scope} .dsh-subscription-meter {
   height: 6px;
   border-radius: 999px;
-  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2));
+  /* The track must stay visible when nothing is spent — a 0 % window otherwise reads as
+     "no meter at all", which is the opposite of "nothing used". The layer token falls
+     back to the card's own colour on a host that does not define it, so the neutral is
+     explicit and translucent, and the inset ring keeps the empty track visible on a
+     light theme as well as a dark one. */
+  background: #8a8f9826;
+  box-shadow: inset 0 0 0 1px #8a8f9833;
   overflow: hidden;
 }
 ${scope} .dsh-subscription-meter > span {
@@ -367,7 +373,10 @@ export const usageChipCss = `
   width: 100%;
   height: 5px;
   border-radius: 999px;
-  background: var(--dsw-alias-bg-layer-3, #3a3a3a);
+  /* As on the settings meter: an unspent window has to show its track, so the neutral and
+     its ring are explicit rather than a layer token that may match the panel. */
+  background: #8a8f9826;
+  box-shadow: inset 0 0 0 1px #8a8f9833;
   overflow: hidden;
 }
 .dsh-subscription-usage-chip-fill {
