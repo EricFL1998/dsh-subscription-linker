@@ -128,13 +128,38 @@ provider (Grok) instead shows a sign-in link and waits for the browser redirect.
 
 ## Install
 
+From npm:
+
+```sh
+dsh plugin --profile desktop add dsh-plugin-subscription-oauth
+```
+
+The CLI forwards its arguments to pnpm, so a version, a tag, a git URL and a local
+path are all spelled the same way. Restart `dsh web` (or the desktop app) afterwards
+so the new bundle loads.
+
+From a checkout:
+
 ```sh
 dsh plugin --profile desktop add /path/to/dsh-plugin-subscription-oauth
 ```
 
-Then restart `dsh web` (or the desktop app) so the new bundle loads. A local
-directory is installed as a `link:`, so afterwards `npm run build` in the
+A local directory is installed as a `link:`, so afterwards `npm run build` in the
 checkout is enough to publish a change; restart again to pick it up.
+
+The host packages (`@deepseek-ai/dsh-llm` and the rest) are **optional** peers: the
+harness provides them at runtime, so installing this plugin does not fetch a second
+copy of the host it is running inside.
+
+### Releasing (maintainers)
+
+`prepublishOnly` rebuilds `lib/` — the TypeScript output plus the browser bundle — so
+a published tarball can never carry a stale client:
+
+```sh
+npm version patch   # or minor/major
+npm publish
+```
 
 For a headless composition that only needs the model route (no Settings page):
 

@@ -16,3 +16,7 @@ refs-dsh-types/
 refs-opencodex/
 refs-subscriptions/
 packs/
+
+# Tarballs produced by `npm pack`, which the release flow creates and publishes.
+*.tgz
+
