@@ -39,9 +39,9 @@ export type SubscriptionsCall = <K extends RpcEndpoint>(
   payload: RpcMap[K]['payload'],
 ) => Promise<RpcMap[K]['value']>
 
-/** A caller for one manually added provider's cc-switch balance. */
+/** A caller for one non-subscription provider's cc-switch balance. */
 export interface CcSwitchBalanceCall {
-  (credentialRef: string): Promise<CcSwitchBalanceResult>
+  (provider: string): Promise<CcSwitchBalanceResult>
 }
 
 /**
@@ -112,18 +112,21 @@ export function createAccountBalanceCall(rpc: ConnectionHandle['rpc']): AccountB
  * Read a manually added provider's balance through the plugin's cc-switch endpoint.
  *
  * The caller names the credential reference the provider's profile uses (its
- * `apiKeyEnv`), and the host's credential service resolves it to the API key. The result
+ * Read a non-subscription provider's balance through the plugin's cc-switch endpoint.
+ *
+ * The caller names the provider; the server maps it to the credential reference the
+ * provider's profile names (`apiKeyEnv`) and resolves that to the API key. The result
  * is `undefined` when there is no key or the provider did not answer — never a wrong
  * figure.
  *
  * @param rpc - the browser connection's RPC caller.
- * @returns a narrow caller taking the credential reference.
+ * @returns a narrow caller taking the provider id.
  */
 export function createCcSwitchBalanceCall(rpc: ConnectionHandle['rpc']): CcSwitchBalanceCall {
-  return async function call(credentialRef: string) {
+  return async function call(provider: string) {
     let result: Awaited<ReturnType<ConnectionHandle['rpc']['call']>>
     try {
-      result = await rpc.call(CHANNEL, `${RPC_PREFIX}ccswitch-balance`, { credentialRef })
+      result = await rpc.call(CHANNEL, `${RPC_PREFIX}ccswitch-balance`, { provider })
     } catch (error: unknown) {
       throw new SubscriptionsRpcError(messageOf(error), 'RPC_TRANSPORT')
     }

@@ -86,20 +86,6 @@ const SECTION_ORDER = 92
 const CHIP_ORDER = 10
 
 /**
- * The credential reference a manually added provider's balance query uses, by provider
- * id.
- *
- * A manually added provider is not one this plugin serves, so the only way to read its
- * balance is cc-switch's query, which needs the provider's API key. The provider's
- * profile names that key by reference (`apiKeyEnv`), and the host's credential service
- * resolves the name; this map is the one place a provider id is tied to that name. A
- * provider with no entry gets no balance.
- */
-const CC_SWITCH_CREDENTIAL_REFS: Record<string, string> = {
-  huanling: 'HUANLING_API_KEY',
-}
-
-/**
  * Required services: `slots` carries the registration seat, `connection` the
  * RPC caller, and `locale` the copy dictionaries.
  */
@@ -143,7 +129,6 @@ export function apply(ctx: ClientContext): void {
       isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
       accountBalance: createAccountBalanceCall(connection.rpc),
       ccSwitchBalance: createCcSwitchBalanceCall(connection.rpc),
-      ccSwitchCredentialRef: (provider: string) => CC_SWITCH_CREDENTIAL_REFS[provider],
     }),
   }, UsageChip))
 }

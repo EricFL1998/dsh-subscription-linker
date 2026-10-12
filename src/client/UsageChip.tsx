@@ -77,25 +77,15 @@ export interface UsageChipInjected {
    */
   accountBalance: AccountBalanceCall
   /**
-   * A manually added provider's balance, by cc-switch's query.
+   * A non-subscription provider's balance, by cc-switch's query.
    *
-   * The caller names the credential reference the provider's profile uses (its
-   * `apiKeyEnv`); the host's credential service resolves it, and the node half asks
-   * cc-switch's balance endpoint. It resolves to `undefined` when there is no key or
-   * the provider did not answer.
+   * A provider that is not a subscription this plugin serves has no usage windows to
+   * meter, so the chip shows its balance instead. The caller names the provider; the
+   * server maps it to the credential reference the provider's profile names (`apiKeyEnv`),
+   * resolves that to the API key, and asks cc-switch's balance endpoint. It resolves to
+   * `undefined` when the provider has no balance source or did not answer.
    */
   ccSwitchBalance: CcSwitchBalanceCall
-  /**
-   * The credential reference a manually added provider's balance query uses, by provider
-   * id.
-   *
-   * A manually added provider is not one this plugin serves and has no account route, so
-   * the only way to read its balance is cc-switch's query, which needs the provider's API
-   * key. That key is named by the provider's profile (`apiKeyEnv`), and the host's
-   * credential service resolves the name; this map is the one place a provider id is tied
-   * to that name. A provider with no entry gets no balance.
-   */
-  ccSwitchCredentialRef: (provider: string) => string | undefined
 }
 
 /** One model choice, as the host records it. */
@@ -289,7 +279,7 @@ export function formatReset(at: number | undefined, now: number): string | undef
  * @param props - injected RPC caller, copy, and the session's provider reader.
  * @returns the chip, or null when there is nothing true to say.
  */
-export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, ccSwitchCredentialRef, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
+export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
   const [reading, setReading] = useState<ChipReading | undefined>(undefined)
   const [balance, setBalance] = useState<readonly ChipBalance[] | undefined>(undefined)
   const [ccBalance, setCcBalance] = useState<{ currency: string, total: string } | undefined>(undefined)
@@ -303,30 +293,25 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
   // with the new provider instead of waiting for the next unrelated render.
   const selected = useProjection('modelSelection', (value) => providerOf(value as ModelSelectionProjection))
 
-  // The DeepSeek account is not one of this plugin's routes, but the host owns its grant
-  // and the balance endpoint, so the chip shows its balance rather than staying silent.
-  // An own route takes the balance read over nothing.
+  // A non-subscription provider has no usage windows to meter, so the chip shows its
+  // balance instead, read by cc-switch's query. The host's account (deepseek-account)
+  // has its own balance source and takes that over cc-switch; a subscription this plugin
+  // serves keeps its usage meter.
   const isDeepSeek = selected === 'deepseek-account'
+  const isBalanceProvider = selected !== undefined && !isOwnProvider(selected) && !isDeepSeek
 
-  // A manually added provider reads its balance by cc-switch's query, which needs the
-  // provider's API key. The provider's profile names that key by reference, and this map
-  // is the one place a provider id is tied to the reference; a provider with no entry,
-  // or one whose key does not resolve, gets no balance.
-  const ccRef = selected === undefined || isOwnProvider(selected) || isDeepSeek
-    ? undefined
-    : ccSwitchCredentialRef(selected)
-
-  // Read a manually added provider's balance while it is in force, on the same cadence as
-  // the other reads. It resolves to undefined when there is no key or the provider did
-  // not answer, which leaves the chip silent.
+  // Read a non-subscription provider's balance while it is in force, on the same cadence
+  // as the other reads. It resolves to undefined when the provider has no balance source
+  // or did not answer, which leaves the chip silent.
   useEffect(() => {
-    if (ccRef === undefined) {
+    if (!isBalanceProvider || selected === undefined) {
       setCcBalance(undefined)
       return
     }
     let live = true
+    const target = selected
     const refresh = (): void => {
-      void ccSwitchBalance(ccRef)
+      void ccSwitchBalance(target)
         .then((value) => { if (live) setCcBalance(value === undefined ? undefined : { currency: value.currency, total: value.total }) })
         .catch(() => { /* a failed balance read stays silent */ })
     }
@@ -336,7 +321,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
       live = false
       clearInterval(timer)
     }
-  }, [ccRef, ccSwitchBalance])
+  }, [isBalanceProvider, selected, ccSwitchBalance])
 
   const load = useCallback(async (target: string): Promise<ChipReading | undefined> => {
     try {
@@ -406,10 +391,10 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     return () => { document.removeEventListener('click', close) }
   }, [open])
 
-  // A manually added provider reads as money too, through cc-switch's query. It shows
-  // the one currency's total the provider answered with, nothing when there is no usable
+  // A non-subscription provider reads as money, through cc-switch's query. It shows the
+  // one currency's total the provider answered with, nothing when there is no usable
   // balance.
-  if (ccRef !== undefined) {
+  if (isBalanceProvider) {
     if (ccBalance === undefined) return null
     const short = shortLabel(selected ?? '', selected ?? '')
     return (

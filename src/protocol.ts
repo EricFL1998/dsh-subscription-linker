@@ -340,8 +340,8 @@ export type BalanceResult =
 
 /** Payload of `ccswitch-balance`. */
 export interface CcSwitchBalanceRequest {
-  /** The credential reference the provider's profile names (its apiKeyEnv). */
-  credentialRef: string
+  /** The provider whose balance to read; the server maps it to its credential reference. */
+  provider: string
 }
 
 /**

@@ -77,6 +77,18 @@ export interface Config {
    * the other routes. Defaults to true.
    */
   auto?: boolean
+  /**
+   * The credential reference a non-subscription provider's balance query uses, by
+   * provider id.
+   *
+   * A provider that is not a subscription this plugin serves has no usage windows to
+   * meter, so the chip shows its balance instead — read by cc-switch's query, which needs
+   * the provider's API key. The provider's profile names that key by reference
+   * (`apiKeyEnv`), and the host's credential service resolves the name; this map is the
+   * one place a provider id is tied to that reference. A provider with no entry, or
+   * whose key does not resolve, gets no balance and the chip stays silent.
+   */
+  balanceCredentialRefs?: Record<string, string>
 }
 
 /** Configuration schema, with the config file's own defaults applied. */
@@ -241,7 +253,29 @@ export function apply(ctx: Context, config: Config = {}): void {
     handles.set(route.id, handle)
     ctx.effect(() => () => handle(), `${name}: ${route.id} provider route`)
   }
-  registerSubscriptionRpc(ctx, registry)
+  // A non-subscription provider's balance is read by cc-switch's query, which needs the
+  // provider's API key. The provider's profile names that key by reference (`apiKeyEnv`),
+  // and the configured map ties a provider id to that reference; the host's credential
+  // service resolves it. The map lives in server config because that is where the rest
+  // of the plugin's wiring is, and the client learns a provider's balance by id, never
+  // by its credential reference.
+  const credentialRefs = config.balanceCredentialRefs ?? {}
+  const balanceContext = Object.keys(credentialRefs).length === 0
+    ? undefined
+    : {
+        credentialRefs,
+        resolveCredential: async (ref: string): Promise<string | undefined> => {
+          try {
+            const credentials = ctx.get('credentials') as
+              | { resolve?: (r: string) => Promise<{ value: string } | undefined> }
+              | undefined
+            return (await credentials?.resolve?.(ref))?.value
+          } catch {
+            return undefined
+          }
+        },
+      }
+  registerSubscriptionRpc(ctx, registry, balanceContext)
 
   // Warm each route's live catalog for an install that is already signed in.
   for (const id of registry.ids()) {
