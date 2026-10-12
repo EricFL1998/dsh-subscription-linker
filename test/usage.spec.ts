@@ -18,6 +18,49 @@ function tierToken(tier: number): string {
 }
 
 describe('readKimiUsage', () => {
+  test('reads both windows and their resets from the usages field', async () => {
+    // Trimmed from a live `/coding/v1/usages` body: the reset lives in
+    // `usages.<window>.reset_time`, which the parser originally did not look at, so
+    // the card showed its windows with no reset at all.
+    const fetchFn: typeof fetch = async () => jsonResponse({
+      usage: { limit: '100', used: '100', resetTime: '2026-10-12T08:52:38.264008Z' },
+      limits: [{
+        window: { duration: 300, timeUnit: 'TIME_UNIT_MINUTE' },
+        detail: { limit: '100', remaining: '100', resetTime: '2026-10-12T09:52:38.264008Z' },
+      }],
+      usages: {
+        limit_5h: { used_ratio: 0, reset_time: '2026-10-12T09:52:37Z' },
+        limit_7d: { used_ratio: 1, reset_time: '2026-10-12T08:52:37Z' },
+      },
+    })
+    const usage = await readKimiUsage({ apiBase: 'https://api.kimi.com/coding/v1', accessToken: 'token', fetchFn })
+    assert.deepEqual(usage?.windows.map((window) => window.label), ['5h', 'weekly'])
+    // Every window must carry its reset: that is what the card renders.
+    for (const window of usage?.windows ?? []) {
+      assert.equal(typeof window.resetsAt, 'number', `${window.label} has no reset`)
+    }
+    // The 5h row states its own `resetTime` in `limits[].detail`, which is the more
+    // specific source and wins; the weekly row is the top-level `usage` row, whose
+    // own `resetTime` likewise wins over the `usages` restatement.
+    assert.equal(usage?.windows[0]?.resetsAt, Date.parse('2026-10-12T09:52:38.264008Z'))
+    assert.equal(usage?.windows[1]?.resetsAt, Date.parse('2026-10-12T08:52:38.264008Z'))
+  })
+
+  test('a window with only a usages reset still reports it', async () => {
+    // The shape that regressed: no `limits[]` at all, so `usages.*.reset_time` is
+    // the only reset the payload states.
+    const fetchFn: typeof fetch = async () => jsonResponse({
+      usages: {
+        limit_5h: { used_ratio: 0.25, reset_time: '2026-10-12T09:52:37Z' },
+        limit_7d: { used_ratio: 0.5, reset_time: '2026-10-19T08:52:37Z' },
+      },
+    })
+    const usage = await readKimiUsage({ apiBase: 'https://api.kimi.com/coding/v1', accessToken: 'token', fetchFn })
+    assert.deepEqual(usage?.windows.map((window) => window.label), ['5h', 'weekly'])
+    assert.equal(usage?.windows[0]?.resetsAt, Date.parse('2026-10-12T09:52:37Z'))
+    assert.equal(usage?.windows[1]?.resetsAt, Date.parse('2026-10-19T08:52:37Z'))
+  })
+
   test('reads the weekly row off the top-level usage field', async () => {
     const fetchFn: typeof fetch = async (input, init) => {
       assert.match(String(input), /\/coding\/v1\/usages$/)

@@ -68,9 +68,40 @@ function toInstant(value: unknown): number | undefined {
   return numeric < 1e12 ? numeric * 1000 : numeric
 }
 
-/** The first present reset instant among a row's usual field names. */
+/**
+ * Read one `usages.<key>` row.
+ *
+ * Kimi states these as a spent fraction (`used_ratio`, 0–1) plus `reset_time`,
+ * rather than the `limit`/`used` pair the other rows use, so the percentage is the
+ * ratio itself.
+ *
+ * @param usages - the payload's `usages` object.
+ * @param key - `limit_5h` or `limit_7d`.
+ * @returns the row, or undefined when it states no figure.
+ */
+function readUsagesRow(usages: unknown, key: string): UsageRow | undefined {
+  if (!isRecord(usages)) return undefined
+  const row = usages[key]
+  if (!isRecord(row)) return undefined
+  const ratio = toNumber(row.used_ratio)
+  if (ratio === undefined) return undefined
+  const resetsAt = resetInstant(row)
+  return {
+    usedPercent: Math.max(0, Math.min(100, ratio * 100)),
+    ...resetsAt === undefined ? {} : { resetsAt },
+  }
+}
+
+/**
+ * The first present reset instant among a row's usual field names.
+ *
+ * `reset_time` is in the list because that is what Kimi's own `/usages` body uses —
+ * `usages.limit_5h.reset_time` — and omitting it was why the Kimi card showed its
+ * windows without any reset at all. The other spellings cover the shapes the other
+ * routes and the earlier payloads use.
+ */
 function resetInstant(row: Record<string, unknown>): number | undefined {
-  for (const key of ['resetsAt', 'resets_at', 'resetAt', 'reset_at', 'end', 'endsAt', 'expiresAt']) {
+  for (const key of ['resetsAt', 'resets_at', 'resetAt', 'reset_at', 'resetTime', 'reset_time', 'end', 'endsAt', 'expiresAt']) {
     const instant = toInstant(row[key])
     if (instant !== undefined) return instant
   }
@@ -158,8 +189,8 @@ function unwrapKimiUsage(value: unknown): Record<string, unknown> | undefined {
   const nested = value.data
   if (!isRecord(nested)) return value
   const usable = (field: unknown): boolean => field !== undefined && field !== null
-  const outer = usable(value.usage) || usable(value.limits) || usable(value.totalQuota)
-  const inner = usable(nested.usage) || usable(nested.limits) || usable(nested.totalQuota)
+  const outer = usable(value.usage) || usable(value.limits) || usable(value.totalQuota) || usable(value.usages)
+  const inner = usable(nested.usage) || usable(nested.limits) || usable(nested.totalQuota) || usable(nested.usages)
   return !outer && inner ? nested : value
 }
 
@@ -243,6 +274,17 @@ export async function readKimiUsage(input: {
   const windows: UsageWindow[] = []
   if (fiveHour !== undefined) windows.push(toWindow('5h', fiveHour))
   if (weekly !== undefined) windows.push(toWindow('weekly', weekly))
+  // Kimi's own `/usages` body states the two metered windows as
+  // `usages.limit_5h` / `usages.limit_7d` with `used_ratio` and `reset_time`. Those
+  // are read last so a `limits[]` row, when present, keeps its more specific
+  // figures; this is the fallback that stops a payload from rendering as two
+  // windows with no reset at all.
+  if (windows.length === 0) {
+    for (const [key, label] of [['limit_5h', '5h'], ['limit_7d', 'weekly']] as const) {
+      const row = readUsagesRow(body.usages, key)
+      if (row !== undefined) windows.push(toWindow(label, row))
+    }
+  }
   if (windows.length === 0) return undefined
   const plan = typeof body.plan === 'string' && body.plan.length > 0 ? body.plan : undefined
   return { windows, ...plan === undefined ? {} : { plan } }
