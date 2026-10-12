@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 
 import type { SubscriptionsCall } from './subscriptions-rpc.js'
 import { usageChipCss } from './styles.js'
@@ -65,16 +66,37 @@ export interface UsageChipInjected {
   call: SubscriptionsCall
   /** Copy for the active locale. */
   t: (key: 'usageChipTitle' | 'usageChipFull', values?: Record<string, string | number>) => string
-  /**
-   * The provider serving this session, or undefined when the shell reports none.
-   *
-   * A function rather than a value: the selection lives in a store the shell owns, and
-   * the chip asks for it on each render instead of subscribing to a store it does not
-   * own.
-   */
-  currentProvider: () => string | undefined
   /** Whether the provider is one this plugin serves. */
   isOwnProvider: (provider: string) => boolean
+}
+
+/** One model choice, as the host records it. */
+export interface ModelSelection {
+  /** Provider route key. */
+  readonly provider: string
+  /** Model id. */
+  readonly model: string
+  /** Reasoning effort, when one was chosen. */
+  readonly reasoningEffort?: string
+}
+
+/**
+ * The session's model-selection projection, as the host wires it.
+ *
+ * `next` is a selection the user has made but not yet used; `lastUsed` is the one a
+ * request actually ran with. Reading `next` first is what makes the chip follow the
+ * picker immediately rather than only after the next message.
+ */
+export interface ModelSelectionProjection {
+  /** The last selection a request ran with. */
+  readonly lastUsed: ModelSelection | null
+  /** The selection in force now. */
+  readonly next: ModelSelection | null
+}
+
+/** The session's provider, from its model-selection projection. */
+export function providerOf(projection: ModelSelectionProjection | null | undefined): string | undefined {
+  return (projection?.next ?? projection?.lastUsed)?.provider
 }
 
 /** What one route's allowance reduces to for a single line. */
@@ -193,7 +215,7 @@ export function formatReset(at: number | undefined, now: number): string | undef
  * @param props - injected RPC caller, copy, and the session's provider reader.
  * @returns the chip, or null when there is nothing true to say.
  */
-export function UsageChip({ call, t, currentProvider, isOwnProvider }: UsageChipInjected): ReactNode {
+export function UsageChip({ call, t, isOwnProvider, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
   const [reading, setReading] = useState<ChipReading | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
   const [open, setOpen] = useState(false)
@@ -201,7 +223,9 @@ export function UsageChip({ call, t, currentProvider, isOwnProvider }: UsageChip
   // reading up rather than blanking the bar.
   const lastOwn = useRef<string | undefined>(undefined)
 
-  const selected = currentProvider()
+  // A projection read, so the chip follows the picker: changing the model re-renders it
+  // with the new provider instead of waiting for the next unrelated render.
+  const selected = useProjection('modelSelection', (value) => providerOf(value as ModelSelectionProjection))
 
   const load = useCallback(async (target: string): Promise<ChipReading | undefined> => {
     try {

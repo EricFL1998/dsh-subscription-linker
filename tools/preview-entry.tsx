@@ -344,8 +344,14 @@ if (chipProvider !== null) {
         <UsageChip
           call={call}
           t={t as unknown as UsageChipInjected['t']}
-          currentProvider={() => chipProvider}
           isOwnProvider={() => true}
+          // Stands in for the session standard kit's projection reader, answering the one
+          // key the chip reads.
+          useProjection={(key, selector) => selector(
+            key === 'modelSelection'
+              ? { next: { provider: chipProvider, model: 'demo' }, lastUsed: null }
+              : undefined,
+          )}
         />
         <span id="meter" style={{ fontSize: 12, color: '#8a8f98' }}>16%</span>
       </div>

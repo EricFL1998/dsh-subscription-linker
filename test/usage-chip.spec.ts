@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { formatReset, pickWindow, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
+import { formatReset, pickWindow, providerOf, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
 import type { ProviderUsage, UsageWindow } from '../src/protocol.js'
 
 /** One account's usage with the given windows. */
@@ -23,6 +23,29 @@ function usage(windows: readonly UsageWindow[], plan?: string): ProviderUsage {
     ...plan === undefined ? {} : { plan },
   }
 }
+
+describe('providerOf', () => {
+  test('prefers the selection in force over the last one used', () => {
+    // `next` is what the picker shows now; reading it first is what makes the chip
+    // follow a model change immediately instead of after the next message.
+    assert.equal(providerOf({
+      next: { provider: 'grok', model: 'grok-4.7' },
+      lastUsed: { provider: 'kimi', model: 'kimi-for-coding' },
+    }), 'grok')
+  })
+
+  test('falls back to the last used selection', () => {
+    assert.equal(providerOf({
+      next: null,
+      lastUsed: { provider: 'kimi', model: 'kimi-for-coding' },
+    }), 'kimi')
+  })
+
+  test('states nothing before any selection exists', () => {
+    assert.equal(providerOf({ next: null, lastUsed: null }), undefined)
+    assert.equal(providerOf(undefined), undefined)
+  })
+})
 
 describe('shortLabel', () => {
   test('abbreviates the routes this plugin serves', () => {

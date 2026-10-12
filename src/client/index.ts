@@ -47,6 +47,19 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      */
     'conversation.composer.dock': { kind: 'list', scope: 'session' }
   }
+
+  /**
+   * The session standard kit, of which this plugin reads one member.
+   *
+   * `ui-session` merges the session identity and the projection reader into every
+   * session-scoped component's props, and it ships no declarations a plugin can see, so
+   * the member is declared here. It reads one session projection, optionally narrowed
+   * by a selector, and re-renders the component when that projection changes — which is
+   * what lets the usage chip follow the model picker.
+   */
+  interface SessionStandardProps {
+    useProjection<T>(key: string, selector: (value: unknown) => T): T
+  }
 }
 
 /**
@@ -70,29 +83,6 @@ const SECTION_ORDER = 92
  * chip follows them rather than displacing them.
  */
 const CHIP_ORDER = 10
-
-/**
- * Read the provider a session has selected, from the shell's model-selection service.
- *
- * The service key is `modelDirectories`, and `directoryFor(sessionId).store` holds the
- * selection under `current`. This is read per render rather than subscribed to, because
- * the value lives in a store this plugin does not own.
- *
- * @param ctx - client root context.
- * @param sessionId - the session the slot is being rendered for.
- * @returns the selected provider id, or undefined when the host cannot report one.
- */
-function selectedProvider(ctx: ClientContext, sessionId: string): string | undefined {
-  try {
-    const directories = ctx.get('modelDirectories') as unknown as {
-      directoryFor?: (id: string) => { store?: { getSnapshot?: () => { current?: { provider?: string } | null } } }
-    } | undefined
-    return directories?.directoryFor?.(sessionId).store?.getSnapshot?.().current?.provider
-  } catch {
-    // A host without the model-selection service simply gets no chip.
-    return undefined
-  }
-}
 
 /**
  * Required services: `slots` carries the registration seat, `connection` the
@@ -126,16 +116,15 @@ export function apply(ctx: ClientContext): void {
 
   // The composer's bottom bar is a session-scoped list the shell owns; its own stats
   // pills sit at order 0. This chip rides beside them and shows the allowance of the
-  // provider the session is using. The scope hands `inject` the session id, so the chip
-  // reads the selection of the conversation it is actually rendered in.
+  // provider the session is using. The scope hands `inject` the session id, but the chip
+  // reads the selection from its own projection prop, so nothing here needs it.
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
     id: 'subscription-usage',
     order: CHIP_ORDER,
-    inject: (sessionId: string): UsageChipInjected => ({
+    inject: (): UsageChipInjected => ({
       call,
       t: t as unknown as UsageChipInjected['t'],
-      currentProvider: () => selectedProvider(ctx, sessionId),
       isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
     }),
   }, UsageChip))
