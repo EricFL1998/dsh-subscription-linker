@@ -18,6 +18,7 @@ import type {
   LlmProviderInfo,
   LlmResolvedModelInfo,
   StreamChunk,
+  ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import {
@@ -43,7 +44,7 @@ import { streamProviderResponses } from './responses-stream.js'
 import type { CatalogEntry } from './catalog.js'
 import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
-import { moonshotToolParameters } from '../translate/moonshot-schema.js'
+import { prepareMoonshotTool } from '../translate/moonshot-schema.js'
 import type { ImageResolver } from '../translate/responses.js'
 
 /** One catalog entry exposed as a selectable model. */
@@ -232,8 +233,31 @@ export class KimiAdapter extends LlmAdapter {
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
 
+  /** Tools already reported as flattened, so each is stated once. */
+  private readonly flattenedTools = new Set<string>()
+
   constructor(private readonly options: KimiAdapterOptions) {
     super()
+  }
+
+  /**
+   * Tool schemas in the shape Moonshot accepts: no `$ref`, and under its size
+   * ceiling. A declaration too large to send keeps its arguments, and that is
+   * reported once per tool rather than on every turn.
+   */
+  private moonshotTools(tools: readonly ToolSchema[]): ToolSchema[] {
+    return tools.map((tool) => {
+      const prepared = prepareMoonshotTool(tool.parameters)
+      if (prepared.preparedAs !== 'as-declared' && !this.flattenedTools.has(tool.name)) {
+        this.flattenedTools.add(tool.name)
+        this.options.onWarn?.(prepared.preparedAs === 'flattened'
+          ? `kimi: ${tool.name} declares an argument schema larger than the endpoint accepts; `
+            + 'its arguments are described without their nested structure'
+          : `kimi: ${tool.name} declares an argument schema larger than the endpoint accepts; `
+            + 'it is offered as an unrestricted object')
+      }
+      return { ...tool, parameters: prepared.parameters }
+    })
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -431,7 +455,11 @@ export class KimiAdapter extends LlmAdapter {
       input: resolved.input,
       ...options.tools === undefined || options.tools.length === 0
         ? {}
-        : { tools: toResponsesTools(options.tools, moonshotToolParameters), tool_choice: 'auto', parallel_tool_calls: true },
+        : {
+            tools: toResponsesTools(this.moonshotTools(options.tools)),
+            tool_choice: 'auto',
+            parallel_tool_calls: true,
+          },
       ...options.maxTokens === undefined ? {} : { max_output_tokens: options.maxTokens },
       ...options.reasoningEffort === undefined
         ? {}

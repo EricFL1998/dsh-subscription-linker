@@ -173,9 +173,9 @@ describe('KimiAdapter requests', () => {
   })
 
   test('prepares a tool schema Moonshot refuses as declared', async () => {
-    // Moonshot re-expands a `$ref` carrying sibling keywords instead of
-    // intersecting it, and refuses the request as infinite recursion. The
-    // hypothesis is that a `$ref` without siblings is fine.
+    // Moonshot's reader walks no `$ref`: it stopped at `properties.actions`
+    // (a reference carrying a `description` sibling) and, once that node was
+    // inlined, one level deeper at `properties.actions.items`.
     let seenBody: Record<string, unknown> = {}
     const fetchFn: typeof fetch = async (_input, init) => {
       seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -190,7 +190,10 @@ describe('KimiAdapter requests', () => {
           properties: {
             actions: { $ref: '#/$defs/__schema12', description: 'Required sequence of explicit browser actions.' },
           },
-          $defs: { __schema12: { minItems: 1, type: 'array', items: { type: 'object' } } },
+          $defs: {
+            __schema12: { minItems: 1, type: 'array', items: { $ref: '#/$defs/__schema13' } },
+            __schema13: { type: 'object' },
+          },
         },
       }],
     })))
@@ -206,8 +209,41 @@ describe('KimiAdapter requests', () => {
           description: 'Required sequence of explicit browser actions.',
         },
       },
-      $defs: { __schema12: { minItems: 1, type: 'array', items: { type: 'object' } } },
     })
+  })
+
+  test('flattens a tool the endpoint cannot take whole, and says so once', async () => {
+    // The endpoint refuses an expanded schema over its ceiling, and one refusal
+    // fails the whole request, so the oversized tool keeps only its arguments.
+    const warnings: string[] = []
+    let seenBody: Record<string, unknown> = {}
+    const fetchFn: typeof fetch = async (_input, init) => {
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([{ type: 'response.completed', response: {} }])
+    }
+    const adapter = new KimiAdapter(options({ fetchFn, onWarn: (message) => warnings.push(message) }))
+    const tools = [{
+      name: 'compare_web_captures',
+      description: 'Compare two captures',
+      parameters: {
+        type: 'object',
+        properties: Object.fromEntries(
+          Array.from({ length: 800 }, (_, index) => [`field_${index}`, { type: 'string', description: 'x'.repeat(200) }]),
+        ),
+        required: ['field_0'],
+      },
+    }]
+
+    await collect(adapter.stream(request({ tools })))
+    await collect(adapter.stream(request({ tools })))
+
+    const sent = (seenBody.tools as { parameters: Record<string, unknown> }[])[0]?.parameters as Record<string, unknown>
+    assert.equal(Object.keys(sent.properties as object).length, 800)
+    assert.deepEqual((sent.properties as Record<string, unknown>).field_0, { type: 'string' })
+    assert.deepEqual(sent.required, ['field_0'])
+    assert.ok(Buffer.byteLength(JSON.stringify(sent)) <= 64 * 1024, 'what is sent fits the endpoint')
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0] ?? '', /compare_web_captures/)
   })
 
   test('passes a max output cap through when the caller sets one', async () => {
