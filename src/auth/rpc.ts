@@ -17,6 +17,8 @@ export type CredentialResolver = (ref: string) => Promise<string | undefined>
 export interface BalanceContext {
   /** The credential reference each provider id's balance query uses. */
   readonly credentialRefs: Readonly<Record<string, string>>
+  /** The base URL each provider id's balance query reads, when it is not DeepSeek's own. */
+  readonly baseUrls: Readonly<Record<string, string>>
   /** Resolve one credential reference to its key. */
   readonly resolveCredential?: CredentialResolver
   /**
@@ -253,17 +255,31 @@ async function runEndpoint(
       return await readDeepSeekBalance(balance?.resolveDeepSeekAccount?.(), client)
     }
     case 'ccswitch-balance': {
-      // A non-subscription provider's balance, by cc-switch's query. The caller names
-      // the provider; the configured map turns that into the credential reference the
-      // provider's profile uses, and the host's credential service resolves it. No
-      // entry, no key, or a key the provider does not answer for means no balance —
-      // never a fabricated zero.
+      // A non-subscription provider's balance, by cc-switch's query against the provider's
+      // own base URL. The caller names the provider; the configured map turns that into
+      // the credential reference the provider's profile uses and the base URL that profile
+      // connects to, and the host's credential service resolves the reference. No entry,
+      // no key, or a key the provider does not answer for means no balance — never a
+      // fabricated zero.
       const provider = requiredProvider(payload, endpoint)
       const credentialRef = balance?.credentialRefs[provider]
-      if (credentialRef === undefined || balance?.resolveCredential === undefined) return undefined
+      // TEMP diagnostics: the cc-switch balance is silent for huanling and the node half's
+      // stdout is unreachable in the desktop shell, so the read's outcome is returned to
+      // the browser, where DevTools can show it.
+      const diag: Record<string, unknown> = { provider, credentialRef }
+      if (credentialRef === undefined || balance?.resolveCredential === undefined) {
+        diag.stage = credentialRef === undefined ? 'no-credential-ref' : 'no-resolver'
+        return { diag }
+      }
       const apiKey = await balance.resolveCredential(credentialRef)
-      if (apiKey === undefined) return undefined
-      return await queryCcSwitchBalance({ apiKey })
+      diag.keyResolved = apiKey !== undefined
+      diag.keyPrefix = apiKey === undefined ? undefined : `${apiKey.slice(0, 4)}…(${apiKey.length})`
+      if (apiKey === undefined) return { diag }
+      const baseUrl = balance?.baseUrls[provider] ?? 'https://api.deepseek.com'
+      diag.baseUrl = baseUrl
+      const result = await queryCcSwitchBalance({ apiKey, baseUrl })
+      diag.queryResult = result === undefined ? 'undefined' : result
+      return { balance: result, diag }
     }
     case 'reload':
       return registry.reload()

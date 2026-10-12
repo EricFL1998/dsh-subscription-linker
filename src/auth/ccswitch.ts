@@ -38,18 +38,29 @@ function num(value: unknown): string | undefined {
 /**
  * Query one provider's balance the way cc-switch does.
  *
- * @param input - the provider's API key, and optionally a fetch to substitute in tests.
+ * cc-switch reads a DeepSeek-compatible provider's balance with `GET <base>/user/balance`
+ * and a bearer API key. For the official DeepSeek that base is `api.deepseek.com`, so the
+ * path is effectively hardcoded there; for a provider the user added through a custom
+ * endpoint (like huanling), the same path is read against that provider's own base URL,
+ * which is the only place its balance can live.
+ *
+ * @param input - the provider's API key and base URL.
  * @returns the balance, or undefined when the provider did not answer with one.
  */
 export async function queryCcSwitchBalance(input: {
   apiKey: string
+  /** The provider's own base URL; `https://api.deepseek.com` for the official one. */
+  baseUrl: string
   fetchFn?: FetchFn
 }): Promise<CcSwitchBalance | undefined> {
   const fetchFn = input.fetchFn ?? proxiedFetch
+  // Resolve `<base>/user/balance` without doubling or dropping the path: a base that
+  // already ends in `/v1` keeps it, since that is the path the OpenAI-compatible wire
+  // uses and the balance endpoint lives beside it.
+  const url = `${input.baseUrl.replace(/\/+$/, '')}/user/balance`
   let response: Response
   try {
-    // cc-switch's exact request shape: hardcoded URL, bearer auth, 15 s timeout.
-    response = await fetchFn('https://api.deepseek.com/user/balance', {
+    response = await fetchFn(url, {
       headers: { authorization: `Bearer ${input.apiKey}`, accept: 'application/json' },
       signal: AbortSignal.timeout(15_000),
     })

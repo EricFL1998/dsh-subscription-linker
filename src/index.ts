@@ -78,16 +78,19 @@ export interface Config {
    */
   auto?: boolean
   /**
-   * The credential reference a non-subscription provider's balance query uses, by
-   * provider id.
+   * The balance source a non-subscription provider uses, by provider id.
    *
    * A provider that is not a subscription this plugin serves has no usage windows to
    * meter, so the chip shows its balance instead — read by cc-switch's query, which needs
-   * the provider's API key. The provider's profile names that key by reference
-   * (`apiKeyEnv`), and the host's credential service resolves the name; this map is the
-   * one place a provider id is tied to that reference. A provider with no entry, or
-   * whose key does not resolve, gets no balance and the chip stays silent.
+   * the provider's API key and its own base URL (the balance endpoint lives beside the
+   * provider's OpenAI-compatible wire, not on DeepSeek's). Each entry names the
+   * credential reference the provider's profile uses (`apiKeyEnv`) and the base URL that
+   * profile connects to; the host's credential service resolves the reference. A provider
+   * with no entry, or whose key does not resolve, gets no balance and the chip stays
+   * silent.
    */
+  balanceSources?: Record<string, { credentialRef: string, baseUrl: string }>
+  /** @deprecated Use {@link balanceSources}, which carries the base URL too. */
   balanceCredentialRefs?: Record<string, string>
 }
 
@@ -102,6 +105,8 @@ export const Config: z<Config> = z.object({
   defaultModel: z.string().default(KIMI_DEFAULT_MODEL),
   extraModels: z.array(z.string()).default([]),
   auto: z.boolean().default(true),
+  balanceSources: z.dict(z.object({ credentialRef: z.string(), baseUrl: z.string() })).default({}),
+  balanceCredentialRefs: z.dict(z.string()).default({}),
 })
 
 /**
@@ -253,13 +258,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     handles.set(route.id, handle)
     ctx.effect(() => () => handle(), `${name}: ${route.id} provider route`)
   }
-  // A non-subscription provider's balance is read by cc-switch's query, which needs the
-  // provider's API key. The provider's profile names that key by reference (`apiKeyEnv`),
-  // and the configured map ties a provider id to that reference; the host's credential
-  // service resolves it. The map lives in server config because that is where the rest
-  // of the plugin's wiring is, and the client learns a provider's balance by id, never
-  // by its credential reference.
-  const credentialRefs = config.balanceCredentialRefs ?? {}
+  // A non-subscription provider's balance is read by cc-switch's query against the
+  // provider's own base URL (the balance endpoint lives beside its OpenAI-compatible
+  // wire, not on DeepSeek's), which needs the provider's API key. Each configured source
+  // names the credential reference the provider's profile uses (`apiKeyEnv`) and the base
+  // URL that profile connects to; the host's credential service resolves the reference.
+  const balanceSources = config.balanceSources ?? {}
+  const credentialRefs: Record<string, string> = { ...config.balanceCredentialRefs }
+  const baseUrls: Record<string, string> = {}
+  for (const [provider, source] of Object.entries(balanceSources)) {
+    credentialRefs[provider] = source.credentialRef
+    baseUrls[provider] = source.baseUrl
+  }
   // The DeepSeek account's balance is read on the node half through the host's
   // `deepseekAccount` service; the browser reaches it through the plugin's own RPC, the
   // same channel as the rest of the chip's data. The service is read lazily, per request
@@ -267,6 +277,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // without it still serves every other endpoint, and the balance endpoint answers nothing.
   const balanceContext = {
     credentialRefs,
+    baseUrls,
     resolveDeepSeekAccount: (): { getBalance: (client: unknown) => Promise<unknown> } | undefined => {
       try {
         return ctx.get('deepseekAccount') as { getBalance: (client: unknown) => Promise<unknown> } | undefined
@@ -277,9 +288,20 @@ export function apply(ctx: Context, config: Config = {}): void {
     resolveCredential: async (ref: string): Promise<string | undefined> => {
       try {
         const credentials = ctx.get('credentials') as
-          | { resolve?: (r: string) => Promise<{ value: string } | undefined> }
+          | { resolve?: (r: string) => Promise<unknown> }
           | undefined
-        return (await credentials?.resolve?.(ref))?.value
+        const hit = await credentials?.resolve?.(ref)
+        // The resolve answer is `{ value, source }`; an env-var source may name the var
+        // rather than carry the value, so both are considered before giving up.
+        if (typeof hit === 'object' && hit !== null) {
+          const record = hit as Record<string, unknown>
+          if (typeof record.value === 'string' && record.value.trim() !== '') return record.value
+          if (typeof record.source === 'string') {
+            const fromEnv = process.env[record.source]
+            if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv
+          }
+        }
+        return undefined
       } catch {
         return undefined
       }
