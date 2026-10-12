@@ -36,6 +36,7 @@ import { createAntigravityProvider } from './providers/antigravity.js'
 import { createGrokProvider } from './providers/grok.js'
 import { createKimiProvider } from './providers/kimi-provider.js'
 import { createGlmProvider } from './providers/glm-provider.js'
+import { createArkProvider } from './providers/ark-provider.js'
 import { ModelPreferences } from './settings.js'
 
 /** Plugin id; also the name every effect label and log line is prefixed with. */
@@ -45,10 +46,10 @@ export const name = 'dsh-plugin-subscription-oauth'
 export const inject = ['llm']
 
 /** Every route key this plugin accepts in configuration. */
-export const PROVIDER_IDS = ['kimi', 'grok', 'antigravity', 'glm'] as const
+export const PROVIDER_IDS = ['kimi', 'grok', 'antigravity', 'glm', 'ark'] as const
 
 /** The routes this build can actually register. */
-export const IMPLEMENTED_PROVIDER_IDS = ['kimi', 'grok', 'antigravity', 'glm'] as const
+export const IMPLEMENTED_PROVIDER_IDS = ['kimi', 'grok', 'antigravity', 'glm', 'ark'] as const
 
 /** One route key. */
 export type ProviderId = typeof PROVIDER_IDS[number]
@@ -170,6 +171,18 @@ export function apply(ctx: Context, config: Config = {}): void {
           preferences,
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
           onCatalogChanged: () => { reannounce('glm') },
+          onWarn,
+          fetchFn: proxiedFetch,
+        }))
+        break
+      case 'ark':
+        routes.push(createArkProvider({
+          credentialFile,
+          discovery: config.discovery ?? true,
+          streamIdleTimeoutMs,
+          preferences,
+          resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
+          onCatalogChanged: () => { reannounce('ark') },
           onWarn,
           fetchFn: proxiedFetch,
         }))

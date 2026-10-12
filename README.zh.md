@@ -35,6 +35,7 @@ dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
 | `grok` | Grok (X Premium) | OIDC **授权码 + PKCE**，回调走回环地址 | OpenAI **Responses** — `https://api.x.ai/v1/responses` |
 | `antigravity` | Google Antigravity | Google **授权码 + PKCE**（`/oauth-callback`），外加 Cloud AI Companion 项目发现 | Cloud Code Assist `v1internal` — `streamGenerateContent?alt=sse` |
 | `glm` | GLM (BigModel) | ZCode 的**浏览器登录加轮询流程**（中国区） | OpenAI **Responses** — `https://open.bigmodel.cn/api/coding/paas/v4/responses` |
+| `ark` | 火山方舟 | 火山引擎 **SSO**（授权码 + PKCE，回调走回环地址） | OpenAI **Responses** — `https://ark.cn-beijing.volces.com/api/coding/v3/responses` |
 | `auto` | Auto | 无——它自己不持有任何账户 | 委托给它所选模型所属的那条路由 |
 
 Kimi 的设备流就是 `opencodex` 所用的那一个；Grok 的流程是它的 CLI 所用的那一个
@@ -308,6 +309,7 @@ Kimi 在订阅编码模型上锁定温度和采样惩罚，因此调用方提供
 | `grok` | `auth.x.ai`、`api.x.ai`、`cli-chat-proxy.grok.com` | OIDC 登录、Responses API、套餐的额度数字 |
 | `antigravity` | `accounts.google.com`、`oauth2.googleapis.com`、`cloudcode-pa.googleapis.com` | Google 登录、账户的项目，然后是 Cloud Code Assist（包括其配额核算） |
 | `glm` | `bigmodel.cn`、`zcode.z.ai`、`open.bigmodel.cn` | 由 ZCode 中介的浏览器登录，然后是编码套餐 API 及其额度 |
+| `ark` | `signin.volcengine.com`、`ark.cn-beijing.volces.com`、`ark.cn-beijing.volcengineapi.com` | 火山引擎 SSO，然后是编码套餐 API（数据面）与签名的控制面——后者用于铸造 API Key 并读取额度 |
 
 没有分析、没有更新 ping，也不经由任何其他人的服务器中转：每个请求都发往拥有该账户
 的主机。任何请求体、提示词或令牌都不会被记录到日志。

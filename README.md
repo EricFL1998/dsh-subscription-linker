@@ -36,6 +36,7 @@ dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
 | `grok` | Grok (X Premium) | OIDC **authorization code + PKCE** on a loopback callback | OpenAI **Responses** — `https://api.x.ai/v1/responses` |
 | `antigravity` | Google Antigravity | Google **authorization code + PKCE** (`/oauth-callback`) plus Cloud AI Companion project discovery | Cloud Code Assist `v1internal` — `streamGenerateContent?alt=sse` |
 | `glm` | GLM (BigModel) | ZCode's **browser sign-in with a polled flow** (China region) | OpenAI **Responses** — `https://open.bigmodel.cn/api/coding/paas/v4/responses` |
+| `ark` | Volcengine Ark | Volcengine **SSO** (authorization code + PKCE on a loopback callback) | OpenAI **Responses** — `https://ark.cn-beijing.volces.com/api/coding/v3/responses` |
 | `auto` | Auto | none — it holds no account of its own | delegates to whichever route owns the model it picks |
 
 The Kimi device flow is the one `opencodex` uses; the Grok flow is the one its
@@ -53,6 +54,15 @@ callback is completed server-side and the flow is authenticated by a secret the
 plugin generates itself. Allowances are read from BigModel's own
 `/api/monitor/usage/quota/limit`, which meters a rolling five-hour window and a
 weekly one.
+
+**Ark signs in with Volcengine SSO** (authorization code + PKCE on a loopback
+callback, the flow its own CLI uses) and then has to satisfy two planes that want
+different credentials. The **data plane** takes only an ordinary API key as a plain
+bearer — it refuses STS credentials outright — while the **control plane**, a
+different host, is signed with the temporary STS credentials that the SSO token
+response carries. So a sign-in mints one API key through the control plane (reusing
+a key this plugin already created, if there is one) and keeps the STS set for the
+quota, which is read per subscription period and per model's free allowance.
 
 ## What it registers
 
@@ -354,6 +364,7 @@ themselves.
 | `grok` | `auth.x.ai`, `api.x.ai`, `cli-chat-proxy.grok.com` | OIDC sign-in, the Responses API, the plan's credit figure |
 | `antigravity` | `accounts.google.com`, `oauth2.googleapis.com`, `cloudcode-pa.googleapis.com` | Google sign-in, the account's project, then Cloud Code Assist (including its quota accounting) |
 | `glm` | `bigmodel.cn`, `zcode.z.ai`, `open.bigmodel.cn` | browser sign-in brokered by ZCode, then the coding-plan API and its allowance |
+| `ark` | `signin.volcengine.com`, `ark.cn-beijing.volces.com`, `ark.cn-beijing.volcengineapi.com` | Volcengine SSO, then the coding-plan API (data plane) and the signed control plane that mints the API key and reports the allowance |
 
 There is no analytics, no update ping and no relay through anyone else's server:
 every request goes to the host that owns the account. No request body, prompt or

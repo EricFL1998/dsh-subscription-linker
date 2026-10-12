@@ -67,9 +67,11 @@ export function signArkRequest(input: {
   query: string
   body: string
   credentials: ArkStsCredentials
+  /** Body media type; the control plane accepts form and JSON, and signs whichever is sent. */
+  contentType?: string
   at?: Date
 }): Record<string, string> {
-  const contentType = 'application/x-www-form-urlencoded'
+  const contentType = input.contentType ?? 'application/x-www-form-urlencoded'
   const at = input.at ?? new Date()
   const xDate = amzDate(at)
   const contentSha = createHash('sha256').update(input.body).digest('hex')
@@ -113,14 +115,28 @@ export async function callArkControl<T>(input: {
   credentials: ArkStsCredentials
   fetchFn: FetchFn
   body?: string
+  /**
+   * Body media type.
+   *
+   * Actions that take nested structures (creating an API key, for instance) only
+   * parse a JSON body; the flat actions accept the form encoding.
+   */
+  contentType?: string
   signal?: AbortSignal
 }): Promise<T> {
   const query = `Action=${input.action}&Version=${ARK_CONTROL_VERSION}`
   const body = input.body ?? ''
+  const contentType = input.contentType
   const response = await input.fetchFn(`https://${ARK_CONTROL_HOST}/?${query}`, {
     method: 'POST',
     headers: {
-      ...attributedHeaders(signArkRequest({ method: 'POST', query, body, credentials: input.credentials })),
+      ...attributedHeaders(signArkRequest({
+        method: 'POST',
+        query,
+        body,
+        credentials: input.credentials,
+        ...contentType === undefined ? {} : { contentType },
+      })),
     },
     body,
     ...input.signal === undefined ? {} : { signal: input.signal },
@@ -130,6 +146,112 @@ export async function callArkControl<T>(input: {
     throw new Error(`Ark control plane refused ${input.action} (HTTP ${response.status})`)
   }
   return payload as T
+}
+
+/**
+ * Mint one ordinary API key for the account.
+ *
+ * The data plane refuses STS credentials (`403 Unsupported sts authentication
+ * method`) and takes only an API key, so this is the step that turns a sign-in into
+ * a usable credential. The shape is not guesswork — it was learned from the
+ * service's own validation, which reports each missing parameter in turn:
+ * `Name`, then `ProjectName`, then `ResourceInstances`, then
+ * `AccessControlInfo.AllowAll`. `ResourceInstances` must be a non-empty array (an
+ * empty one is rejected as invalid, while one empty object is accepted), and the
+ * body has to be JSON, because a nested structure is not expressible in the form
+ * encoding the flat actions use.
+ *
+ * The reply carries only an `Id`; the key itself comes from {@link readArkApiKey}.
+ *
+ * @param input - action inputs plus the credentials to sign with.
+ * @returns the new key's id.
+ * @throws {Error} when the control plane refuses.
+ */
+export async function createArkApiKey(input: {
+  credentials: ArkStsCredentials
+  fetchFn: FetchFn
+  name: string
+  project?: string
+  signal?: AbortSignal
+}): Promise<number> {
+  const payload = await callArkControl<{ Result?: { Id?: unknown } }>({
+    action: 'CreateApiKey',
+    credentials: input.credentials,
+    fetchFn: input.fetchFn,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      Name: input.name,
+      ProjectName: input.project ?? 'default',
+      ResourceInstances: [{}],
+      AccessControlInfo: { AllowAll: true },
+    }),
+    ...input.signal === undefined ? {} : { signal: input.signal },
+  })
+  const id = num(payload.Result?.Id)
+  if (id === undefined) throw new Error('Ark CreateApiKey returned no key id')
+  return id
+}
+
+/**
+ * Read one key's value.
+ *
+ * @param input - the key's id and the credentials to sign with.
+ * @returns the key, as the data plane expects it.
+ * @throws {Error} when the control plane refuses or states no key.
+ */
+export async function readArkApiKey(input: {
+  credentials: ArkStsCredentials
+  fetchFn: FetchFn
+  id: number
+  project?: string
+  signal?: AbortSignal
+}): Promise<string> {
+  const payload = await callArkControl<{ Result?: { ApiKey?: unknown } }>({
+    action: 'GetRawApiKey',
+    credentials: input.credentials,
+    fetchFn: input.fetchFn,
+    contentType: 'application/json',
+    body: JSON.stringify({ Id: input.id, ProjectName: input.project ?? 'default' }),
+    ...input.signal === undefined ? {} : { signal: input.signal },
+  })
+  const key = typeof payload.Result?.ApiKey === 'string' ? payload.Result.ApiKey.trim() : ''
+  if (key === '') throw new Error('Ark GetRawApiKey returned no key')
+  return key
+}
+
+/**
+ * Every key the account already has, newest first as the service lists them.
+ *
+ * @param input - the credentials to sign with.
+ * @returns the keys' ids and names.
+ */
+export async function listArkApiKeys(input: {
+  credentials: ArkStsCredentials
+  fetchFn: FetchFn
+  project?: string
+  signal?: AbortSignal
+}): Promise<readonly { id: number, name?: string, status?: string }[]> {
+  const payload = await callArkControl<{ Result?: { Items?: unknown } }>({
+    action: 'ListApiKeys',
+    credentials: input.credentials,
+    fetchFn: input.fetchFn,
+    contentType: 'application/json',
+    body: JSON.stringify({ PageSize: 50, ProjectName: input.project ?? 'default' }),
+    ...input.signal === undefined ? {} : { signal: input.signal },
+  })
+  const items = payload.Result?.Items
+  if (!Array.isArray(items)) return []
+  const out: { id: number, name?: string, status?: string }[] = []
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const record = raw as Record<string, unknown>
+    const id = num(record.Id)
+    if (id === undefined) continue
+    const name = typeof record.Name === 'string' && record.Name.trim() !== '' ? record.Name.trim() : undefined
+    const status = typeof record.Status === 'string' && record.Status.trim() !== '' ? record.Status.trim() : undefined
+    out.push({ id, ...name === undefined ? {} : { name }, ...status === undefined ? {} : { status } })
+  }
+  return out
 }
 
 /** One model's free inference allowance, as `ListModelChargeItems` reports it. */

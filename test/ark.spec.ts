@@ -22,8 +22,11 @@ import {
 } from '../src/auth/ark-flow.js'
 import {
   ARK_CONTROL_HOST,
+  createArkApiKey,
+  listArkApiKeys,
   parseArkFreeUsage,
   parseArkPlanUsage,
+  readArkApiKey,
   signArkRequest,
 } from '../src/auth/ark-control.js'
 import type { ArkStsCredentials } from '../src/auth/ark-control.js'
@@ -254,6 +257,50 @@ describe('Ark control plane', () => {
     })
     assert.equal(plan.subscribed, true)
     assert.deepEqual(plan.periods.map((period) => period.label), ['monthly'])
+  })
+
+  test('mints a key with the shape the service validated', async () => {
+    // The required fields were learned from the service's own validation errors; the
+    // body must be JSON, because a nested array is not expressible in the form
+    // encoding the flat actions use.
+    let sent: { query: string, body: string, contentType: string | null } | undefined
+    const fetchFn: typeof fetch = async (input, init) => {
+      sent = {
+        query: String(input),
+        body: String(init?.body),
+        contentType: new Headers(init?.headers).get('content-type'),
+      }
+      return jsonResponse({ Result: { Id: 4802015 } })
+    }
+    const id = await createArkApiKey({ credentials, fetchFn, name: 'dsh-test' })
+    assert.equal(id, 4802015)
+    assert.match(sent?.query ?? '', /Action=CreateApiKey&Version=2024-01-01/)
+    assert.equal(sent?.contentType, 'application/json')
+    const payload = JSON.parse(sent?.body ?? '{}') as Record<string, unknown>
+    assert.equal(payload.Name, 'dsh-test')
+    assert.equal(payload.ProjectName, 'default')
+    assert.deepEqual(payload.AccessControlInfo, { AllowAll: true })
+    // An empty array is rejected by the service as invalid; one empty object is accepted.
+    assert.deepEqual(payload.ResourceInstances, [{}])
+  })
+
+  test('reads a key value back, and refuses an empty answer', async () => {
+    const fetchFn: typeof fetch = async () => jsonResponse({ Result: { ApiKey: 'ark-abc123', SID: 'apik-1' } })
+    assert.equal(await readArkApiKey({ credentials, fetchFn, id: 1 }), 'ark-abc123')
+
+    const empty: typeof fetch = async () => jsonResponse({ Result: {} })
+    await assert.rejects(() => readArkApiKey({ credentials, fetchFn: empty, id: 1 }), /no key/)
+  })
+
+  test('lists the account keys so a sign-in can reuse one', async () => {
+    const fetchFn: typeof fetch = async () => jsonResponse({
+      Result: {
+        TotalCount: 1,
+        Items: [{ Id: 7, Name: 'dsh-plugin-subscription-oauth', Status: 'Active', Key: 'ark-secret' }],
+      },
+    })
+    const keys = await listArkApiKeys({ credentials, fetchFn })
+    assert.deepEqual(keys, [{ id: 7, name: 'dsh-plugin-subscription-oauth', status: 'Active' }])
   })
 })
 
