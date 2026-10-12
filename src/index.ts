@@ -262,17 +262,18 @@ export function apply(ctx: Context, config: Config = {}): void {
   const credentialRefs = config.balanceCredentialRefs ?? {}
   // The DeepSeek account's balance is read on the node half through the host's
   // `deepseekAccount` service; the browser reaches it through the plugin's own RPC, the
-  // same channel as the rest of the chip's data. The service is optional — a composition
-  // without it still serves everything else, and the balance endpoint answers nothing.
-  let deepseekAccount: { getBalance: (client: unknown) => Promise<unknown> } | undefined
-  try {
-    deepseekAccount = ctx.get('deepseekAccount') as { getBalance: (client: unknown) => Promise<unknown> } | undefined
-  } catch {
-    deepseekAccount = undefined
-  }
+  // same channel as the rest of the chip's data. The service is read lazily, per request
+  // (not once in apply), because it may register after this plugin applies; a composition
+  // without it still serves every other endpoint, and the balance endpoint answers nothing.
   const balanceContext = {
     credentialRefs,
-    deepseekAccount,
+    resolveDeepSeekAccount: (): { getBalance: (client: unknown) => Promise<unknown> } | undefined => {
+      try {
+        return ctx.get('deepseekAccount') as { getBalance: (client: unknown) => Promise<unknown> } | undefined
+      } catch {
+        return undefined
+      }
+    },
     resolveCredential: async (ref: string): Promise<string | undefined> => {
       try {
         const credentials = ctx.get('credentials') as

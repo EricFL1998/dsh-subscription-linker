@@ -344,8 +344,15 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     let live = true
     const refresh = (): void => {
       void accountBalance()
-        .then((value) => { if (live) setBalance(balanceOf(value)) })
-        .catch(() => { /* a failed balance read stays silent */ })
+        .then((value) => {
+          // TEMP diagnostics: the DeepSeek balance is silent in the running app, so log
+          // what the read actually produces before the reducer turns it into nothing.
+          console.warn('[subscription-oauth] deepseek-balance raw', JSON.stringify(value))
+          if (live) setBalance(balanceOf(value))
+        })
+        .catch((error: unknown) => {
+          console.warn('[subscription-oauth] deepseek-balance error', error)
+        })
     }
     refresh()
     const timer = setInterval(refresh, REFRESH_INTERVAL_MS)

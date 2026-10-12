@@ -94,7 +94,9 @@ export function createAccountBalanceCall(rpc: ConnectionHandle['rpc']): AccountB
       result = await rpc.call(CHANNEL, `${RPC_PREFIX}deepseek-balance`, {
         version: '1',
         locale: Intl.DateTimeFormat().resolvedOptions().locale ?? 'en-US',
-        timezoneOffsetSeconds: -new Date().getTimezoneOffset(),
+        // East-positive whole seconds, as the host's account service expects (the same
+        // value DSH's own account card sends).
+        timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
       })
     } catch (error: unknown) {
       throw new SubscriptionsRpcError(messageOf(error), 'RPC_TRANSPORT')

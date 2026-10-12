@@ -19,8 +19,14 @@ export interface BalanceContext {
   readonly credentialRefs: Readonly<Record<string, string>>
   /** Resolve one credential reference to its key. */
   readonly resolveCredential?: CredentialResolver
-  /** The host's DeepSeek account service, when the composition provides one. */
-  readonly deepseekAccount?: DeepSeekAccountService | undefined
+  /**
+   * Resolve the host's DeepSeek account service, read lazily per request.
+   *
+   * The service may register after this plugin applies, so it is resolved when a
+   * balance is actually read, not once at startup. Returns undefined when the
+   * composition has no such service.
+   */
+  readonly resolveDeepSeekAccount?: () => DeepSeekAccountService | undefined
 }
 
 /**
@@ -241,9 +247,10 @@ async function runEndpoint(
       // The DeepSeek account's balance, read on the node half through the host's own
       // account service. The browser cannot call that service directly (it sits behind
       // the host's Remote controller, not a /api fetch route), so the node half reads it
-      // and serves it here, on the same channel as the rest of the chip's data.
+      // and serves it here, on the same channel as the rest of the chip's data. The
+      // service is resolved lazily, per request, because it may register after apply.
       const client = payloadClient(payload)
-      return await readDeepSeekBalance(balance?.deepseekAccount, client)
+      return await readDeepSeekBalance(balance?.resolveDeepSeekAccount?.(), client)
     }
     case 'ccswitch-balance': {
       // A non-subscription provider's balance, by cc-switch's query. The caller names
