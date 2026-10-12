@@ -1,6 +1,7 @@
 # dsh-plugin-subscription-oauth
 
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/EricFL1998/dsh-subscription-oauth)
+[![npm](https://img.shields.io/npm/v/dsh-plugin-subscription-oauth.svg)](https://www.npmjs.com/package/dsh-plugin-subscription-oauth)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
 **Use the AI subscriptions you already pay for as LLM providers in DeepSeek
@@ -9,12 +10,14 @@ Subscriptions** (订阅) and that account's models join the session model picker
 with its plan quota shown next to the connection.
 
 ```sh
-dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
+dsh plugin --profile web add dsh-plugin-subscription-oauth
 ```
 
-The same package is published to npm as `dsh-plugin-subscription-oauth`, so
-`dsh plugin --profile web add dsh-plugin-subscription-oauth` installs it too; the
-git form above works without depending on a registry publish.
+The same package installs straight from the repository, which needs no registry:
+
+```sh
+dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
+```
 
 | | |
 | --- | --- |
@@ -149,17 +152,18 @@ provider (Grok) instead shows a sign-in link and waits for the browser redirect.
 ## Install
 
 ```sh
-dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
+dsh plugin --profile web add dsh-plugin-subscription-oauth
 ```
 
 `web` is the profile that serves the Settings page; use `desktop` (or any other
 profile name) if that is the one you run.
 
-The CLI forwards its arguments to pnpm, so a registry version, a git URL and a local
+The CLI forwards its arguments to pnpm, so a pinned version, a git URL and a local
 path are all spelled the same way:
 
 ```sh
-dsh plugin --profile web add dsh-plugin-subscription-oauth@0.1.0   # once published to npm
+dsh plugin --profile web add dsh-plugin-subscription-oauth@0.1.0
+dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
 dsh plugin --profile web add /path/to/dsh-plugin-subscription-oauth
 ```
 
