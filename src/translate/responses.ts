@@ -155,14 +155,19 @@ export async function toResponsesInput(
  * than letting the endpoint normalize every schema into strict mode.
  *
  * @param tools - the request's tool schemas.
+ * @param prepare - an endpoint-specific rewrite of one parameters schema, for
+ * a route whose JSON-Schema reader refuses the schema as declared.
  * @returns `tools` array entries.
  */
-export function toResponsesTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
+export function toResponsesTools(
+  tools: readonly ToolSchema[],
+  prepare?: (parameters: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown>[] {
   return tools.map((tool) => ({
     type: 'function',
     name: tool.name,
     description: tool.description,
-    parameters: tool.parameters,
+    parameters: prepare === undefined ? tool.parameters : prepare(tool.parameters),
     strict: false,
   }))
 }

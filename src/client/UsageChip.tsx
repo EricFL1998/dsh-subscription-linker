@@ -145,7 +145,9 @@ export interface ChipBalance {
  * Reduce the node half's balance payload to the wallets the chip shows.
  *
  * Bonus wallets are shown after the topped-up ones, so a reader sees their own credit
- * first and any promotional credit as a secondary figure.
+ * first and any promotional credit as a secondary figure. A bonus wallet that holds
+ * nothing is dropped rather than shown as `+¥0`: the platform reports one for every
+ * currency whether or not there is a bonus, and an empty one is noise, not information.
  *
  * @param value - the node half's balance, or undefined when there is none.
  * @returns the wallets, topped-up first then bonus, or undefined when nothing is usable.
@@ -154,7 +156,10 @@ export function balanceOf(value: { wallets?: readonly { currency: string, balanc
   if (value === null || value === undefined) return undefined
   const wallets: ChipBalance[] = [
     ...(value.wallets ?? []).map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: false })),
-    ...(value.bonusWallets ?? []).map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: true })),
+    // Only a bonus wallet that actually holds something is worth a line.
+    ...(value.bonusWallets ?? [])
+      .filter((wallet) => Number.parseFloat(wallet.balance) > 0)
+      .map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: true })),
   ]
   return wallets.length === 0 ? undefined : wallets
 }
@@ -344,15 +349,8 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     let live = true
     const refresh = (): void => {
       void accountBalance()
-        .then((value) => {
-          // TEMP diagnostics: the DeepSeek balance is silent in the running app, so log
-          // what the read actually produces before the reducer turns it into nothing.
-          console.warn('[subscription-oauth] deepseek-balance raw', JSON.stringify(value))
-          if (live) setBalance(balanceOf(value))
-        })
-        .catch((error: unknown) => {
-          console.warn('[subscription-oauth] deepseek-balance error', error)
-        })
+        .then((value) => { if (live) setBalance(balanceOf(value)) })
+        .catch(() => { /* a failed balance read stays silent */ })
     }
     refresh()
     const timer = setInterval(refresh, REFRESH_INTERVAL_MS)

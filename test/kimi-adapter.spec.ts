@@ -172,6 +172,44 @@ describe('KimiAdapter requests', () => {
     assert.deepEqual(chunks.map((chunk) => chunk.type), ['finish'])
   })
 
+  test('prepares a tool schema Moonshot refuses as declared', async () => {
+    // Moonshot re-expands a `$ref` carrying sibling keywords instead of
+    // intersecting it, and refuses the request as infinite recursion. The
+    // hypothesis is that a `$ref` without siblings is fine.
+    let seenBody: Record<string, unknown> = {}
+    const fetchFn: typeof fetch = async (_input, init) => {
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([{ type: 'response.completed', response: {} }])
+    }
+    await collect(new KimiAdapter(options({ fetchFn })).stream(request({
+      tools: [{
+        name: 'capture_browser_scenario',
+        description: 'Run a browser scenario',
+        parameters: {
+          type: 'object',
+          properties: {
+            actions: { $ref: '#/$defs/__schema12', description: 'Required sequence of explicit browser actions.' },
+          },
+          $defs: { __schema12: { minItems: 1, type: 'array', items: { type: 'object' } } },
+        },
+      }],
+    })))
+
+    const tools = seenBody.tools as { parameters: Record<string, unknown> }[]
+    assert.deepEqual(tools[0]?.parameters, {
+      type: 'object',
+      properties: {
+        actions: {
+          minItems: 1,
+          type: 'array',
+          items: { type: 'object' },
+          description: 'Required sequence of explicit browser actions.',
+        },
+      },
+      $defs: { __schema12: { minItems: 1, type: 'array', items: { type: 'object' } } },
+    })
+  })
+
   test('passes a max output cap through when the caller sets one', async () => {
     let seenBody: Record<string, unknown> = {}
     const fetchFn: typeof fetch = async (_input, init) => {

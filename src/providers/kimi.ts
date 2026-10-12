@@ -43,6 +43,7 @@ import { streamProviderResponses } from './responses-stream.js'
 import type { CatalogEntry } from './catalog.js'
 import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import { moonshotToolParameters } from '../translate/moonshot-schema.js'
 import type { ImageResolver } from '../translate/responses.js'
 
 /** One catalog entry exposed as a selectable model. */
@@ -430,7 +431,7 @@ export class KimiAdapter extends LlmAdapter {
       input: resolved.input,
       ...options.tools === undefined || options.tools.length === 0
         ? {}
-        : { tools: toResponsesTools(options.tools), tool_choice: 'auto', parallel_tool_calls: true },
+        : { tools: toResponsesTools(options.tools, moonshotToolParameters), tool_choice: 'auto', parallel_tool_calls: true },
       ...options.maxTokens === undefined ? {} : { max_output_tokens: options.maxTokens },
       ...options.reasoningEffort === undefined
         ? {}

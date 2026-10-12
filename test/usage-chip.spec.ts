@@ -88,6 +88,24 @@ describe('balanceOf', () => {
     assert.deepEqual(wallets?.map((wallet) => `${wallet.currency}:${wallet.balance}:${wallet.bonus}`), ['CNY:6.89:false', 'CNY:2:true'])
   })
 
+  test('drops a bonus wallet that holds nothing', () => {
+    // The platform reports a bonus wallet for every currency whether or not there is a
+    // bonus; an empty one would read as `+¥0`, which is noise rather than information.
+    const wallets = balanceOf({
+      wallets: [{ currency: 'CNY', balance: '6.33' }],
+      bonusWallets: [{ currency: 'CNY', balance: '0' }],
+    })
+    assert.deepEqual(wallets?.map((wallet) => `${wallet.currency}:${wallet.balance}:${wallet.bonus}`), ['CNY:6.33:false'])
+  })
+
+  test('keeps a bonus wallet that holds something', () => {
+    const wallets = balanceOf({
+      wallets: [{ currency: 'CNY', balance: '6.33' }],
+      bonusWallets: [{ currency: 'CNY', balance: '2.5' }],
+    })
+    assert.deepEqual(wallets?.map((wallet) => `${wallet.currency}:${wallet.balance}:${wallet.bonus}`), ['CNY:6.33:false', 'CNY:2.5:true'])
+  })
+
   test('reduces no balance, an empty read, or no wallets to nothing', () => {
     assert.equal(balanceOf(undefined), undefined)
     assert.equal(balanceOf(null), undefined)
