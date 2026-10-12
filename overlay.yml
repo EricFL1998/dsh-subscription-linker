@@ -1,0 +1,11 @@
+# Overlay for a headless composition: `dsh --profile <name> --patch <this file>`.
+#
+# Replace the path with the absolute path to THIS checkout's built entry point.
+# This mounts the node half only; the Settings page (Settings -> Subscriptions)
+# requires installing the package into a web profile, because the browser half
+# is discovered from the `dsh.client` declaration in package.json. The token
+# file below $DSH_HOME is shared, so a login made in a web profile is visible
+# here.
+- insert:
+    - id: llm-subscription-oauth
+      name: /absolute/path/to/dsh-plugin-subscription-oauth/lib/index.js

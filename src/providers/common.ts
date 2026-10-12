@@ -1,0 +1,174 @@
+/**
+ * Shared provider plumbing: an idle watchdog for streams, wire-error
+ * classification, and transport-failure mapping.
+ *
+ * @module dsh-plugin-subscription-oauth/providers/common
+ */
+
+import { errorChain, LlmError } from '@deepseek-ai/dsh-llm'
+
+/** Watchdog handle used around one streaming request. */
+export interface IdleWatchdog {
+  /** Abort signal to hand to `fetch`; also fires when the caller's signal does. */
+  readonly signal: AbortSignal
+  /** Report inbound transport activity, resetting the idle timer. */
+  pulse(): void
+  /** Stop the timer; safe to call more than once. */
+  stop(): void
+  /** Whether the idle budget (rather than the caller) aborted the request. */
+  readonly timedOut: boolean
+}
+
+/**
+ * Guard one stream with an inactivity budget.
+ *
+ * The timer aborts the request when no chunk arrives for `idleMs`, so a dead
+ * connection fails the turn instead of hanging it forever.
+ *
+ * @param signal - the caller's cancellation signal, if any.
+ * @param idleMs - inactivity budget in milliseconds; a non-positive value disables it.
+ * @returns the watchdog.
+ */
+export function idleWatchdog(signal: AbortSignal | undefined, idleMs: number): IdleWatchdog {
+  const controller = new AbortController()
+  let timedOut = false
+  let timer: NodeJS.Timeout | undefined
+  const onCallerAbort = (): void => controller.abort(signal?.reason)
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort(signal.reason)
+    else signal.addEventListener('abort', onCallerAbort, { once: true })
+  }
+  const arm = (): void => {
+    if (idleMs <= 0) return
+    timer = setTimeout(() => {
+      timedOut = true
+      controller.abort(new Error(`Kimi stream idle for more than ${idleMs}ms`))
+    }, idleMs)
+    timer.unref?.()
+  }
+  const clear = (): void => {
+    if (timer !== undefined) clearTimeout(timer)
+    timer = undefined
+  }
+  const stop = (): void => {
+    clear()
+    signal?.removeEventListener('abort', onCallerAbort)
+  }
+  arm()
+  return {
+    signal: controller.signal,
+    pulse: () => {
+      clear()
+      arm()
+    },
+    stop,
+    get timedOut() {
+      return timedOut
+    },
+  }
+}
+
+/** Read a `retry-after` header as an absolute delay in milliseconds. */
+function retryAfterMs(response: Response): number | undefined {
+  const raw = response.headers.get('retry-after')
+  if (raw === null) return undefined
+  const seconds = Number(raw)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000)
+  const at = Date.parse(raw)
+  if (!Number.isNaN(at)) return Math.max(0, at - Date.now())
+  return undefined
+}
+
+/** Provider-neutral failure code for one HTTP status. */
+function statusCode(status: number): string {
+  if (status === 401 || status === 403) return 'INVALID_CREDENTIAL'
+  if (status === 404) return 'MODEL_NOT_FOUND'
+  if (status === 429) return 'RATE_LIMIT'
+  if (status === 400 || status === 422) return 'INVALID_REQUEST'
+  if (status >= 500) return 'SERVER'
+  return 'HTTP_ERROR'
+}
+
+/** Best-effort provider message out of an error response body. */
+async function errorBodyMessage(response: Response): Promise<string | undefined> {
+  try {
+    const text = await response.text()
+    if (text.trim() === '') return undefined
+    try {
+      const parsed = JSON.parse(text) as unknown
+      if (typeof parsed === 'object' && parsed !== null) {
+        const record = parsed as Record<string, unknown>
+        const error = record.error
+        if (typeof error === 'object' && error !== null) {
+          const message = (error as Record<string, unknown>).message
+          if (typeof message === 'string' && message.trim() !== '') return message.trim()
+        }
+        if (typeof record.message === 'string' && record.message.trim() !== '') return record.message.trim()
+        if (typeof error === 'string' && error.trim() !== '') return error.trim()
+      }
+    } catch {
+      // Not JSON: fall through to the raw body.
+    }
+    return text.slice(0, 400).trim()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Turn a non-2xx provider response into an LlmError carrying the status and
+ * any rate-limit hint the headers disclosed.
+ *
+ * @param response - the failed response.
+ * @param label - human name of the endpoint, used in the message.
+ * @returns the error to throw.
+ */
+export async function httpLlmError(response: Response, label: string): Promise<LlmError> {
+  const detail = await errorBodyMessage(response)
+  const retryAfter = retryAfterMs(response)
+  const message = detail === undefined
+    ? `${label} request failed (HTTP ${response.status} ${response.statusText})`.trim()
+    : `${label} request failed (HTTP ${response.status}): ${detail}`
+  return new LlmError(message, statusCode(response.status), {
+    status: response.status,
+    ...retryAfter === undefined ? {} : { providerRetryAfterMs: retryAfter },
+  })
+}
+
+/** Whether a failure means the stored credential no longer works. */
+export function isMissingOrInvalidCredential(error: unknown): boolean {
+  if (error instanceof LlmError) {
+    return error.failure.code === 'INVALID_CREDENTIAL' || error.failure.status === 401 || error.failure.status === 403
+  }
+  return false
+}
+
+/**
+ * Map a thrown transport failure onto a harness error, distinguishing caller
+ * cancellation from an idle timeout from a genuine network fault.
+ *
+ * @param label - human name of the endpoint.
+ * @param error - the thrown value.
+ * @param watchdog - the request's watchdog, when one was installed.
+ * @param signal - the caller's signal.
+ * @returns the error to throw.
+ */
+export function mapFetchFailure(
+  label: string,
+  error: unknown,
+  watchdog?: Pick<IdleWatchdog, 'timedOut'>,
+  signal?: AbortSignal,
+): unknown {
+  if (error instanceof LlmError) return error
+  if (signal?.aborted === true) return error
+  if (watchdog?.timedOut === true) {
+    return new LlmError(`${label} stream timed out waiting for data`, 'TIMEOUT')
+  }
+  const cause = error instanceof Error ? error.cause : undefined
+  if (cause !== undefined && cause !== error) {
+    return new LlmError(`${label} request failed: ${errorChain(error)}`, 'NETWORK', { cause: error })
+  }
+  return error instanceof Error
+    ? new LlmError(`${label} request failed: ${error.message}`, 'NETWORK', { cause: error })
+    : new LlmError(`${label} request failed: ${String(error)}`, 'NETWORK')
+}

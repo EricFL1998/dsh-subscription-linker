@@ -1,0 +1,534 @@
+/**
+ * The `glm` route: BigModel's coding plan over the OpenAI Responses wire.
+ *
+ * Sign-in is ZCode's own OAuth flow (see `auth/glm-flow.ts`). What the flow hands
+ * back is a BigModel access token and the ZCode JWT the subscription is bound to;
+ * requests and the model list then go to the coding-plan host, whose
+ * `/responses` route answers the same wire the `kimi` and `grok` routes use.
+ *
+ * @module dsh-plugin-subscription-oauth/providers/glm
+ */
+
+import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmModelInfo,
+  LlmProviderInfo,
+  LlmResolvedModelInfo,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+
+import { REAUTH_REQUIRED, ProviderError } from '../errors.js'
+import { finiteInstant, nonEmpty } from '../auth/store.js'
+import type { SessionBase } from '../auth/store.js'
+import type { TokenManager } from '../auth/tokens.js'
+import { proxiedFetch } from '../http.js'
+import type { FetchFn } from '../http.js'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import type { UsageWindow } from '../protocol.js'
+import type { CatalogEntry } from './catalog.js'
+import { findEntry, resolveCatalog } from './catalog.js'
+import { streamProviderResponses } from './responses-stream.js'
+import { toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import type { ImageResolver } from '../translate/responses.js'
+import type { UsageRead } from './usage.js'
+
+/** Provider route this module serves. */
+export const GLM_PROVIDER_ID = 'glm'
+
+/** Display name for the picker group and the Settings card. */
+export const GLM_PROVIDER_NAME = 'GLM (BigModel)'
+
+/** Page a user opens to manage the coding plan. */
+export const GLM_CODE_URL = 'https://bigmodel.cn/coding-plan/personal/overview'
+
+/** Coding-plan host; the Responses endpoint is `<base>/responses`. */
+export const GLM_API_BASE = 'https://open.bigmodel.cn/api/coding/paas/v4'
+
+/** Origin the account-level endpoints hang off, without the coding path. */
+export const GLM_ORIGIN = 'https://open.bigmodel.cn'
+
+/** Path appended to the API base for a streaming request. */
+export const GLM_RESPONSES_PATH = '/responses'
+
+/** Path appended to the API base to list the models an account can reach. */
+export const GLM_MODELS_PATH = '/models'
+
+/**
+ * Account allowance endpoint.
+ *
+ * It sits on the host root rather than under the coding prefix, and BigModel
+ * authenticates it with the bare key — no `Bearer` scheme, which the host refuses.
+ */
+export const GLM_QUOTA_PATH = '/api/monitor/usage/quota/limit'
+
+/** Model the picker preselects. */
+export const GLM_DEFAULT_MODEL = 'glm-5.3'
+
+/** Context capacity of the GLM 5.x family. */
+export const GLM_CONTEXT_WINDOW = 1_048_576
+
+/** Output budget used when the caller sets no cap. */
+export const GLM_DEFAULT_MAX_TOKENS = 131_072
+
+/** Reasoning ladder the GLM 5.3 family accepts. */
+const GLM_53_EFFORTS = ['low', 'high', 'max'] as const
+
+/**
+ * The catalog this build ships, so a signed-in route is usable with no discovery.
+ *
+ * Ids are the wire ids, lowercase: the coding plan answers `glm-5.3`, not the
+ * `GLM-5.3` display name its own client shows. `glm-5.3-flash` is the multimodal
+ * member of the family; the rest read text only.
+ */
+export const GLM_MODELS: readonly CatalogEntry[] = [
+  {
+    id: 'glm-5.3',
+    name: 'GLM-5.3',
+    description: 'Coding plan flagship, text only',
+    contextWindow: GLM_CONTEXT_WINDOW,
+    inputModalities: ['text'],
+    reasoningEfforts: [...GLM_53_EFFORTS],
+  },
+  {
+    id: 'glm-5.3-flash',
+    name: 'GLM-5.3 Flash',
+    description: 'Fast, reads images',
+    contextWindow: GLM_CONTEXT_WINDOW,
+    inputModalities: ['text', 'image'],
+    reasoningEfforts: [...GLM_53_EFFORTS],
+  },
+  {
+    id: 'glm-5.2',
+    name: 'GLM-5.2',
+    description: 'Previous flagship',
+    contextWindow: GLM_CONTEXT_WINDOW,
+    inputModalities: ['text'],
+  },
+  {
+    id: 'glm-5.1',
+    name: 'GLM-5.1',
+    description: 'Earlier 5.x release',
+    contextWindow: GLM_CONTEXT_WINDOW,
+    inputModalities: ['text'],
+  },
+  {
+    id: 'glm-5',
+    name: 'GLM-5',
+    description: 'First 5.x release',
+    contextWindow: GLM_CONTEXT_WINDOW,
+    inputModalities: ['text'],
+  },
+]
+
+/** One signed-in BigModel account. */
+export interface GlmSession extends SessionBase {
+  /** ZCode JWT the coding plan is bound to; presented as the API key. */
+  zcodeJwt: string
+  /** API base recorded at login time (diagnostics only). */
+  apiBase?: string
+}
+
+/**
+ * Coerce one decoded credential entry into a GLM session.
+ *
+ * @param value - decoded JSON value for one account.
+ * @returns the session, or undefined when required fields are missing.
+ */
+export function parseGlmSession(value: unknown): GlmSession | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const accessToken = nonEmpty(record.accessToken)
+  const zcodeJwt = nonEmpty(record.zcodeJwt)
+  const expiresAt = finiteInstant(record.expiresAt)
+  if (accessToken === undefined || zcodeJwt === undefined || expiresAt === undefined) return undefined
+  const refreshToken = nonEmpty(record.refreshToken)
+  const apiBase = nonEmpty(record.apiBase)
+  const accountId = nonEmpty(record.accountId)
+  const email = nonEmpty(record.email)
+  return {
+    accessToken,
+    zcodeJwt,
+    expiresAt,
+    ...refreshToken === undefined ? {} : { refreshToken },
+    ...apiBase === undefined ? {} : { apiBase },
+    ...accountId === undefined ? {} : { accountId },
+    ...email === undefined ? {} : { email },
+  }
+}
+
+/** Everything the adapter needs from the route. */
+export interface GlmAdapterOptions {
+  /** Request base; `<base>/responses` is the endpoint. */
+  apiBase: string
+  /** Consult the endpoint's live model list. */
+  discovery: boolean
+  /** Abandon a stream after this much silence. */
+  streamIdleTimeoutMs: number
+  /** Token manager owning refresh. */
+  tokens: TokenManager<GlmSession>
+  /** Model ids the user hid from the picker. */
+  hiddenModels?: () => Promise<ReadonlySet<string>> | ReadonlySet<string>
+  /** Ids the user added by hand. */
+  userModels?: () => Promise<readonly string[]> | readonly string[]
+  /** Extra ids published without shipped metadata. */
+  extraModels?: readonly string[]
+  /** Resolve the attachment service per request. */
+  resolveAttachments?: () => AttachmentStore | undefined
+  onWarn?: (message: string) => void
+  onCredentialRejected?: (account: string) => void
+  /** Fetch implementation; defaults to the proxy-aware fetch. */
+  fetchFn?: FetchFn
+}
+
+/** The account's plan, read from the allowance endpoint. */
+interface GlmQuotaRow {
+  type?: unknown
+  percentage?: unknown
+  nextResetTime?: unknown
+  currentValue?: unknown
+  usage?: unknown
+  unit?: unknown
+  number?: unknown
+}
+
+/** A finite number from a wire field, or undefined. */
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+/** A reset instant from an RFC 3339 string or epoch milliseconds. */
+function resetInstant(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string' || value.trim() === '') return undefined
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/**
+ * Read the two windows a coding-plan allowance reports.
+ *
+ * The host lists one row per metered window and names it by a `unit`/`number`
+ * pair: `(3, 5)` is the rolling five-hour window and `(6, 1)` the weekly one.
+ * Rows of any other type — MCP tool usage, for instance — are not model quota and
+ * are skipped rather than shown as an allowance.
+ *
+ * @param payload - the decoded `quota/limit` body.
+ * @returns one window per metered allowance, rolling first.
+ */
+export function parseGlmQuota(payload: unknown): UsageWindow[] {
+  if (typeof payload !== 'object' || payload === null) return []
+  const body = payload as Record<string, unknown>
+  const data = typeof body.data === 'object' && body.data !== null ? body.data as Record<string, unknown> : body
+  const limits = Array.isArray(data.limits) ? data.limits as readonly GlmQuotaRow[] : []
+  const found = new Map<string, UsageWindow>()
+  for (const row of limits) {
+    if (typeof row !== 'object' || row === null) continue
+    const type = typeof row.type === 'string' ? row.type : ''
+    if (type !== 'TOKENS_LIMIT' && type !== 'CREDIT_LIMIT') continue
+    let usedPercent = finiteNumber(row.percentage)
+    if (usedPercent === undefined) {
+      const used = finiteNumber(row.currentValue)
+      const total = finiteNumber(row.usage)
+      if (used !== undefined && total !== undefined && total > 0) usedPercent = (used / total) * 100
+    }
+    if (usedPercent === undefined) continue
+    const unit = finiteNumber(row.unit)
+    const number = finiteNumber(row.number)
+    const label = unit === 3 && number === 5 ? '5h' : unit === 6 && number === 1 ? 'weekly' : undefined
+    if (label === undefined || found.has(label)) continue
+    const resetsAt = resetInstant(row.nextResetTime)
+    found.set(label, {
+      label,
+      usedPercent: Math.max(0, Math.min(100, usedPercent)),
+      ...resetsAt === undefined ? {} : { resetsAt },
+    })
+  }
+  return ['5h', 'weekly'].flatMap((label) => {
+    const window = found.get(label)
+    return window === undefined ? [] : [window]
+  })
+}
+
+/**
+ * Read an account's coding-plan allowance.
+ *
+ * @param input - host, bearer, and fetch.
+ * @returns the windows the host reported; an empty list when it stated none.
+ */
+export async function readGlmUsage(input: {
+  origin: string
+  accessToken: string
+  fetchFn: FetchFn
+  signal?: AbortSignal
+}): Promise<UsageRead> {
+  const response = await input.fetchFn(`${input.origin}${GLM_QUOTA_PATH}`, {
+    headers: {
+      // BigModel wants the key itself here, not a Bearer scheme.
+      authorization: input.accessToken,
+      accept: 'application/json',
+    },
+    ...input.signal === undefined ? {} : { signal: input.signal },
+  })
+  if (!response.ok) throw await httpFailure(response, 'GLM allowance')
+  return { windows: parseGlmQuota(await response.json()) }
+}
+
+/** Map a refused allowance request onto a harness error. */
+async function httpFailure(response: Response, label: string): Promise<LlmError> {
+  const text = await response.text().catch(() => '')
+  const detail = text.trim() === '' ? undefined : text.slice(0, 200)
+  return new LlmError(
+    detail === undefined
+      ? `${label} request failed (HTTP ${response.status})`
+      : `${label} request failed (HTTP ${response.status}): ${detail}`,
+    response.status === 401 || response.status === 403 ? 'INVALID_CREDENTIAL' : 'PROVIDER_ERROR',
+    { status: response.status },
+  )
+}
+
+/** The adapter behind the `glm` route. */
+export class GlmAdapter extends LlmAdapter {
+  /** Live catalog ids, once discovery succeeded this session. */
+  private live: readonly string[] | undefined
+
+  constructor(private readonly options: GlmAdapterOptions) {
+    super()
+  }
+
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: GLM_PROVIDER_NAME }
+  }
+
+  override providerRetryPolicy(): undefined {
+    // The coding host states its own pacing through 429; a local ladder would
+    // fight the account-level limiter.
+    return undefined
+  }
+
+  override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    const hidden = await this.hidden()
+    return resolveCatalog(this.catalog(), [], hidden).entries.map((entry) => ({
+      provider: GLM_PROVIDER_ID,
+      id: entry.id,
+      name: entry.name,
+      ...entry.description === undefined ? {} : { description: entry.description },
+      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+    }))
+  }
+
+  override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const entry = findEntry(this.catalog(), model)
+    if (entry === undefined) {
+      // An id this build has never heard of is still dispatchable: the endpoint is
+      // the authority on what it serves, and a newer model should not be refused.
+      const template = findEntry(this.catalog(), GLM_DEFAULT_MODEL) ?? this.catalog()[0]
+      return {
+        provider: GLM_PROVIDER_ID,
+        id: model,
+        name: model,
+        context: { contextWindow: template?.contextWindow ?? GLM_CONTEXT_WINDOW },
+        defaultMaxTokens: GLM_DEFAULT_MAX_TOKENS,
+      }
+    }
+    const reasoning = reasoningInfo(entry)
+    return {
+      provider: GLM_PROVIDER_ID,
+      id: entry.id,
+      name: entry.name,
+      ...entry.description === undefined ? {} : { description: entry.description },
+      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+      context: { contextWindow: entry.contextWindow },
+      defaultMaxTokens: GLM_DEFAULT_MAX_TOKENS,
+      ...reasoning === undefined ? {} : { reasoning },
+    }
+  }
+
+  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    return streamProviderResponses(options, {
+      label: 'GLM API',
+      tokens: this.options.tokens,
+      request: (call, model, accessToken, signal) => this.request(call, model, accessToken, signal),
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+      ...this.options.onCredentialRejected === undefined
+        ? {}
+        : { onCredentialRejected: this.options.onCredentialRejected },
+      onFallback: (from, to, reason) => {
+        this.options.onWarn?.(`glm: model ${from} unavailable (${reason}); falling back to ${to}`)
+      },
+      describeFailure: (error) => this.refreshHint(error),
+    })
+  }
+
+  /** Translate an auth failure into the message a user can act on. */
+  private refreshHint(error: unknown): unknown {
+    if (error instanceof ProviderError && error.code === REAUTH_REQUIRED) {
+      return new LlmError(
+        `GLM sign-in expired; sign in again from Settings → Subscriptions (${GLM_CODE_URL})`,
+        'INVALID_CREDENTIAL',
+        { status: 401 },
+      )
+    }
+    return error
+  }
+
+  /** The catalog served: the shipped list, the live one, then hand-added ids. */
+  private catalog(): readonly CatalogEntry[] {
+    return [...this.shippedCatalog(), ...this.addedEntries()]
+  }
+
+  /** The route's own catalog, without ids the user added by hand. */
+  private shippedCatalog(): readonly CatalogEntry[] {
+    const shipped = this.options.extraModels === undefined
+      ? [...GLM_MODELS]
+      : [...GLM_MODELS, ...this.options.extraModels.map((id) => extraEntry(id))]
+    const live = this.live
+    if (live === undefined) return shipped
+    const merged = [...shipped]
+    for (const id of live) {
+      if (findEntry(merged, id) === undefined) merged.push(extraEntry(id))
+    }
+    return merged
+  }
+
+  /** Ids the user published by hand that this route does not already serve. */
+  private addedEntries(): readonly CatalogEntry[] {
+    const own = this.shippedCatalog()
+    const added = this.options.userModels?.()
+    if (added === undefined) return []
+    return (Array.isArray(added) ? added : [])
+      .filter((id) => findEntry(own, id) === undefined)
+      .map((id) => extraEntry(id))
+  }
+
+  /** The ids the picker must currently omit. */
+  private async hidden(): Promise<ReadonlySet<string>> {
+    if (this.options.hiddenModels === undefined) return new Set()
+    try {
+      return await this.options.hiddenModels()
+    } catch {
+      // A preferences read failure must not empty the picker.
+      return new Set()
+    }
+  }
+
+  /**
+   * Adopt the endpoint's live catalog.
+   *
+   * @param ids - model ids the endpoint reported.
+   */
+  discover(ids: readonly string[]): void {
+    this.live = [...ids]
+  }
+
+  /**
+   * Read the live model list.
+   *
+   * @param accessToken - bearer for the account.
+   * @param signal - optional cancellation.
+   * @returns the ids the endpoint serves, or undefined when it cannot be read.
+   */
+  async fetchCatalog(accessToken: string, signal?: AbortSignal): Promise<readonly string[] | undefined> {
+    if (!this.options.discovery) return undefined
+    const fetchFn = this.options.fetchFn ?? proxiedFetch
+    try {
+      const response = await fetchFn(`${this.options.apiBase}${GLM_MODELS_PATH}`, {
+        headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
+        ...signal === undefined ? {} : { signal },
+      })
+      if (!response.ok) {
+        this.options.onWarn?.(`GLM model list unavailable (HTTP ${response.status})`)
+        return undefined
+      }
+      const body = await response.json() as { data?: readonly { id?: unknown }[] }
+      const ids = (body.data ?? [])
+        .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : ''))
+        .filter((id) => id !== '')
+      return ids.length === 0 ? undefined : ids
+    } catch (error: unknown) {
+      this.options.onWarn?.(`GLM model list unavailable (${error instanceof Error ? error.message : String(error)})`)
+      return undefined
+    }
+  }
+
+  /** Send one streaming request over the Responses wire. */
+  private async request(
+    options: GenerateOptions,
+    model: string,
+    accessToken: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const resolveImage = this.imageResolver(signal)
+    const resolved = await toResponsesInput(options.messages, options.system, resolveImage)
+    const body: Record<string, unknown> = {
+      model,
+      ...resolved.instructions === undefined ? {} : { instructions: resolved.instructions },
+      input: resolved.input,
+      ...options.tools === undefined || options.tools.length === 0
+        ? {}
+        : { tools: toResponsesTools(options.tools), tool_choice: 'auto', parallel_tool_calls: true },
+      ...options.maxTokens === undefined ? {} : { max_output_tokens: options.maxTokens },
+      ...options.reasoningEffort === undefined ? {} : { reasoning: { effort: String(options.reasoningEffort) } },
+      ...options.sessionId === undefined ? {} : { prompt_cache_key: String(options.sessionId) },
+      include: ['reasoning.encrypted_content'],
+      store: false,
+      stream: true,
+    }
+    const fetchFn = this.options.fetchFn ?? proxiedFetch
+    return fetchFn(`${this.options.apiBase}${GLM_RESPONSES_PATH}`, {
+      method: 'POST',
+      headers: {
+        'authorization': `Bearer ${accessToken}`,
+        'accept': 'text/event-stream',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+  }
+
+  /** Resolve image blocks through the attachment service, when it is present. */
+  private imageResolver(signal: AbortSignal): ImageResolver | undefined {
+    const store = this.options.resolveAttachments?.()
+    if (store === undefined || store === null) return undefined
+    return async (ref) => {
+      try {
+        const stored = await store.readImage(ref, signal)
+        return { mediaType: ref.mediaType, base64: Buffer.from(stored.data).toString('base64') }
+      } catch (error: unknown) {
+        this.options.onWarn?.(`image attachment unavailable (${error instanceof Error ? error.message : String(error)})`)
+        return undefined
+      }
+    }
+  }
+
+  /** The catalog the controller publishes without hand-added ids. */
+  ownCatalogEntries(): readonly CatalogEntry[] {
+    return this.shippedCatalog()
+  }
+
+  /** The catalog the controller publishes. */
+  catalogEntries(): readonly CatalogEntry[] {
+    return this.catalog()
+  }
+}
+
+/** An entry for an id this build ships no metadata for. */
+function extraEntry(id: string): CatalogEntry {
+  return { id, name: id, contextWindow: GLM_CONTEXT_WINDOW }
+}
+
+/** The reasoning block for a catalog entry, or undefined when it supports none. */
+function reasoningInfo(entry: CatalogEntry) {
+  const efforts = entry.reasoningEfforts
+  if (efforts === undefined || efforts.length === 0) return undefined
+  return {
+    efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: String(effort), description: '' })),
+    ...entry.defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(entry.defaultEffort) },
+  }
+}

@@ -1,0 +1,18 @@
+node_modules/
+lib/
+lib-test/
+probe/
+*.tsbuildinfo
+
+# Vendored references, kept out of the published tree.
+#
+# `refs-*` are third-party sources read while implementing a provider — the
+# `opencodex` proxy, the plugin this one took its Settings vocabulary from, and an
+# unpacked copy of the host's own packages. `packs/` is the local tarball of those
+# packages. None of them are this project's code, none are needed to build it
+# (the host packages come from the registry via the lockfile), and republishing
+# someone else's tree here would be both noise and a licence question.
+refs-dsh-types/
+refs-opencodex/
+refs-subscriptions/
+packs/

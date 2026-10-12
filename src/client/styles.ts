@@ -1,0 +1,259 @@
+/**
+ * Scoped stylesheet for the Subscriptions page and its manage dialog.
+ *
+ * The host loads plugin markup without its own control classes, and a bare
+ * `<button>` therefore renders with the browser's default raised chrome — which
+ * reads as a stray highlight in a dark theme. Rather than invent a look, this
+ * follows the control vocabulary of the sibling `dsh-plugin-subscriptions`
+ * plugin (same author-facing design as the shell's settings forms): a 6 px
+ * radius small control, a transparent fill, a hairline border from the theme's
+ * alias tokens, and the theme's hover/active/focus tokens for state.
+ *
+ * The tokens all carry fallbacks, so the page still renders correctly on a host
+ * build that does not define them.
+ *
+ * @module dsh-plugin-subscription-oauth/client/styles
+ */
+
+/**
+ * Everything is scoped to this plugin's own roots, so no other surface in the
+ * shell can be affected by a rule here.
+ */
+const scope = ':is(.dsh-subscriptions-settings, .dsh-subscription-manager)'
+
+/** The page's and dialog's stylesheet. */
+export const subscriptionsCss = `
+.dsh-subscriptions-settings,
+.dsh-subscription-manager {
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  /* Native controls (checkbox, dialog) follow the host theme, not the OS. */
+  color-scheme: light;
+}
+body[data-ds-dark-theme] ${scope} {
+  color-scheme: dark;
+}
+.dsh-subscription-manager {
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-panel, 16px);
+  background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-elevation-prominent, 0 20px 70px #0004);
+}
+.dsh-subscription-manager::backdrop {
+  background: var(--dsw-alias-bg-mask-1, #0006);
+  backdrop-filter: var(--dsw-mask-blur, none);
+}
+${scope} h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+}
+${scope} strong,
+${scope} .dsh-subscription-label {
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+${scope} small,
+${scope} .dsh-subscription-hint,
+${scope} [role="status"] {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+${scope} .dsh-subscription-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-state-error-primary, #b42318);
+}
+${scope} .dsh-subscription-success {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-state-success-primary, #067647);
+}
+${scope} label:has(> input[type="checkbox"]) {
+  cursor: pointer;
+}
+${scope} input[type="checkbox"] {
+  accent-color: var(--dsw-alias-brand-primary);
+}
+/*
+ * A model's on/off control is a switch, not a checkbox: it takes effect
+ * immediately and its state is what matters, not a tick. Drawn from the theme
+ * tokens with appearance: none, so it follows the host palette in both themes
+ * instead of the platform's checkbox chrome.
+ */
+${scope} input[type="checkbox"].dsh-subscription-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: 34px;
+  height: 20px;
+  margin: 0;
+  border: 0.5px solid var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2));
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+${scope} input[type="checkbox"].dsh-subscription-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-primary-foreground, #fff);
+  box-shadow: 0 1px 2px #0003;
+  transition: transform 120ms ease;
+}
+${scope} input[type="checkbox"].dsh-subscription-switch:checked {
+  border-color: transparent;
+  background: var(--dsw-alias-state-success-primary, var(--dsw-alias-brand-primary, #067647));
+}
+${scope} input[type="checkbox"].dsh-subscription-switch:checked::after {
+  transform: translateX(14px);
+}
+${scope} input[type="checkbox"].dsh-subscription-switch:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+${scope} button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+${scope} button:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-3));
+}
+${scope} button:active:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
+}
+${scope} button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* A control that is present but should not read as a bordered button. */
+${scope} button.dsh-subscription-quiet {
+  min-height: 22px;
+  padding: 0 4px;
+  border-color: transparent;
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));
+}
+/* The free-text field for a hand-added model id. */
+${scope} input.dsh-subscription-input {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+${scope} input.dsh-subscription-input::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+${scope} input.dsh-subscription-input:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+/* A drag handle: no border or fill, so it reads as a grip rather than a button. */
+${scope} button.dsh-subscription-handle {
+  min-height: 18px;
+  height: 18px;
+  padding: 0 2px;
+  border-color: transparent;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  font-size: 12px;
+  line-height: 18px;
+  cursor: grab;
+}
+${scope} button.dsh-subscription-handle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+${scope} button.dsh-subscription-handle:active:not(:disabled) { cursor: grabbing; }
+/* Controls inside the manage dialog are one step larger, like a form footer. */
+${scope} .dsh-subscription-dialog-actions button {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--dsw-radius-md, 8px);
+  font-size: 13px;
+  line-height: 1.5;
+}
+${scope} button.dsh-subscription-primary {
+  border-color: transparent;
+  background: var(--dsw-alias-button-primary-fill, var(--dsw-alias-label-primary));
+  color: var(--dsw-alias-label-primary-foreground, var(--dsw-alias-bg-layer-1));
+  font-weight: 500;
+}
+${scope} button.dsh-subscription-primary:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-label-secondary));
+}
+${scope} button:focus-visible,
+${scope} input[type="checkbox"]:focus-visible,
+${scope} .dsh-subscription-disclosure:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+/* The catalog heading is a summary-style disclosure, not a bordered button. */
+${scope} .dsh-subscription-disclosure {
+  border-color: transparent;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));
+}
+${scope} .dsh-subscription-disclosure:hover:not(:disabled) {
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+/* A usage meter: the track, with the fill sized by the caller. */
+${scope} .dsh-subscription-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2));
+  overflow: hidden;
+}
+${scope} .dsh-subscription-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--dsw-alias-state-success-primary, #067647);
+}
+${scope} .dsh-subscription-meter > span[data-exhausted="true"] {
+  background: var(--dsw-alias-state-error-primary, #b42318);
+}
+`

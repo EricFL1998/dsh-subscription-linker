@@ -1,0 +1,149 @@
+/** Credential store: account keying, atomic persistence, and account lifecycle. */
+
+import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { after, before, describe, test } from 'node:test'
+
+import { accountKeyOf, accountLabelOf, KimiTokenStore } from '../src/auth/store.js'
+import type { KimiSession } from '../src/auth/store.js'
+
+let directory: string
+
+before(async () => {
+  directory = await mkdtemp(path.join(tmpdir(), 'kimi-store-'))
+})
+
+after(async () => {
+  await rm(directory, { recursive: true, force: true })
+})
+
+/** A session with the given identity fields. */
+function session(overrides: Partial<KimiSession> = {}): KimiSession {
+  return {
+    accessToken: 'access',
+    refreshToken: 'refresh',
+    expiresAt: Date.now() + 3_600_000,
+    oauthHost: 'https://auth.kimi.com',
+    ...overrides,
+  }
+}
+
+/** Write a fixture credential file and return its path. */
+async function fixture(name: string, contents: string): Promise<string> {
+  const file = path.join(directory, name, 'auth.json')
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, contents, 'utf8')
+  return file
+}
+
+describe('account identity', () => {
+  test('prefers the service user id, then the email', () => {
+    assert.equal(accountKeyOf(session({ accountId: 'user-1', email: 'a@b.c' })), 'user-1')
+    assert.equal(accountKeyOf(session({ email: 'a@b.c' })), 'a@b.c')
+  })
+
+  test('falls back to a digest that distinguishes two opaque logins', () => {
+    const first = accountKeyOf(session({ refreshToken: 'one' }))
+    const second = accountKeyOf(session({ refreshToken: 'two' }))
+    assert.match(first, /^[0-9a-f]{16}$/)
+    assert.notEqual(first, second)
+    assert.equal(first, accountKeyOf(session({ refreshToken: 'one' })))
+  })
+
+  test('labels an account with its email, id, or key', () => {
+    assert.equal(accountLabelOf(session({ email: 'a@b.c', accountId: 'u' })), 'a@b.c')
+    assert.equal(accountLabelOf(session({ accountId: 'u' })), 'u')
+    assert.match(accountLabelOf(session({ refreshToken: 'x' })), /^[0-9a-f]{16}$/)
+  })
+})
+
+describe('KimiTokenStore', () => {
+  test('saves, reads back, and makes the first account the default', async () => {
+    const store = new KimiTokenStore(path.join(directory, 'first', 'auth.json'), 'kimi')
+    assert.equal(await store.hasAny(), false)
+    assert.equal(await store.defaultAccount(), undefined)
+
+    await store.save('user-1', session({ accountId: 'user-1' }))
+    assert.equal(await store.hasAny(), true)
+    assert.equal(await store.defaultAccount(), 'user-1')
+    assert.equal((await store.get())?.accessToken, 'access')
+    assert.deepEqual(Object.keys(await store.list()), ['user-1'])
+
+    // A second account appends without stealing the default.
+    await store.save('user-2', session({ accountId: 'user-2' }), { makeDefault: false })
+    assert.deepEqual(Object.keys(await store.list()).sort(), ['user-1', 'user-2'])
+    assert.equal(await store.defaultAccount(), 'user-1')
+
+    await store.setDefault('user-2')
+    assert.equal(await store.defaultAccount(), 'user-2')
+  })
+
+  test('writes owner-only permissions and re-reads from disk', async () => {
+    const file = path.join(directory, 'perms', 'auth.json')
+    const store = new KimiTokenStore(file, 'kimi')
+    await store.save('user-1', session({ accountId: 'user-1' }))
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(file)).mode & 0o777, 0o600)
+    }
+    const raw = await readFile(file, 'utf8')
+    assert.match(raw, /"kimi"/)
+    assert.match(raw, /"user-1"/)
+
+    const reopened = new KimiTokenStore(file, 'kimi')
+    assert.equal((await reopened.get('user-1'))?.oauthHost, 'https://auth.kimi.com')
+  })
+
+  test('removing the default hands it to a remaining account', async () => {
+    const store = new KimiTokenStore(path.join(directory, 'remove', 'auth.json'), 'kimi')
+    await store.save('first', session())
+    await store.save('second', session())
+    assert.equal(await store.defaultAccount(), 'second')
+
+    await store.remove('second')
+    assert.equal(await store.defaultAccount(), 'first')
+    await store.remove('first')
+    assert.equal(await store.defaultAccount(), undefined)
+    assert.equal(await store.hasAny(), false)
+  })
+
+  test('a corrupt file degrades to signed out instead of throwing', async () => {
+    const file = await fixture('corrupt', '{ not json')
+    const store = new KimiTokenStore(file, 'kimi')
+    assert.deepEqual(await store.list(), {})
+    assert.equal(await store.hasAny(), false)
+  })
+
+  test('ignores entries that are not usable sessions', async () => {
+    const file = await fixture('partial', JSON.stringify({
+      kimi: {
+        default: 'good',
+        accounts: {
+          good: { accessToken: 'a', oauthHost: 'https://auth.kimi.com', expiresAt: 1 },
+          missingHost: { accessToken: 'a', expiresAt: 1 },
+          badExpiry: { accessToken: 'a', oauthHost: 'https://auth.kimi.com', expiresAt: 'soon' },
+          notAnObject: 'nope',
+        },
+      },
+    }))
+    const store = new KimiTokenStore(file, 'kimi')
+    assert.deepEqual(Object.keys(await store.list()), ['good'])
+  })
+
+  test('keeps another plugin section in a shared file untouched', async () => {
+    const file = path.join(directory, 'shared', 'auth.json')
+    const store = new KimiTokenStore(file, 'kimi')
+    await store.save('user-1', session({ accountId: 'user-1' }))
+
+    const parsed = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+    parsed.other = { default: 'x', accounts: { x: { marker: true } } }
+    await writeFile(file, JSON.stringify(parsed), 'utf8')
+
+    const reopened = new KimiTokenStore(file, 'kimi')
+    await reopened.save('user-2', session({ accountId: 'user-2' }))
+    const written = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+    assert.deepEqual(written.other, { default: 'x', accounts: { x: { marker: true } } })
+    assert.deepEqual(Object.keys(written.kimi as object).sort(), ['accounts', 'default'])
+  })
+})
