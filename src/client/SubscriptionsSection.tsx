@@ -630,7 +630,13 @@ function ProviderCard(props: {
         <span style={{ ...styles.dot, background: dotColor(status) }} aria-hidden="true" />
         <span style={styles.name}>{status.displayName}</span>
         <span style={styles.providerId}>{status.provider}</span>
-        {!cardOpen && <span style={styles.cardSummary}>{summaryLine}</span>}
+        {/*
+          The state stays in the header whether the card is open or folded. The
+          body used to repeat the same sentence as its first line, so expanding a
+          card made that text appear to jump down a line — the one thing the reader
+          is watching.
+        */}
+        <span style={styles.cardSummary}>{summaryLine}</span>
         <button
           type="button"
           className="dsh-subscription-quiet"
@@ -646,17 +652,6 @@ function ProviderCard(props: {
         id={`dsh-subscription-card-${status.provider}`}
         style={cardOpen ? styles.cardBody : { ...styles.cardBody, display: 'none' }}
       >
-      <p style={styles.statusLine}>
-        {!connectable
-          // `auto` has no account: it stands in for the models the other routes
-          // signed in for, so it counts the candidates instead.
-          ? t('statusAuto', { count: models.filter((model) => model.visible).length })
-          : busy
-            ? t('statusBusy')
-            : status.loggedIn
-              ? t('statusConnected', { count: accounts.length })
-              : t('statusSignedOut')}
-      </p>
       {connectable && !status.loggedIn && !busy && <p style={styles.statusLine}>{t('statusSignIn')}</p>}
       {status.lastError !== undefined && (
         <p className="dsh-subscription-error">{t('lastError', { message: status.lastError })}</p>

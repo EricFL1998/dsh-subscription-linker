@@ -178,7 +178,7 @@ The CLI forwards its arguments to pnpm, so a pinned version, a git URL and a loc
 path are all spelled the same way:
 
 ```sh
-dsh plugin --profile web add dsh-plugin-subscription-oauth@0.2.1
+dsh plugin --profile web add dsh-plugin-subscription-oauth@0.2.2
 dsh plugin --profile web add github:EricFL1998/dsh-subscription-oauth
 dsh plugin --profile web add /path/to/dsh-plugin-subscription-oauth
 ```
