@@ -85,6 +85,17 @@ export interface UsageChipInjected {
    * the provider did not answer.
    */
   ccSwitchBalance: CcSwitchBalanceCall
+  /**
+   * The credential reference a manually added provider's balance query uses, by provider
+   * id.
+   *
+   * A manually added provider is not one this plugin serves and has no account route, so
+   * the only way to read its balance is cc-switch's query, which needs the provider's API
+   * key. That key is named by the provider's profile (`apiKeyEnv`), and the host's
+   * credential service resolves the name; this map is the one place a provider id is tied
+   * to that name. A provider with no entry gets no balance.
+   */
+  ccSwitchCredentialRef: (provider: string) => string | undefined
 }
 
 /** One model choice, as the host records it. */
@@ -278,7 +289,7 @@ export function formatReset(at: number | undefined, now: number): string | undef
  * @param props - injected RPC caller, copy, and the session's provider reader.
  * @returns the chip, or null when there is nothing true to say.
  */
-export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
+export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, ccSwitchCredentialRef, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
   const [reading, setReading] = useState<ChipReading | undefined>(undefined)
   const [balance, setBalance] = useState<readonly ChipBalance[] | undefined>(undefined)
   const [ccBalance, setCcBalance] = useState<{ currency: string, total: string } | undefined>(undefined)
@@ -296,6 +307,36 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
   // and the balance endpoint, so the chip shows its balance rather than staying silent.
   // An own route takes the balance read over nothing.
   const isDeepSeek = selected === 'deepseek-account'
+
+  // A manually added provider reads its balance by cc-switch's query, which needs the
+  // provider's API key. The provider's profile names that key by reference, and this map
+  // is the one place a provider id is tied to the reference; a provider with no entry,
+  // or one whose key does not resolve, gets no balance.
+  const ccRef = selected === undefined || isOwnProvider(selected) || isDeepSeek
+    ? undefined
+    : ccSwitchCredentialRef(selected)
+
+  // Read a manually added provider's balance while it is in force, on the same cadence as
+  // the other reads. It resolves to undefined when there is no key or the provider did
+  // not answer, which leaves the chip silent.
+  useEffect(() => {
+    if (ccRef === undefined) {
+      setCcBalance(undefined)
+      return
+    }
+    let live = true
+    const refresh = (): void => {
+      void ccSwitchBalance(ccRef)
+        .then((value) => { if (live) setCcBalance(value === undefined ? undefined : { currency: value.currency, total: value.total }) })
+        .catch(() => { /* a failed balance read stays silent */ })
+    }
+    refresh()
+    const timer = setInterval(refresh, REFRESH_INTERVAL_MS)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [ccRef, ccSwitchBalance])
 
   const load = useCallback(async (target: string): Promise<ChipReading | undefined> => {
     try {
@@ -364,6 +405,49 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     document.addEventListener('click', close)
     return () => { document.removeEventListener('click', close) }
   }, [open])
+
+  // A manually added provider reads as money too, through cc-switch's query. It shows
+  // the one currency's total the provider answered with, nothing when there is no usable
+  // balance.
+  if (ccRef !== undefined) {
+    if (ccBalance === undefined) return null
+    const short = shortLabel(selected ?? '', selected ?? '')
+    return (
+      <span className="dsh-subscription-usage-chip">
+        <style>{usageChipCss}</style>
+        <button
+          type="button"
+          className="dsh-subscription-usage-chip-trigger"
+          aria-expanded={open}
+          title={t('usageChipTitle', { provider: selected ?? '' })}
+          onClick={(event) => {
+            event.stopPropagation()
+            setOpen((was) => !was)
+          }}
+        >
+          <span className="dsh-subscription-usage-chip-label">{short}</span>
+          <span className="dsh-subscription-usage-chip-cell">
+            <span className="dsh-subscription-usage-chip-value">
+              {`${ccBalance.currency === 'CNY' ? '¥' : ccBalance.currency === 'USD' ? '$' : `${ccBalance.currency} `}${ccBalance.total}`}
+            </span>
+          </span>
+        </button>
+        {open && (
+          <span className="dsh-subscription-usage-chip-panel" role="status">
+            <span className="dsh-subscription-usage-chip-full">
+              {t('usageChipFull', { provider: selected ?? '' })}
+            </span>
+            <span className="dsh-subscription-usage-chip-meter">
+              <span className="dsh-subscription-usage-chip-meterHead">
+                <span>{ccBalance.currency}</span>
+                <span className="dsh-subscription-usage-chip-detail">{ccBalance.total}</span>
+              </span>
+            </span>
+          </span>
+        )}
+      </span>
+    )
+  }
 
   // The DeepSeek account reads as money, not as a percentage, so it takes its own line:
   // the route abbreviated, then each wallet. An unknown selection leaves the chip silent.
