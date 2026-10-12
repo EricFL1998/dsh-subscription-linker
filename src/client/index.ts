@@ -21,7 +21,8 @@ import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
 import { UsageChip } from './UsageChip.js'
 import type { UsageChipInjected } from './UsageChip.js'
-import { createSubscriptionsCall } from './subscriptions-rpc.js'
+import { createSubscriptionsCall, createAccountBalanceCall, createCcSwitchBalanceCall } from './subscriptions-rpc.js'
+import type { AccountBalanceCall } from './subscriptions-rpc.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -29,7 +30,7 @@ export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './
 export type { UsageChipInjected } from './UsageChip.js'
 export type { SubscriptionsKey } from './locales.js'
 export { createSubscriptionsCall, SubscriptionsRpcError } from './subscriptions-rpc.js'
-export type { SubscriptionsCall } from './subscriptions-rpc.js'
+export type { SubscriptionsCall, AccountBalanceCall } from './subscriptions-rpc.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -126,6 +127,8 @@ export function apply(ctx: ClientContext): void {
       call,
       t: t as unknown as UsageChipInjected['t'],
       isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
+      accountBalance: createAccountBalanceCall(connection.rpc),
+      ccSwitchBalance: createCcSwitchBalanceCall(connection.rpc),
     }),
   }, UsageChip))
 }

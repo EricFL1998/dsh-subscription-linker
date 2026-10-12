@@ -1,0 +1,83 @@
+/**
+ * The cc-switch balance query, reimplemented for the plugin's node half.
+ *
+ * cc-switch (github.com/farion1231/cc-switch) reads a DeepSeek-compatible provider's
+ * balance with `GET https://api.deepseek.com/user/balance`, an `Authorization: Bearer
+ * <api key>` header, and a 15 s timeout. This is that request, with the URL hardcoded
+ * exactly as cc-switch does — the provider's own base URL is never substituted in.
+ *
+ * The endpoint answers `{ is_available, balance_infos: [{ currency, total_balance, … }] }`,
+ * where a balance is a number or a numeric string. The module reduces that to the one
+ * figure a status chip needs: the first currency's total. Anything else — a missing key,
+ * a non-2xx answer, malformed JSON — resolves to nothing, so the caller shows no balance
+ * rather than a wrong one.
+ *
+ * @module dsh-plugin-subscription-oauth/auth/ccswitch
+ */
+
+import { proxiedFetch } from '../http.js'
+import type { FetchFn } from '../http.js'
+
+/** One currency's balance, normalised from the endpoint's answer. */
+export interface CcSwitchBalance {
+  /** The currency the balance is denominated in. */
+  currency: string
+  /** The remaining balance, as a decimal string. */
+  total: string
+  /** Whether the account reports itself as usable. */
+  available: boolean
+}
+
+/** Read a balance field that may be a number or a numeric string. */
+function num(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return value.trim()
+  return undefined
+}
+
+/**
+ * Query one provider's balance the way cc-switch does.
+ *
+ * @param input - the provider's API key, and optionally a fetch to substitute in tests.
+ * @returns the balance, or undefined when the provider did not answer with one.
+ */
+export async function queryCcSwitchBalance(input: {
+  apiKey: string
+  fetchFn?: FetchFn
+}): Promise<CcSwitchBalance | undefined> {
+  const fetchFn = input.fetchFn ?? proxiedFetch
+  let response: Response
+  try {
+    // cc-switch's exact request shape: hardcoded URL, bearer auth, 15 s timeout.
+    response = await fetchFn('https://api.deepseek.com/user/balance', {
+      headers: { authorization: `Bearer ${input.apiKey}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch {
+    return undefined
+  }
+  if (!response.ok) return undefined
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    return undefined
+  }
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const record = payload as Record<string, unknown>
+  const infos = record.balance_infos
+  if (!Array.isArray(infos)) return undefined
+  for (const raw of infos) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const info = raw as Record<string, unknown>
+    const total = num(info.total_balance)
+    if (total === undefined) continue
+    const currency = typeof info.currency === 'string' && info.currency.trim() !== '' ? info.currency.trim() : 'CNY'
+    return {
+      currency,
+      total,
+      available: record.is_available !== false,
+    }
+  }
+  return undefined
+}

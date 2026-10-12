@@ -1,4 +1,12 @@
 /**
+ * How one named credential resolves to a value.
+ *
+ * The host's credential service owns this; the RPC layer only calls it, so the balance
+ * query does not re-derive how a key is stored.
+ */
+export type CredentialResolver = (ref: string) => Promise<string | undefined>
+
+/**
  * The host-side transport behind the Settings page.
  *
  * Each endpoint is served as its own `POST /api/subscription-oauth.<endpoint>`
@@ -13,6 +21,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import { BAD_REQUEST, ProviderError } from '../errors.js'
+import { queryCcSwitchBalance } from './ccswitch.js'
 import { RPC_ENDPOINTS, RPC_PREFIX } from '../protocol.js'
 import type { RpcError, RpcRequest, RpcResult } from '../protocol.js'
 import type { SubscriptionRegistry } from './registry.js'
@@ -119,9 +128,10 @@ export async function dispatchRpc(
   registry: SubscriptionRegistry,
   endpoint: string,
   payload: unknown,
+  resolveCredential?: CredentialResolver,
 ): Promise<RpcResult> {
   try {
-    return success(await runEndpoint(registry, endpoint, payload))
+    return success(await runEndpoint(registry, endpoint, payload, resolveCredential))
   } catch (error: unknown) {
     return failure(error)
   }
@@ -135,6 +145,7 @@ async function runEndpoint(
   registry: SubscriptionRegistry,
   endpoint: string,
   payload: unknown,
+  resolveCredential?: CredentialResolver,
 ): Promise<unknown> {
   switch (endpoint) {
     case 'status':
@@ -187,6 +198,18 @@ async function runEndpoint(
     }
     case 'usage':
       return registry.usage(requiredProvider(payload, endpoint), booleanField(payload, 'force'))
+    case 'ccswitch-balance': {
+      // A manually added provider's balance, by cc-switch's query. The caller names the
+      // credential reference the provider's profile uses (its apiKeyEnv), and the host's
+      // credential service resolves it. No key, or a key the provider does not answer
+      // for, means no balance — never a fabricated zero.
+      if (resolveCredential === undefined) return undefined
+      const credentialRef = stringField(payload, 'credentialRef')
+      if (credentialRef === undefined) return undefined
+      const apiKey = await resolveCredential(credentialRef)
+      if (apiKey === undefined) return undefined
+      return await queryCcSwitchBalance({ apiKey })
+    }
     case 'reload':
       return registry.reload()
     default:
@@ -195,7 +218,7 @@ async function runEndpoint(
 }
 
 /** Build the Fetch route for one endpoint. */
-function rpcRoute(endpoint: string, registry: SubscriptionRegistry): FetchRouteCompat {
+function rpcRoute(endpoint: string, registry: SubscriptionRegistry, resolveCredential?: CredentialResolver): FetchRouteCompat {
   const method = `${RPC_PREFIX}${endpoint}`
   return {
     path: `/api/${method}`,
@@ -218,7 +241,7 @@ function rpcRoute(endpoint: string, registry: SubscriptionRegistry): FetchRouteC
       if (envelopeRequest.type !== 'client-request' || envelopeRequest.method !== method) {
         return rejection(rpcId, 'gateway/bad-request', `${method} received an envelope for another method`, 400)
       }
-      return envelope(rpcId, await dispatchRpc(registry, endpoint, envelopeRequest.payload))
+      return envelope(rpcId, await dispatchRpc(registry, endpoint, envelopeRequest.payload, resolveCredential))
     },
   }
 }
@@ -233,11 +256,20 @@ export function registerSubscriptionRpc(ctx: Context, registry: SubscriptionRegi
   ctx.inject(['connection'], (connectionCtx: Context) => {
     const connection = connectionCtx.get('connection') as HostConnectionCompat | undefined
     if (connection === undefined) return
+    // The cc-switch balance endpoint resolves a credential reference through the host's
+    // credential service. It is optional: a composition with no credential service still
+    // serves every other endpoint, and the balance endpoint simply answers nothing.
+    const credentials = connectionCtx.get('credentials') as
+      | { resolve?: (ref: string) => Promise<{ value: string } | undefined> }
+      | undefined
+    const resolveCredential: CredentialResolver | undefined = credentials?.resolve === undefined
+      ? undefined
+      : async (ref) => (await credentials.resolve?.(ref))?.value
     const register = (route: FetchRouteCompat): (() => Promise<void>) => connection.fetch.register(route)
     for (const endpoint of RPC_ENDPOINTS) {
       const method = `${RPC_PREFIX}${endpoint}`
       connectionCtx.effect(
-        () => register(rpcRoute(endpoint, registry)),
+        () => register(rpcRoute(endpoint, registry, resolveCredential)),
         `dsh-plugin-subscription-oauth: /api/${method} route`,
       )
     }

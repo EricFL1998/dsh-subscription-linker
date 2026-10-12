@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { formatReset, pickWindow, providerOf, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
+import { balanceOf, formatBalance, formatReset, pickWindow, providerOf, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
 import type { ProviderUsage, UsageWindow } from '../src/protocol.js'
 
 /** One account's usage with the given windows. */
@@ -76,6 +76,34 @@ describe('shortWindow', () => {
 
   test('truncates a long unrecognised name rather than dropping it', () => {
     assert.equal(shortWindow('fortnightly'), 'fort')
+  })
+})
+
+describe('balanceOf', () => {
+  test('lists topped-up wallets before bonus wallets', () => {
+    const wallets = balanceOf({
+      value: [{ currency: 'CNY', balance: '6.89' }],
+      bonusWallets: [{ currency: 'CNY', balance: '2' }],
+    })
+    assert.deepEqual(wallets?.map((wallet) => `${wallet.currency}:${wallet.balance}:${wallet.bonus}`), ['CNY:6.89:false', 'CNY:2:true'])
+  })
+
+  test('reduces a failed read or no account to nothing', () => {
+    assert.equal(balanceOf(null), undefined)
+    assert.equal(balanceOf({ status: 'failed' }), undefined)
+    assert.equal(balanceOf({ value: [] }), undefined)
+  })
+})
+
+describe('formatBalance', () => {
+  test('renders money with a currency symbol, not a meter', () => {
+    assert.equal(formatBalance({ currency: 'CNY', balance: '6.89', bonus: false }), '¥6.89')
+    assert.equal(formatBalance({ currency: 'USD', balance: '1.5', bonus: false }), '$1.5')
+  })
+
+  test('marks a bonus wallet with a plus and leaves an odd currency named', () => {
+    assert.equal(formatBalance({ currency: 'CNY', balance: '2', bonus: true }), '+¥2')
+    assert.equal(formatBalance({ currency: 'EUR', balance: '3', bonus: false }), 'EUR 3')
   })
 })
 

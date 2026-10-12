@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 
-import type { SubscriptionsCall } from './subscriptions-rpc.js'
+import type { SubscriptionsCall, AccountBalanceCall, CcSwitchBalanceCall } from './subscriptions-rpc.js'
 import { usageChipCss } from './styles.js'
 import type { ProviderUsage, UsageWindow } from '../protocol.js'
 
@@ -68,6 +68,23 @@ export interface UsageChipInjected {
   t: (key: 'usageChipTitle' | 'usageChipFull', values?: Record<string, string | number>) => string
   /** Whether the provider is one this plugin serves. */
   isOwnProvider: (provider: string) => boolean
+  /**
+   * The DeepSeek account's balance, when the session uses it.
+   *
+   * The host owns that account's grant and the platform endpoint, so the chip asks the
+   * host rather than re-deriving either. It resolves to `undefined` when the account is
+   * signed out or the read fails, in which case the chip stays silent.
+   */
+  accountBalance: AccountBalanceCall
+  /**
+   * A manually added provider's balance, by cc-switch's query.
+   *
+   * The caller names the credential reference the provider's profile uses (its
+   * `apiKeyEnv`); the host's credential service resolves it, and the node half asks
+   * cc-switch's balance endpoint. It resolves to `undefined` when there is no key or
+   * the provider did not answer.
+   */
+  ccSwitchBalance: CcSwitchBalanceCall
 }
 
 /** One model choice, as the host records it. */
@@ -111,6 +128,52 @@ export interface ChipReading {
   window: UsageWindow
   /** Plan name, when the provider stated one. */
   plan?: string
+}
+
+/** One currency's balance, as the host's account controller reports it. */
+export interface ChipBalance {
+  /** The wallet's currency. */
+  currency: string
+  /** Remaining balance, as a decimal string. */
+  balance: string
+  /** Whether this is a bonus / promotional wallet rather than topped-up credit. */
+  bonus: boolean
+}
+
+/**
+ * Reduce the host's account-balance payload to the wallets the chip shows.
+ *
+ * Bonus wallets are shown after the topped-up ones, so a reader sees their own credit
+ * first and any promotional credit as a secondary figure.
+ *
+ * @param value - the host's ready balance, or undefined when there is none.
+ * @returns the wallets, topped-up first then bonus, or undefined when nothing is usable.
+ */
+export function balanceOf(value: { value?: readonly { currency: string, balance: string }[], bonusWallets?: readonly { currency: string, balance: string }[] } | { status: string } | null | undefined): readonly ChipBalance[] | undefined {
+  // A failed read or no account (`{status:'failed'}` or `null`) reduces to nothing, as
+  // does a ready payload that names no wallet.
+  if (value === null || value === undefined || !('value' in value) || value.value === undefined) return undefined
+  const wallets: ChipBalance[] = [
+    ...value.value.map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: false })),
+    ...(value.bonusWallets ?? []).map((wallet) => ({ currency: wallet.currency, balance: wallet.balance, bonus: true })),
+  ]
+  return wallets.length === 0 ? undefined : wallets
+}
+
+/**
+ * Format one wallet for the chip's compact line.
+ *
+ * A balance is money, not a percentage, so it renders as `¥6.89` rather than a meter;
+ * the currency prefix keeps two currencies from being mistaken for one sum.
+ *
+ * @param wallet - the wallet to show.
+ * @returns the short form, e.g. `¥6.89` or `+¥2` for a bonus wallet.
+ */
+export function formatBalance(wallet: ChipBalance): string {
+  const amount = Number.parseFloat(wallet.balance)
+  const trimmed = Number.isFinite(amount) ? String(Math.round(amount * 100) / 100) : wallet.balance
+  const symbol = wallet.currency === 'CNY' ? '¥' : wallet.currency === 'USD' ? '$' : `${wallet.currency} `
+  return `${wallet.bonus ? '+' : ''}${symbol}${trimmed}`
 }
 
 /**
@@ -215,8 +278,10 @@ export function formatReset(at: number | undefined, now: number): string | undef
  * @param props - injected RPC caller, copy, and the session's provider reader.
  * @returns the chip, or null when there is nothing true to say.
  */
-export function UsageChip({ call, t, isOwnProvider, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
+export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
   const [reading, setReading] = useState<ChipReading | undefined>(undefined)
+  const [balance, setBalance] = useState<readonly ChipBalance[] | undefined>(undefined)
+  const [ccBalance, setCcBalance] = useState<{ currency: string, total: string } | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
   const [open, setOpen] = useState(false)
   // The last route that answered, so a switch to a foreign provider leaves the last own
@@ -226,6 +291,11 @@ export function UsageChip({ call, t, isOwnProvider, useProjection }: UsageChipIn
   // A projection read, so the chip follows the picker: changing the model re-renders it
   // with the new provider instead of waiting for the next unrelated render.
   const selected = useProjection('modelSelection', (value) => providerOf(value as ModelSelectionProjection))
+
+  // The DeepSeek account is not one of this plugin's routes, but the host owns its grant
+  // and the balance endpoint, so the chip shows its balance rather than staying silent.
+  // An own route takes the balance read over nothing.
+  const isDeepSeek = selected === 'deepseek-account'
 
   const load = useCallback(async (target: string): Promise<ChipReading | undefined> => {
     try {
@@ -238,6 +308,28 @@ export function UsageChip({ call, t, isOwnProvider, useProjection }: UsageChipIn
       return undefined
     }
   }, [call])
+
+  // Read the DeepSeek account's balance while that provider is in force, on the same
+  // cadence as a usage read. It resolves to undefined when the account is signed out or
+  // the read fails, which leaves the chip silent.
+  useEffect(() => {
+    if (!isDeepSeek) {
+      setBalance(undefined)
+      return
+    }
+    let live = true
+    const refresh = (): void => {
+      void accountBalance()
+        .then((value) => { if (live) setBalance(balanceOf(value)) })
+        .catch(() => { /* a failed balance read stays silent */ })
+    }
+    refresh()
+    const timer = setInterval(refresh, REFRESH_INTERVAL_MS)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [isDeepSeek, accountBalance])
 
   useEffect(() => {
     const target = selected !== undefined && isOwnProvider(selected)
@@ -272,6 +364,50 @@ export function UsageChip({ call, t, isOwnProvider, useProjection }: UsageChipIn
     document.addEventListener('click', close)
     return () => { document.removeEventListener('click', close) }
   }, [open])
+
+  // The DeepSeek account reads as money, not as a percentage, so it takes its own line:
+  // the route abbreviated, then each wallet. An unknown selection leaves the chip silent.
+  if (isDeepSeek) {
+    if (balance === undefined) return null
+    const short = shortLabel('deepseek-account', 'DeepSeek Account')
+    return (
+      <span className="dsh-subscription-usage-chip">
+        <style>{usageChipCss}</style>
+        <button
+          type="button"
+          className="dsh-subscription-usage-chip-trigger"
+          aria-expanded={open}
+          title={t('usageChipTitle', { provider: 'DeepSeek Account' })}
+          onClick={(event) => {
+            event.stopPropagation()
+            setOpen((was) => !was)
+          }}
+        >
+          <span className="dsh-subscription-usage-chip-label">{short}</span>
+          {balance.map((wallet) => (
+            <span className="dsh-subscription-usage-chip-cell" key={`${wallet.currency}${wallet.bonus ? ':bonus' : ''}`}>
+              <span className="dsh-subscription-usage-chip-value">{formatBalance(wallet)}</span>
+            </span>
+          ))}
+        </button>
+        {open && (
+          <span className="dsh-subscription-usage-chip-panel" role="status">
+            <span className="dsh-subscription-usage-chip-full">
+              {t('usageChipFull', { provider: 'DeepSeek Account' })}
+            </span>
+            {balance.map((wallet) => (
+              <span className="dsh-subscription-usage-chip-meter" key={`${wallet.currency}${wallet.bonus ? ':bonus' : ''}`}>
+                <span className="dsh-subscription-usage-chip-meterHead">
+                  <span>{`${wallet.bonus ? 'Bonus · ' : ''}${wallet.currency}`}</span>
+                  <span className="dsh-subscription-usage-chip-detail">{formatBalance(wallet)}</span>
+                </span>
+              </span>
+            ))}
+          </span>
+        )}
+      </span>
+    )
+  }
 
   if (reading === undefined) return null
   const percent = reading.window.usedPercent

@@ -28,6 +28,7 @@ export const RPC_ENDPOINTS = [
   'removeModel',
   'usage',
   'reload',
+  'ccswitch-balance',
 ] as const
 
 /** One endpoint name. */
@@ -311,4 +312,52 @@ export interface RpcMap {
   removeModel: { payload: ModelIdRequest, value: SubscriptionStatus }
   usage: { payload: DiscoverRequest, value: UsageResult }
   reload: { payload: undefined, value: SubscriptionStatus }
+  'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
 }
+
+/** One currency's wallet balance, as the platform reports it. */
+export interface WalletBalance {
+  /** ISO currency the balance is denominated in. */
+  currency: 'CNY' | 'USD' | string
+  /** Remaining balance, as a decimal string. */
+  balance: string
+}
+
+/** The DeepSeek account's wallet balances, normalised from the host's account service. */
+export interface AccountBalance {
+  /** Normal (topped-up) wallets, one per currency. */
+  wallets: readonly WalletBalance[]
+  /** Bonus / promotional wallets, one per currency. */
+  bonusWallets: readonly WalletBalance[]
+}
+
+/** Result of reading the DeepSeek account's balance through the host. */
+export type BalanceResult =
+  /** The account answered with its balances. */
+  | { ok: true, balance: AccountBalance }
+  /** The account is signed out, or the read failed. */
+  | { ok: false }
+
+/** Payload of `ccswitch-balance`. */
+export interface CcSwitchBalanceRequest {
+  /** The credential reference the provider's profile names (its apiKeyEnv). */
+  credentialRef: string
+}
+
+/**
+ * Result of `ccswitch-balance`.
+ *
+ * `undefined` means the provider did not answer with a balance — no key, a key it
+ * rejects, or a body that is not the balance shape. A chip shows nothing rather than a
+ * wrong figure, so this is deliberately not an error.
+ */
+export type CcSwitchBalanceResult =
+  | {
+    /** The currency the balance is denominated in. */
+    currency: string
+    /** The remaining balance, as a decimal string. */
+    total: string
+    /** Whether the account reports itself as usable. */
+    available: boolean
+  }
+  | undefined
