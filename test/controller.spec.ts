@@ -136,18 +136,18 @@ describe('status assembly', () => {
 })
 
 describe('eager refresh', () => {
-  test('a signed-in route resolves its default account while reporting status', async () => {
+  test('a signed-in route does not refresh on a status read', async () => {
     const store = makeStore('eager')
     await store.save('user-1', { accessToken: 'a', expiresAt: Date.now() + 60_000, refreshToken: 'r' })
     const { controller: subject, resolves } = controller({ store })
     await subject.status()
-    assert.deepEqual(resolves, ['user-1'])
+    assert.deepEqual(resolves, [])
   })
 
-  test('a lapsed token is refreshed before the card reports its expiry', async () => {
+  test('a lapsed token is not refreshed by a status read', async () => {
     const store = makeStore('lapsed')
     await store.save('user-1', { accessToken: 'stale', expiresAt: Date.now() - 1, refreshToken: 'r' })
-    const { controller: subject } = controller({
+    const { controller: subject, resolves } = controller({
       store,
       resolve: async (account) => {
         // Emulate the token manager persisting a refreshed session.
@@ -160,8 +160,9 @@ describe('eager refresh', () => {
       },
     })
     const status = await subject.status()
-    assert.equal(status.accounts[0]?.expired, false)
-    assert.ok((status.accounts[0]?.expiresAt ?? 0) > Date.now() + 800_000)
+    // Status does not refresh; the stale expiry is reported as-is.
+    assert.equal(status.accounts[0]?.expired, true)
+    assert.deepEqual(resolves, [])
   })
 
   test('a route with no refresh token is left alone', async () => {
@@ -172,18 +173,24 @@ describe('eager refresh', () => {
     assert.deepEqual(resolves, [])
   })
 
-  test('a permanent refresh failure is surfaced instead of thrown', async () => {
+  test('a permanent refresh failure is surfaced by discover, not status', async () => {
     const store = makeStore('dead')
     await store.save('user-1', { accessToken: 'stale', expiresAt: Date.now() - 1, refreshToken: 'r' })
     const { controller: subject } = controller({
       store,
+      spec: spec({ discovery: true }),
       resolve: async () => {
         throw new ProviderError('Test Provider account user-1 is not signed in', REAUTH_REQUIRED)
       },
     })
+    // Status does not trigger a refresh, so no error is reported yet.
     const status = await subject.status()
     assert.equal(status.accounts.length, 1)
-    assert.match(status.lastError ?? '', /sign-in has lapsed/)
+    assert.equal(status.lastError, undefined)
+    // Discover resolves tokens and surfaces the failure.
+    await subject.discover(true)
+    const after = await subject.status()
+    assert.match(after.lastError ?? '', /sign-in has lapsed/)
   })
 
   test('a transient refresh failure is not reported as a dead account', async () => {

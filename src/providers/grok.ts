@@ -371,12 +371,14 @@ export function isFastVariant(id: string): boolean {
   return FAST_VARIANT.test(id)
 }
 
-/** The base model id a fast variant belongs to (`grok-4.7-fast@500k` → `grok-4.7`). */
+/** The base model id a fast variant belongs to (`grok-4.7-build-fast@500k` → `grok-4.7`). */
 export function baseModelOf(id: string): string {
   return id
     .replace(FAST_VARIANT, '')
-    .replace(/[-_@]$/, '')
     .replace(/@\d+k$/i, '')
+    .replace(/[-_]$/, '')
+    .replace(/-(?:build|beta|alpha|rc|stable)$/i, '')
+    .replace(/[-_]$/, '')
 }
 
 /** A context-size suffix like `@500k` on a model id. */

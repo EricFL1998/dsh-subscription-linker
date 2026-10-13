@@ -193,11 +193,9 @@ export class ProviderController<S extends SessionBase> {
 
   /** Current state of the route. */
   async status(): Promise<ProviderStatus> {
-    // Keep the access token current while a user is looking at the card, so the
-    // expiry it shows is the live one rather than a stamp that lapsed minutes
-    // after login. Refreshing is de-duplicated per account by the token manager,
-    // and a failure must never make `status` itself fail.
-    await this.refreshIfLapsing()
+    // A status read must never trigger a network request: the settings page polls it,
+    // and a refresh here would mean every poll is a token call. The token is refreshed
+    // lazily when a request actually needs it (or by discover/usage below).
     const accounts = await this.options.store.list()
     const defaultAccount = await this.options.store.defaultAccount()
     const pending = this.options.flow.pending()
@@ -414,6 +412,9 @@ export class ProviderController<S extends SessionBase> {
       try {
         accessToken = (await this.options.tokens.resolve(account)).accessToken
       } catch (error: unknown) {
+        if (isReauthRequired(error) || isDeadGrant(messageOf(error))) {
+          this.lastError = `${spec.displayName} sign-in has lapsed; connect again`
+        }
         this.options.onWarn?.(`${spec.id} model discovery for ${account} skipped: ${messageOf(error)}`)
         continue
       }
