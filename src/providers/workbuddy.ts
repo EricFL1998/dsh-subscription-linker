@@ -220,10 +220,13 @@ export class WorkBuddyAdapter extends LlmAdapter {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
           ...workbuddyHeaders(token),
-          // Name the chat the way WorkBuddy's own client does: without these the gateway
-          // counts the request under no client and can cut the stream.
+          // Name the chat the way WorkBuddy's own client does: the conversation, the
+          // turn, and the message. Without these the gateway counts the request under no
+          // client and cuts the stream, which is why the reply stopped after a few seconds.
           'X-Conversation-Message-ID': randomHex(),
           'X-Request-ID': randomHex(),
+          'X-Conversation-Request-ID': randomHex(),
+          'X-Conversation-ID': randomHex(),
         },
         body: JSON.stringify(body),
         signal: watchdog.signal,
@@ -352,6 +355,19 @@ export class WorkBuddyAdapter extends LlmAdapter {
             chunk = JSON.parse(data) as ChatChunk
           } catch {
             continue
+          }
+          // WorkBuddy names a refusal mid-stream (an error frame, or a body with a non-zero
+          // code): surface it instead of reading the rest as silence, so the turn fails with
+          // the reason rather than stopping after a few empty seconds.
+          const wireError = (chunk as Record<string, unknown>).error ?? chunk.choices?.[0]?.delta
+          if (wireError !== undefined && wireError !== null && typeof wireError === 'object') {
+            const message = (wireError as Record<string, unknown>).message
+            if (typeof message === 'string' && message !== '') throw new Error(`WorkBuddy: ${message}`)
+          }
+          const wireCode = (chunk as Record<string, unknown>).code
+          if (typeof wireCode === 'number' && wireCode !== 0) {
+            const msg = (chunk as Record<string, unknown>).msg
+            throw new Error(`WorkBuddy: ${typeof msg === 'string' ? msg : `error ${wireCode}`}`)
           }
           const delta = chunk.choices?.[0]?.delta?.content
           if (typeof delta === 'string' && delta !== '') {
