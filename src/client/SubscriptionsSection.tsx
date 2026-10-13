@@ -361,32 +361,44 @@ function AccountUsage(props: {
   t: SubscriptionsSectionInjected['t']
   busyAction: boolean
   onCheckin?(): void
+  onTasks?(): void
 }) {
-  const { entry, t, busyAction, onCheckin } = props
+  const { entry, t, busyAction, onCheckin, onTasks } = props
   if (entry === undefined) return null
   const checkin = entry.checkin
   return (
     <div style={styles.usageInline}>
-      {checkin?.active === true && (
-        <div style={styles.usageLine}>
-          <span style={styles.modelName}>
-            {t('checkinTitle')}
-            {' · '}
-            {checkin.todayCheckedIn ? t('checkinDone', { days: checkin.streakDays }) : t('checkinPending')}
-          </span>
-          {!checkin.todayCheckedIn && onCheckin !== undefined && (
+      <div style={styles.usageLine}>
+        <span style={styles.modelName}>
+          {checkin?.active === true
+            ? checkin.todayCheckedIn
+              ? t('checkinDone', { days: checkin.streakDays })
+              : t('checkinPending')
+            : ''}
+        </span>
+        <span style={styles.pushRight}>
+          {onTasks !== undefined && (
             <button
               type="button"
               className="dsh-subscription-quiet"
-              style={styles.pushRight}
+              disabled={busyAction}
+              onClick={onTasks}
+            >
+              {t('tasksClaim')}
+            </button>
+          )}
+          {checkin?.active === true && !checkin.todayCheckedIn && onCheckin !== undefined && (
+            <button
+              type="button"
+              className="dsh-subscription-quiet"
               disabled={busyAction}
               onClick={onCheckin}
             >
               {t('checkinClaim')}
             </button>
           )}
-        </div>
-      )}
+        </span>
+      </div>
       {entry.windows.map((window) => (
         <div key={`${entry.account}-${window.label}`} style={styles.usageRow}>
           <div style={styles.usageLine}>
@@ -540,6 +552,8 @@ function ProviderCard(props: {
   onSetAutoOn?(enabled: boolean): void
   /** Claim one account's daily check-in reward, when the route has one. */
   onCheckin?(account: string): void
+  /** Auto-claim one account's growth-task rewards, when the route has them. */
+  onTasks?(account: string): void
 }) {
   const { status, t, busyAction, message } = props
   const [copied, setCopied] = useState(false)
@@ -829,6 +843,7 @@ function ProviderCard(props: {
             t={t}
             busyAction={busyAction}
             {...props.onCheckin === undefined ? {} : { onCheckin: () => { props.onCheckin?.(account.account) } }}
+            {...props.onTasks === undefined ? {} : { onTasks: () => { props.onTasks?.(account.account) } }}
           />
         </div>
         )
@@ -1202,6 +1217,32 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [call, refresh, t])
 
+  /** Auto-claim one account's growth-task rewards, then refresh the figures. */
+  const runTasks = useCallback(async (provider: string, account: string): Promise<void> => {
+    if (call === undefined) return
+    setBusyAction(true)
+    try {
+      const result = await call('tasks', { provider, account, claim: true })
+      if (!mounted.current) return
+      setMessages((previous) => ({
+        ...previous,
+        [provider]: {
+          tone: 'success',
+          text: result.claimed > 0
+            ? t('tasksClaimed', { count: result.claimed, credit: result.creditEarned })
+            : result.claimable > 0
+              ? t('tasksClaimable', { count: result.claimable })
+              : t('tasksNone'),
+        },
+      }))
+      await refresh()
+    } catch (caught: unknown) {
+      if (mounted.current) setError(t('actionFailed', { message: messageOf(caught) }))
+    } finally {
+      if (mounted.current) setBusyAction(false)
+    }
+  }, [call, refresh, t])
+
   const stopPolling = useCallback((): void => {
     if (timer.current !== undefined) {
       clearInterval(timer.current)
@@ -1458,6 +1499,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           onReload={() => { reload(provider.provider) }}
           {...provider.provider !== 'auto' ? {} : { autoOn, onSetAutoOn: (enabled: boolean) => { void setAuto(enabled) } }}
           {...provider.provider !== 'workbuddy' ? {} : { onCheckin: (account: string) => { void checkin(provider.provider, account) } }}
+          {...provider.provider !== 'workbuddy' ? {} : { onTasks: (account: string) => { void runTasks(provider.provider, account) } }}
         />
       ))}
     </div>

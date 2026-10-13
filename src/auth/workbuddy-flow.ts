@@ -368,6 +368,148 @@ export interface WorkBuddyCheckin {
   todayCredit: number
 }
 
+/** One growth task, as the activity endpoint frames it. */
+export interface WorkBuddyTask {
+  taskCode: string
+  title: string
+  credit: number
+  energy: number
+  target: number
+  current: number
+  claimable: boolean
+  claimed: boolean
+  locked: boolean
+  acceptStatus: string
+}
+
+/** The chat request headers: the account's, plus the CLI conventions. */
+function chatHeaders(token: WorkBuddyTokenSet): Record<string, string> {
+  return {
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Origin': 'https://copilot.tencent.com',
+    'Referer': 'https://copilot.tencent.com/',
+    'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token.accessToken}`,
+    ...token.uid === undefined || token.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': token.uid },
+    ...token.enterpriseId === undefined || token.enterpriseId === '' ? { 'X-No-Enterprise-Id': '1' } : { 'X-Enterprise-Id': token.enterpriseId },
+    'X-Product': 'SaaS',
+  }
+}
+
+/** Ask the chat host one question, returning the decoded envelope's data. */
+async function chatCall(
+  token: WorkBuddyTokenSet,
+  method: string,
+  path: string,
+  body: unknown,
+  fetchFn: typeof fetch,
+): Promise<Record<string, unknown> | null> {
+  const response = await fetchFn(`https://copilot.tencent.com${path}`, {
+    method,
+    headers: chatHeaders(token),
+    ...body === undefined ? {} : { body: JSON.stringify(body) },
+    signal: AbortSignal.timeout(20_000),
+  })
+  let env: Record<string, unknown> = {}
+  try {
+    env = JSON.parse(await response.text()) as Record<string, unknown>
+  } catch {
+    env = {}
+  }
+  const code = Number.parseInt(String(env.code ?? ''), 10) || 0
+  if (!response.ok || code !== 0) {
+    throw new Error(`WorkBuddy ${path}: ${String(env.msg ?? `error ${code}`)}`)
+  }
+  return isRecord(env.data) ? env.data : null
+}
+
+/** Read the account's growth tasks, parsed the way the pool plugin parses them. */
+export async function listWorkBuddyTasks(
+  token: WorkBuddyTokenSet,
+  fetchFn: typeof fetch,
+): Promise<WorkBuddyTask[]> {
+  const data = await chatCall(token, 'GET', '/v2/activity/growth/tasks', undefined, fetchFn)
+  if (data === null) return []
+  const raw = Array.isArray(data.tasks) ? data.tasks.filter(isRecord) : []
+  const out: WorkBuddyTask[] = []
+  for (const entry of raw) {
+    const taskCode = typeof entry.task_code === 'string' ? entry.task_code : ''
+    if (taskCode === '') continue
+    const num = (key: string): number => capacity(entry[key])
+    let current = num('current')
+    let target = num('target')
+    if (isRecord(entry.progress)) {
+      const nestedCurrent = capacity(entry.progress.current)
+      const nestedTarget = capacity(entry.progress.target)
+      if (nestedTarget > 0 || nestedCurrent > 0) {
+        current = nestedCurrent
+        target = nestedTarget
+      }
+    }
+    const acceptStatus = typeof entry.accept_status === 'string' ? entry.accept_status : ''
+    const claimed = acceptStatus === 'claimed'
+    out.push({
+      taskCode,
+      title: typeof entry.title === 'string' && entry.title !== '' ? entry.title : taskCode,
+      credit: num('reward_credit'),
+      energy: num('reward_energy'),
+      target,
+      current,
+      claimable: !claimed && target > 0 && current >= target,
+      claimed,
+      locked: entry.locked === true,
+      acceptStatus,
+    })
+  }
+  return out
+}
+
+/** Accept (enrol in) tasks by code; replaying an accepted task is a safe no-op. */
+export async function acceptWorkBuddyTasks(
+  token: WorkBuddyTokenSet,
+  taskCodes: readonly string[],
+  fetchFn: typeof fetch,
+): Promise<void> {
+  if (taskCodes.length === 0) return
+  await chatCall(token, 'POST', '/v2/activity/growth/tasks/accept', { task_codes: [...taskCodes] }, fetchFn)
+}
+
+/** Claim one task's reward; already-claimed answers zero and counts as success. */
+export async function claimWorkBuddyTask(
+  token: WorkBuddyTokenSet,
+  taskCode: string,
+  fetchFn: typeof fetch,
+): Promise<{ credit: number, energy: number }> {
+  const headers = {
+    ...workbuddyHeaders(token),
+    'Accept': 'application/json, text/plain, */*',
+    'Origin': 'https://www.workbuddy.cn',
+    'Referer': 'https://www.workbuddy.cn/profile/growth-center',
+    'x-client-platform': 'web',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  }
+  const response = await fetchFn(`https://www.workbuddy.cn/activity/growth/tasks/${encodeURIComponent(taskCode)}/claim`, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.timeout(20_000),
+  })
+  let env: Record<string, unknown> = {}
+  try {
+    env = JSON.parse(await response.text()) as Record<string, unknown>
+  } catch {
+    env = {}
+  }
+  const code = Number.parseInt(String(env.code ?? ''), 10) || 0
+  if (!response.ok || code !== 0) {
+    throw new Error(`WorkBuddy task ${taskCode}: ${String(env.msg ?? `error ${code}`)}`)
+  }
+  const data = isRecord(env.data) ? env.data : {}
+  if (data.already_claimed === true) return { credit: 0, energy: 0 }
+  return { credit: capacity(data.credit), energy: capacity(data.energy) }
+}
+
 /** A capacity the billing API sends, as a string or number; empty is 0. */
 function capacity(value: unknown): number {
   if (value === null || value === undefined || value === '') return 0

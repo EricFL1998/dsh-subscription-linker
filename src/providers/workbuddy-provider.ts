@@ -21,8 +21,12 @@ import {
   workbuddyRefreshable,
   workbuddyStale,
   claimWorkBuddyCheckin,
+  listWorkBuddyTasks,
+  acceptWorkBuddyTasks,
+  claimWorkBuddyTask,
   WORKBUDDY_EARLY_MS,
   type WorkBuddySession,
+  type WorkBuddyTask,
   type WorkBuddyTokenSet,
 } from '../auth/workbuddy-flow.js'
 import {
@@ -267,6 +271,49 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
         // An already-claimed check-in is a normal answer, not a failure.
         if (/already|已签到/i.test(message)) return { credit: 0, streakDays: 0, already: true }
         throw new ProviderError(`WorkBuddy check-in failed: ${message}`, REAUTH_REQUIRED)
+      }
+    },
+    tasks: async (account: string, claim: boolean) => {
+      const held = await store.get(account)
+      if (held === undefined) throw new ProviderError('WorkBuddy account not signed in', REAUTH_REQUIRED)
+      const token = tokenOf(held)
+      // Enrol in every open task first: accepting is the sign-up half, and replaying it is
+      // a safe no-op, so progress a chat or an activity report lights is never missed.
+      const tasks = await listWorkBuddyTasks(token, fetchFn)
+      const open = tasks.filter((task) => !task.claimed && !task.locked && task.acceptStatus !== 'claimed').map((task) => task.taskCode)
+      try {
+        await acceptWorkBuddyTasks(token, open, fetchFn)
+      } catch {
+        // Accepting is best-effort; a failure here does not block reading or claiming.
+      }
+      const fresh = await listWorkBuddyTasks(token, fetchFn)
+      let creditEarned = 0
+      let claimedCount = 0
+      if (claim) {
+        for (const task of fresh.filter((entry) => entry.claimable && !entry.locked)) {
+          try {
+            const reward = await claimWorkBuddyTask(token, task.taskCode, fetchFn)
+            creditEarned += reward.credit
+            claimedCount += 1
+          } catch {
+            // One task's refusal does not stop the others.
+          }
+        }
+      }
+      const stateOf = (task: WorkBuddyTask): 'pending' | 'claimable' | 'claimed' | 'locked' =>
+        task.claimed ? 'claimed' : task.locked ? 'locked' : task.claimable ? 'claimable' : 'pending'
+      return {
+        tasks: fresh.map((task) => ({
+          taskCode: task.taskCode,
+          title: task.title,
+          credit: task.credit,
+          target: task.target,
+          current: task.current,
+          state: stateOf(task),
+        })),
+        claimed: claimedCount,
+        claimable: fresh.filter((task) => task.claimable && !task.locked).length,
+        creditEarned,
       }
     },
   }

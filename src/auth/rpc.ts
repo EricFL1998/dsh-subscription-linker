@@ -257,6 +257,11 @@ async function runEndpoint(
       if (account === undefined) throw new ProviderError('checkin requires an account', BAD_REQUEST)
       return registry.checkin(requiredProvider(payload, endpoint), account)
     }
+    case 'tasks': {
+      const account = stringField(payload, 'account')
+      if (account === undefined) throw new ProviderError('tasks requires an account', BAD_REQUEST)
+      return registry.tasks(requiredProvider(payload, endpoint), account, booleanField(payload, 'claim') === true)
+    }
     case 'deepseek-balance': {
       // The DeepSeek account's balance, read on the node half through the host's own
       // account service. The browser cannot call that service directly (it sits behind

@@ -31,6 +31,7 @@ export const RPC_ENDPOINTS = [
   'auto-state',
   'setAutoOn',
   'checkin',
+  'tasks',
   'deepseek-balance',
   'ccswitch-balance',
   'model-variants',
@@ -324,6 +325,7 @@ export interface RpcMap {
   'auto-state': { payload: undefined, value: AutoStateResult }
   setAutoOn: { payload: SetAutoOnRequest, value: AutoStateResult }
   checkin: { payload: CheckinRequest, value: CheckinResult }
+  tasks: { payload: TasksRequest, value: TasksResult }
   'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
   'model-variants': { payload: ModelVariantsRequest, value: ModelVariantsResult }
@@ -405,6 +407,32 @@ export interface CheckinResult {
   credit: number
   streakDays: number
   already: boolean
+}
+
+/** Payload of `tasks`: which account to read and auto-claim. */
+export interface TasksRequest {
+  provider: string
+  account: string
+  /** Claim every claimable reward; false only lists. */
+  claim?: boolean
+}
+
+/** One task's state for the card. */
+export interface WorkBuddyTaskState {
+  taskCode: string
+  title: string
+  credit: number
+  target: number
+  current: number
+  state: 'pending' | 'claimable' | 'claimed' | 'locked'
+}
+
+/** Result of `tasks`: the task list and what auto-claiming earned. */
+export interface TasksResult {
+  tasks: WorkBuddyTaskState[]
+  claimed: number
+  claimable: number
+  creditEarned: number
 }
 
 /** Payload of `deepseek-balance`. */

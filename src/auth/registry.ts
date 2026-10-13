@@ -58,6 +58,13 @@ export interface ProviderRoute {
   reload(): Promise<ProviderStatus>
   /** Claim one account's daily check-in reward, when the route has one. */
   checkin?(account: string): Promise<{ credit: number, streakDays: number, already: boolean }>
+  /** Read growth tasks and optionally auto-claim, when the route has them. */
+  tasks?(account: string, claim: boolean): Promise<{
+    tasks: { taskCode: string, title: string, credit: number, target: number, current: number, state: 'pending' | 'claimable' | 'claimed' | 'locked' }[]
+    claimed: number
+    claimable: number
+    creditEarned: number
+  }>
   /** Fast and image variants for one model, when the route's discovery reported them. */
   modelVariants?(id: string): Promise<ModelVariants | undefined> | ModelVariants | undefined
 }
@@ -232,5 +239,17 @@ export class SubscriptionRegistry {
     const route = this.route(provider)
     if (route.checkin === undefined) throw new ProviderError(`${provider} has no check-in`, BAD_REQUEST)
     return route.checkin(account)
+  }
+
+  /** Read one account's growth tasks and optionally auto-claim the claimable rewards. */
+  async tasks(provider: string, account: string, claim: boolean): Promise<{
+    tasks: { taskCode: string, title: string, credit: number, target: number, current: number, state: 'pending' | 'claimable' | 'claimed' | 'locked' }[]
+    claimed: number
+    claimable: number
+    creditEarned: number
+  }> {
+    const route = this.route(provider)
+    if (route.tasks === undefined) throw new ProviderError(`${provider} has no tasks`, BAD_REQUEST)
+    return route.tasks(account, claim)
   }
 }

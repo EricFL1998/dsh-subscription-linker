@@ -98,6 +98,10 @@ function fakeRoute(id: string, overrides: Partial<ProviderRoute> = {}): FakeRout
       calls.push(['checkin', account])
       return { credit: 0, streakDays: 1, already: true }
     },
+    tasks: async (account: string, claim: boolean) => {
+      calls.push(['tasks', account, claim])
+      return { tasks: [], claimed: 0, claimable: 0, creditEarned: 0 }
+    },
     ...overrides,
   }
   return { route: base as unknown as ProviderRoute, calls }
@@ -128,6 +132,7 @@ function payloadFor(endpoint: string): unknown {
   if (endpoint === 'status' || endpoint === 'reload') return undefined
   if (endpoint === 'setDefault') return { provider: 'kimi', account: 'user-1' }
   if (endpoint === 'checkin') return { provider: 'kimi', account: 'user-1' }
+  if (endpoint === 'tasks') return { provider: 'kimi', account: 'user-1' }
   if (endpoint === 'setModelVisible') return { provider: 'kimi', id: 'k3', visible: false }
   if (endpoint === 'setModelOrder') return { provider: 'kimi', ids: ['k3-256k', 'k3'] }
   if (endpoint === 'addModel' || endpoint === 'removeModel') return { provider: 'kimi', id: 'k3-next' }
