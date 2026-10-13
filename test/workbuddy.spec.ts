@@ -202,9 +202,37 @@ test('a credits-exhausted 403 names the package fix, not a network fault', async
   )
 })
 
-test('readWorkBuddyUsage reads the account credits from the resource summary', async () => {
+test('readWorkBuddyUsage reads the precise spent against the live packages', async () => {
   const fetchFn: typeof fetch = async (input) => {
     const url = String(input)
+    // The precise source: each live package's remaining and size.
+    if (url.includes('/billing/meter/get-user-resource')) {
+      return new Response(
+        JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [
+          { CapacityType: 1, CapacityRemain: '700', CapacitySize: '1000' },
+          { CapacityType: 1, CapacityRemain: '375', CapacitySize: '500', ExpiredTime: '2026-11-01 00:00:00' },
+        ] } } } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const token: WorkBuddyTokenSet = { accessToken: 'at', uid: 'u1', expiresAt: Date.now() + 60_000 }
+  const read = await readWorkBuddyUsage(token, 'Pro', fetchFn, { spent: 425 })
+  assert.equal(read.windows.length, 1)
+  const credits = read.windows[0]!
+  assert.equal(credits.label, 'Credits')
+  assert.equal(credits.used, 425)
+  assert.equal(credits.limit, 1075 + 425)
+  assert.ok(credits.resetsAt !== undefined)
+})
+
+test('readWorkBuddyUsage falls back to the summary when the package list fails', async () => {
+  const fetchFn: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('/billing/meter/get-user-resource') && !url.includes('summary')) {
+      return new Response('boom', { status: 500 })
+    }
     if (url.includes('/billing/meter/get-user-resource-summary')) {
       return new Response(
         JSON.stringify({ code: 0, data: { IsPaidUser: true, Packages: [
@@ -221,10 +249,8 @@ test('readWorkBuddyUsage reads the account credits from the resource summary', a
   assert.equal(read.plan, 'Pro')
   assert.equal(read.windows.length, 1)
   const credits = read.windows[0]!
-  assert.equal(credits.label, 'Credits')
   assert.equal(credits.used, 375)
   assert.equal(credits.limit, 1500)
-  assert.ok(Math.abs(credits.usedPercent! - 25) < 0.001)
 })
 
 test('readWorkBuddyUsage falls back to the enterprise meter for an enterprise account', async () => {

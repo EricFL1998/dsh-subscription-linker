@@ -28,6 +28,7 @@ import type { TokenManager } from '../auth/tokens.js'
 import type { CatalogEntry } from './catalog.js'
 import { findEntry } from './catalog.js'
 import { WORKBUDDY_ENDPOINT, WORKBUDDY_UA_VERSION, workbuddyHeaders, type WorkBuddyTokenSet, type WorkBuddySession } from '../auth/workbuddy-flow.js'
+import { recordSpend } from './workbuddy-credits.js'
 
 /** The `workbuddy` provider route key (China build). */
 export const WORKBUDDY_PROVIDER_ID = 'workbuddy'
@@ -108,6 +109,8 @@ export interface WorkBuddyAdapterOptions {
   onWarn?: (message: string) => void
   hiddenModels?: () => Promise<ReadonlySet<string>>
   userModels?: () => Promise<readonly string[]>
+  /** Where per-account credit spends accumulate; beside the credential file. */
+  spendFile?: string
   fetchFn?: FetchFn
 }
 
@@ -330,6 +333,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
     // Capture the tool-call history so unsafe tool names in past turns can be renamed to
     // the safe ones the model now sees, keeping the conversation consistent.
     this.historyMessages = options.messages.filter((message) => message.role === 'assistant' || message.role === 'tool') as unknown as Record<string, unknown>[]
+    // The last usage frame carries the turn's real billed credit; record it so the spend
+    // total is a sum of real figures, not an estimate.
+    this.turnCredit = 0
     try {
       const body = this.requestBody(options)
       const response = await this.fetchFn(WORKBUDDY_API, {
@@ -359,8 +365,14 @@ export class WorkBuddyAdapter extends LlmAdapter {
       throw mapFetchFailure(WORKBUDDY_PROVIDER_NAME, error, watchdog, options.signal)
     } finally {
       watchdog.stop()
+      if (this.turnCredit > 0 && this.options.spendFile !== undefined) {
+        void recordSpend(this.options.spendFile, held.account, this.turnCredit).catch(() => {})
+      }
     }
   }
+
+  /** The current turn's billed credit, read off the last usage frame. */
+  private turnCredit = 0
 
   /** The stored session's fields as the token the request signs with. */
   private tokenOf(session: WorkBuddySession): WorkBuddyTokenSet {
@@ -613,6 +625,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
           if (usage !== undefined && usage !== null) {
             const input = usage.prompt_tokens ?? 0
             const output = usage.completion_tokens ?? 0
+            // The last usage frame carries the real billed credit; keep the latest, so a
+            // mid-stream retry does not double-count.
+            if (typeof usage.credit === 'number' && Number.isFinite(usage.credit)) {
+              this.turnCredit = usage.credit
+            }
             yield {
               type: 'usage',
               usage: { inputTokens: input, outputTokens: output, totalTokens: usage.total_tokens ?? input + output },

@@ -10,6 +10,8 @@ import { TokenStore } from '../auth/store.js'
 import { TokenManager } from '../auth/tokens.js'
 import type { AuthAttempt, AuthFlow } from '../auth/flow.js'
 import { LOGIN_CANCELLED_MESSAGE } from '../auth/device-flow.js'
+import path from 'node:path'
+import { readSpendLedger } from './workbuddy-credits.js'
 import {
   finishWorkBuddySignIn,
   parseWorkBuddySession,
@@ -175,9 +177,11 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
     },
   })
 
+  const spendFile = path.join(path.dirname(options.credentialFile), 'workbuddy-spend.json')
   const adapter = new WorkBuddyAdapter({
     streamIdleTimeoutMs: options.streamIdleTimeoutMs,
     tokens,
+    spendFile,
     ...options.onWarn === undefined ? {} : { onWarn: options.onWarn },
     hiddenModels: () => options.preferences.hiddenIds(WORKBUDDY_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(WORKBUDDY_PROVIDER_ID),
@@ -211,7 +215,9 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
     usage: async (_accessToken, account) => {
       const held = await store.get(account)
       if (held === undefined) return undefined
-      const read = await readWorkBuddyUsage(tokenOf(held), held.accountId, fetchFn)
+      const ledger = await readSpendLedger(spendFile)
+      const spend = ledger[account]
+      const read = await readWorkBuddyUsage(tokenOf(held), held.accountId, fetchFn, spend === undefined ? undefined : { spent: spend.spent })
       return { plan: read.plan, windows: read.windows, ...read.checkin === undefined ? {} : { checkin: read.checkin } }
     },
     details: () => [

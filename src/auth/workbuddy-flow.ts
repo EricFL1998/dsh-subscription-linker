@@ -445,6 +445,58 @@ export async function claimWorkBuddyCheckin(
   return { credit: num('credit'), streakDays: num('streak_days') }
 }
 
+/** The account's precise remaining credits, summed across its live packages. */
+export async function readWorkBuddyCredits(
+  token: WorkBuddyTokenSet,
+  fetchFn: typeof fetch,
+): Promise<{ remaining: number, nearestExpiryMs?: number } | null> {
+  const pad = (n: number): string => n.toString().padStart(2, '0')
+  const fmt = (date: Date): string =>
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  const now = new Date()
+  const data = await workbuddyMeter(token, '/billing/meter/get-user-resource', {
+    PageNumber: 1,
+    PageSize: 100,
+    ProductCode: 'p_tcaca',
+    Status: [0, 3],
+    PackageEndTimeRangeBegin: fmt(now),
+    PackageEndTimeRangeEnd: fmt(new Date(now.getTime() + 3185136e6)),
+  }, fetchFn)
+  if (data === null) return null
+  const response = isRecord(data.Response) ? data.Response : {}
+  const inner = isRecord(response.Data) ? response.Data : {}
+  const accounts = Array.isArray(inner.Accounts) ? inner.Accounts.filter(isRecord) : []
+  const parseDate = (raw: unknown): number | undefined => {
+    if (typeof raw === 'number' && raw > 0xe8d4a51000) return raw
+    if (typeof raw === 'string' && raw !== '') {
+      const parsed = Date.parse(raw)
+      if (!Number.isNaN(parsed)) return parsed
+    }
+    return undefined
+  }
+  let remaining = 0
+  let nearestExpiryMs: number | undefined
+  let livePackages = 0
+  for (const account of accounts) {
+    const num = (key: string): number => capacity(account[key])
+    const monthly = num('CapacityType') === 4
+    const remain = monthly ? num('CycleCapacityRemain') : num('CapacityRemain')
+    const capped = remain < 0 ? 0 : remain
+    const cycleEndMs = parseDate(account.CycleEndTime)
+    const expiresAtMs = monthly ? undefined : parseDate(account.ExpiredTime) ?? cycleEndMs
+    if (!monthly && (capped <= 0 || (expiresAtMs !== undefined && expiresAtMs <= Date.now()))) continue
+    livePackages += 1
+    remaining += capped
+    if (expiresAtMs !== undefined && (nearestExpiryMs === undefined || expiresAtMs < nearestExpiryMs)) {
+      nearestExpiryMs = expiresAtMs
+    }
+  }
+  // No live package reads as "this account doesn't use the package list" — an enterprise
+  // account, say — so the caller falls through to its own meter.
+  if (livePackages === 0) return null
+  return { remaining, ...nearestExpiryMs === undefined ? {} : { nearestExpiryMs } }
+}
+
 /** The account's credits from its resource summary: the plan's used against granted. */
 function usageOfSummary(summary: Record<string, unknown> | null, plan: string | undefined): {
   plan: string
@@ -492,7 +544,32 @@ export async function readWorkBuddyUsage(
   token: WorkBuddyTokenSet,
   plan: string | undefined,
   fetchFn: typeof fetch,
+  spend?: { spent: number },
 ): Promise<{ plan: string, windows: WorkBuddyUsageWindow[], checkin?: WorkBuddyCheckin }> {
+  // The precise figures: the live packages' remaining and total size, and the account's
+  // accumulated spend from the real per-turn credits. Spent-against-limit reads as the
+  // true billed share, not an estimate from tokens.
+  try {
+    const credits = await readWorkBuddyCredits(token, fetchFn)
+    if (credits !== null) {
+      const window: WorkBuddyUsageWindow = { label: 'Credits', used: spend?.spent ?? 0 }
+      if (credits.remaining > 0 || (spend?.spent ?? 0) > 0) {
+        const limit = credits.remaining + (spend?.spent ?? 0)
+        window.limit = limit
+        window.usedPercent = limit > 0 ? (100 * (spend?.spent ?? 0)) / limit : 0
+      }
+      if (credits.nearestExpiryMs !== undefined) window.resetsAt = credits.nearestExpiryMs
+      const out: { plan: string, windows: WorkBuddyUsageWindow[], checkin?: WorkBuddyCheckin } = { plan: plan ?? 'Free', windows: [window] }
+      try {
+        out.checkin = await readWorkBuddyCheckin(token, fetchFn)
+      } catch {
+        // A check-in read failure never hides the credits.
+      }
+      return out
+    }
+  } catch {
+    // Fall through to the summary when the package list can't be read.
+  }
   const summary = await workbuddyMeter(token, '/billing/meter/get-user-resource-summary', {}, fetchFn)
   const out = usageOfSummary(summary, plan)
   // An enterprise account's summary has no packages: its credits are the enterprise meter's.
