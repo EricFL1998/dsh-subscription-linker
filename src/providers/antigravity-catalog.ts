@@ -64,6 +64,14 @@ function modelInfo(raw: unknown): ModelInfo {
   }
 }
 
+/** Model ids that are image-generation models, never picker rows. */
+const IMAGE_MODEL = /(?:^|[-_])(?:image|imagine|draw|pic|photo)(?:[-_]|$)/i
+
+/** True when a model id names an image-generation model. */
+export function isImageModel(id: string): boolean {
+  return IMAGE_MODEL.test(id)
+}
+
 /** A model id whose suffix or infix names a fixed reasoning tier, folded into its base family. */
 const TIER_MARKED = /(?:^|[-_])(?:extra-low|low|medium|high|max|agent)(?:$|[-_])/i
 
@@ -190,6 +198,8 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
   const entries: CatalogEntry[] = []
   const seenBase = new Set<string>()
   for (const wireId of agentIds(payload)) {
+    // Image-generation models are never picker rows: they are agent-called, always on.
+    if (isImageModel(wireId)) continue
     const info = modelInfo(models[wireId])
     // Tier-marked ids (gemini-3.5-flash-low, gemini-3-flash-agent, …) are the family's
     // fixed tiers; they fold into the base family row so the picker shows one entry with
