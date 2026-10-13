@@ -211,6 +211,24 @@ export function shortWindow(label: string): string {
 }
 
 /**
+ * How one window reads as a figure.
+ *
+ * A credit balance (WorkBuddy's Credits, a wallet) is money: it reads as the raw
+ * `used`/`limit` count. A quota is a share of an allowance: it reads as the spent
+ * percent. A window that states both prefers the money figure, since that is what
+ * the provider is actually metering.
+ *
+ * @param window - the metered window.
+ * @returns the display figure.
+ */
+export function windowAmount(window: Pick<UsageWindow, 'used' | 'limit' | 'usedPercent'>): string {
+  if (window.used !== undefined && window.limit !== undefined) {
+    return `${String(window.used)}/${String(window.limit)}`
+  }
+  return `${String(Math.round(window.usedPercent ?? 0))}%`
+}
+
+/**
  * Pick the window a single line should show.
  *
  * A plan can meter several windows at once (a rolling five-hour one and a weekly one).
@@ -619,9 +637,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
         {merged.map((window) => (
           <span className="dsh-subscription-usage-chip-cell" key={window.label}>
             <span className="dsh-subscription-usage-chip-window">{shortWindow(window.label)}</span>
-            <span className="dsh-subscription-usage-chip-value">
-              {`${String(Math.round(window.usedPercent ?? 0))}%`}
-            </span>
+            <span className="dsh-subscription-usage-chip-value">{windowAmount(window)}</span>
           </span>
         ))}
       </button>
@@ -637,16 +653,12 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
               </span>
               {account.windows.map((window) => {
                 const windowReset = formatReset(window.resetsAt, now)
-                // A credit balance reads as money (`used`/`limit`), a quota as a percent.
-                const amount = window.usedPercent === undefined && window.used !== undefined && window.limit !== undefined
-                  ? `${String(window.used)}/${String(window.limit)}`
-                  : `${String(Math.round(window.usedPercent ?? 0))}%`
                 return (
                   <span className="dsh-subscription-usage-chip-meter" key={window.label}>
                     <span className="dsh-subscription-usage-chip-meterHead">
                       <span>{window.label}</span>
                       <span className="dsh-subscription-usage-chip-detail">
-                        {`${amount}${windowReset === undefined ? '' : ` · ${windowReset}`}`}
+                        {`${windowAmount(window)}${windowReset === undefined ? '' : ` · ${windowReset}`}`}
                       </span>
                     </span>
                     {window.usedPercent !== undefined && (
