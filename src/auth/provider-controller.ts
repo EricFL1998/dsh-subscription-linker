@@ -251,7 +251,7 @@ export class ProviderController<S extends SessionBase> {
       if (isReauthRequired(this.lastRefreshError)) this.lastRefreshError = undefined
     } catch (error: unknown) {
       this.lastRefreshError = error
-      if (isReauthRequired(error)) {
+      if (isReauthRequired(error) || isDeadGrant(messageOf(error))) {
         this.lastError = `${this.displayName} sign-in has lapsed; connect again`
       }
     }

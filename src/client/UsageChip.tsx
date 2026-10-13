@@ -431,12 +431,17 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     void call('model-variants', { provider: selected, id: selectedModel })
       .then((result) => {
         if (!live) return
+        // TEMP diagnostics: why the fast button does not appear.
+        console.warn(`[subscription-oauth] model-variants ${selected}/${selectedModel}:`, JSON.stringify(result), 'modelDirectory:', modelDirectory !== undefined)
         setFastVariant(result?.fast)
         setFastActive(result?.fast !== undefined && result.fast === selectedModel)
       })
-      .catch(() => { if (live) { setFastVariant(undefined); setFastActive(false) } })
+      .catch((error) => {
+        console.warn(`[subscription-oauth] model-variants ${selected}/${selectedModel} failed:`, error)
+        if (live) { setFastVariant(undefined); setFastActive(false) }
+      })
     return () => { live = false }
-  }, [selected, selectedModel, isOwnProvider, call])
+  }, [selected, selectedModel, isOwnProvider, call, modelDirectory])
 
   // A non-subscription provider has no usage windows to meter, so the chip shows its
   // balance instead, read by cc-switch's query. The host's account (deepseek-account)
