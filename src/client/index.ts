@@ -79,7 +79,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * The chip only reports for these; a provider somebody else registered gets no chip,
  * because this plugin has no way to read its allowance.
  */
-const OWN_PROVIDER_IDS = new Set(['kimi', 'grok', 'antigravity', 'glm', 'ark'])
+const OWN_PROVIDER_IDS = new Set(['kimi', 'grok', 'antigravity', 'glm', 'ark', 'mimo', 'workbuddy'])
 
 /** Dictionary namespace owned by this plugin. */
 const NS = 'settings.subscriptions'

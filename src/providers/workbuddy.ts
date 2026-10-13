@@ -335,11 +335,14 @@ export class WorkBuddyAdapter extends LlmAdapter {
         if (done) break
         watchdog.pulse()
         buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split('\n\n')
+        // WorkBuddy's SSE frames are blank-line separated, whatever the platform's line
+        // ending (\n, \r\n, or \r alone): split on any blank line so a \r\n stream is not
+        // read as one unending frame.
+        const frames = buffer.split(/\r?\n\r?\n/)
         buffer = frames.pop() ?? ''
         for (const frame of frames) {
           const data = frame
-            .split('\n')
+            .split(/\r?\n/)
             .filter((line) => line.startsWith('data:'))
             .map((line) => line.slice(5).trim())
             .join('\n')
