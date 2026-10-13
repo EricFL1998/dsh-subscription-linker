@@ -168,14 +168,18 @@ describe('balanceOf', () => {
 })
 
 describe('formatBalance', () => {
-  test('renders money with a currency symbol, not a meter', () => {
+  test('renders money to two decimals, rounded, with a currency symbol', () => {
     assert.equal(formatBalance({ currency: 'CNY', balance: '6.89', bonus: false }), '¥6.89')
-    assert.equal(formatBalance({ currency: 'USD', balance: '1.5', bonus: false }), '$1.5')
+    // A balance reads to the cent, and `1.5` for `1.50` would mislead.
+    assert.equal(formatBalance({ currency: 'USD', balance: '1.5', bonus: false }), '$1.50')
+    // Rounds to two places.
+    assert.equal(formatBalance({ currency: 'USD', balance: '1.097', bonus: false }), '$1.10')
+    assert.equal(formatBalance({ currency: 'USD', balance: '1.096', bonus: false }), '$1.10')
   })
 
   test('marks a bonus wallet with a plus and leaves an odd currency named', () => {
-    assert.equal(formatBalance({ currency: 'CNY', balance: '2', bonus: true }), '+¥2')
-    assert.equal(formatBalance({ currency: 'EUR', balance: '3', bonus: false }), 'EUR 3')
+    assert.equal(formatBalance({ currency: 'CNY', balance: '2', bonus: true }), '+¥2.00')
+    assert.equal(formatBalance({ currency: 'EUR', balance: '3', bonus: false }), 'EUR 3.00')
   })
 })
 

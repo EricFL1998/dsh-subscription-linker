@@ -168,14 +168,16 @@ export function balanceOf(value: { wallets?: readonly { currency: string, balanc
  * Format one wallet for the chip's compact line.
  *
  * A balance is money, not a percentage, so it renders as `¥6.89` rather than a meter;
- * the currency prefix keeps two currencies from being mistaken for one sum.
+ * the currency prefix keeps two currencies from being mistaken for one sum. The amount
+ * is rounded to two decimal places (a balance reads to the cent, and a figure like
+ * `1.1` for `1.10` would mislead) and always carries both places.
  *
  * @param wallet - the wallet to show.
- * @returns the short form, e.g. `¥6.89` or `+¥2` for a bonus wallet.
+ * @returns the short form, e.g. `¥6.89` or `+$2.00` for a bonus wallet.
  */
 export function formatBalance(wallet: ChipBalance): string {
   const amount = Number.parseFloat(wallet.balance)
-  const trimmed = Number.isFinite(amount) ? String(Math.round(amount * 100) / 100) : wallet.balance
+  const trimmed = Number.isFinite(amount) ? amount.toFixed(2) : wallet.balance
   const symbol = wallet.currency === 'CNY' ? '¥' : wallet.currency === 'USD' ? '$' : `${wallet.currency} `
   return `${wallet.bonus ? '+' : ''}${symbol}${trimmed}`
 }
