@@ -11,6 +11,8 @@ import {
   MIMO_REGION,
   MimoSignInLapsed,
   mimoCredentialsFrom,
+  readMimoUsage,
+  type MimoCredentials,
 } from '../src/auth/mimo-flow.js'
 import { MimoAdapter, MIMO_MODELS, parseMimoSession } from '../src/providers/mimo.js'
 import type { MimoSession } from '../src/providers/mimo.js'
@@ -176,4 +178,64 @@ test('a 401 surfaces as an invalid credential, not a network fault', async () =>
 test('MIMO_MODELS carries Pro and Flash with the shared window', () => {
   assert.deepEqual(MIMO_MODELS.map((entry) => entry.id), ['mimo-pro', 'mimo-flash'])
   assert.ok(MIMO_MODELS.every((entry) => entry.contextWindow === 1_000_000))
+})
+
+test('readMimoUsage reads the plan and the weekly allowance', async () => {
+  const creds: MimoCredentials = {
+    userId: 'u1',
+    cUserId: '',
+    passToken: 'pt',
+    deviceId: 'pc_x',
+    region: MIMO_REGION,
+    base: MIMO_HOSTS[MIMO_REGION as keyof typeof MIMO_HOSTS],
+  }
+  const fetchFn: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('/user/xiaomi/subscription/self')) {
+      return new Response(
+        JSON.stringify({ code: 0, data: { current: { title: 'MiMo Pro', endTime: '2026-11-06' } } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    if (url.includes('/user/usage')) {
+      return new Response(
+        JSON.stringify({ code: 0, data: { percent: 70, resetDate: '2026-10-20' } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const read = await readMimoUsage({ cookies: { serviceToken: 'st' }, userId: 'u1' }, creds, fetchFn)
+  assert.equal(read.plan, 'MiMo Pro')
+  assert.ok(read.renewsAt !== undefined)
+  assert.equal(read.windows.length, 1)
+  const week = read.windows[0]!
+  assert.equal(week.label, '7 days')
+  assert.ok(Math.abs(week.usedPercent! - 30) < 0.001)
+  assert.ok(week.resetsAt !== undefined)
+})
+
+test('readMimoUsage shows the plan alone when there is no weekly allowance', async () => {
+  const creds: MimoCredentials = {
+    userId: 'u1',
+    cUserId: '',
+    passToken: 'pt',
+    deviceId: 'pc_x',
+    region: MIMO_REGION,
+    base: MIMO_HOSTS[MIMO_REGION as keyof typeof MIMO_HOSTS],
+  }
+  const fetchFn: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('/user/xiaomi/subscription/self')) {
+      return new Response(JSON.stringify({ code: 0, data: { current: { planTier: 3 } } }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    if (url.includes('/user/usage')) {
+      // The free offer: no percent/reset.
+      return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const read = await readMimoUsage({ cookies: { serviceToken: 'st' }, userId: 'u1' }, creds, fetchFn)
+  assert.equal(read.plan, 'Pro')
+  assert.equal(read.windows.length, 0)
 })

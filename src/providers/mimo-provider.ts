@@ -13,6 +13,7 @@ import { LOGIN_CANCELLED_MESSAGE } from '../auth/device-flow.js'
 import {
   finishMimoSignIn,
   mimoCredentialsFrom,
+  readMimoUsage,
   refreshMimoSession,
   startMimoSignIn,
   waitMimoPoll,
@@ -184,7 +185,20 @@ export function createMimoProvider(options: MimoProviderOptions): ProviderRoute 
     catalogOwn: () => adapter.ownCatalogEntries(),
     fallbackContextWindow: MIMO_CONTEXT_WINDOW,
     discover: () => Promise.resolve(undefined),
-    usage: () => Promise.resolve({ windows: [] }),
+    usage: async (_accessToken, account) => {
+      const held = await store.get(account)
+      if (held === undefined) return undefined
+      let creds: MimoCredentials
+      let cookies: Record<string, string>
+      try {
+        creds = JSON.parse(held.mimoCreds) as MimoCredentials
+        cookies = JSON.parse(held.mimoCookies) as Record<string, string>
+      } catch {
+        return undefined
+      }
+      const read = await readMimoUsage({ cookies, userId: creds.userId }, creds, fetchFn)
+      return { plan: read.plan, ...read.renewsAt === undefined ? {} : { renewsAt: read.renewsAt }, windows: read.windows }
+    },
     details: () => [
       { key: 'provider', value: MIMO_PROVIDER_NAME },
       { key: 'credentialFile', value: options.credentialFile },

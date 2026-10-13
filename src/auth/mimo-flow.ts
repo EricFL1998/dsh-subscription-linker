@@ -415,3 +415,124 @@ export async function refreshMimoSession(
   const session = await mimoSignOn(creds, creds.base, fetchFn)
   return { cookies: session.cookies, expiresAt: Date.now() + MIMO_RENEW_AFTER_MS }
 }
+
+// ---- the usage meter --------------------------------------------------------
+
+/** One metered window the Settings card reads. */
+export interface MimoUsageWindow {
+  label: string
+  usedPercent?: number
+  resetsAt?: number
+}
+
+/** The MiMo server's names for its plans' tiers. */
+const TIERS: Record<number, string> = { 1: 'Starter', 2: 'Plus', 3: 'Pro', 4: 'Ultra' }
+
+/** Read one of the MiMo server's pages with the session's cookies; signs on again once when refused. */
+async function mimoPage(
+  session: MimoSessionCookies,
+  creds: MimoCredentials,
+  path: string,
+  fetchFn: typeof fetch,
+): Promise<Record<string, unknown> | null> {
+  for (let attempt = 0; ; attempt++) {
+    const headers: Record<string, string> = { Cookie: cookieHeaderOf(session.cookies), ...appHeaders() }
+    const response = await fetchFn(creds.base.replace(/\/+$/, '') + path, {
+      headers,
+      signal: AbortSignal.timeout(20_000),
+    })
+    const text = await response.text()
+    let env: Record<string, unknown> = {}
+    try {
+      env = JSON.parse(text) as Record<string, unknown>
+    } catch {
+      env = {}
+    }
+    const bad = !isRecord(env) || Array.isArray(env) || (env.code != null && !Number.isInteger(env.code)) ||
+      (env.msg != null && typeof env.msg !== 'string')
+    if (response.status === 401 || (response.status === 200 && bad)) {
+      if (attempt === 0) {
+        // The session went stale: re-sign on once and retry.
+        const renewed = await refreshMimoSession(creds, fetchFn)
+        session = { cookies: renewed.cookies, userId: session.userId }
+        continue
+      }
+      throw new MimoSignInLapsed('the Xiaomi MiMo sign-in has expired — sign in again')
+    }
+    if (response.status !== 200 || bad) {
+      throw new Error(`Xiaomi MiMo ${path}: HTTP ${response.status}`)
+    }
+    if ((env.code ?? 0) !== 0) {
+      throw new Error(`Xiaomi MiMo ${path}: code ${String(env.code)} ${String(env.msg ?? '')}`.trim())
+    }
+    return isRecord(env.data) ? env.data : null
+  }
+}
+
+/** The session's cookies as one Cookie header, in a steady order. */
+function cookieHeaderOf(cookies: Record<string, string>): string {
+  const first = ['serviceToken', 'userId', 'cUserId']
+  const parts = first.filter((key) => key in cookies).map((key) => `${key}=${cookies[key]}`)
+  for (const [key, value] of Object.entries(cookies)) {
+    if (!first.includes(key)) parts.push(`${key}=${value}`)
+  }
+  return parts.join('; ')
+}
+
+/** Read one of the server's times; they carry no zone and are Beijing/Singapore time. */
+function mimoServerTime(value: unknown): number | undefined {
+  const text = String(value ?? '').trim()
+  let iso = ''
+  if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/i.test(text)) iso = text
+  else if (/^\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(\.\d+)?$/.test(text)) iso = `${text.replace(' ', 'T')}+08:00`
+  else if (/^\d{4}-\d\d-\d\d$/.test(text)) iso = `${text}T00:00:00+08:00`
+  const at = iso === '' ? NaN : Date.parse(iso)
+  return Number.isNaN(at) ? undefined : at
+}
+
+/** The account's plan and weekly allowance, for the Settings card and chip. */
+export async function readMimoUsage(
+  session: MimoSessionCookies,
+  creds: MimoCredentials,
+  fetchFn: typeof fetch,
+): Promise<{ plan: string, renewsAt?: number, windows: MimoUsageWindow[] }> {
+  // The plan, from the app's subscription page.
+  let self: Record<string, unknown> | null = null
+  try {
+    self = await mimoPage(session, creds, '/user/xiaomi/subscription/self', fetchFn)
+  } catch {
+    self = null
+  }
+  const current = self?.current !== undefined && isRecord(self.current) ? self.current : undefined
+  let plan = 'Free'
+  let renewsAt: number | undefined
+  if (current !== undefined) {
+    const title = typeof current.title === 'string' ? current.title.trim() : ''
+    const tier = typeof current.planTier === 'number' ? TIERS[current.planTier] : undefined
+    const code = typeof current.planCode === 'string' ? current.planCode.trim() : ''
+    plan = title || tier || code || 'MiMo'
+    const end = mimoServerTime(current.endTime)
+    if (end !== undefined) renewsAt = end
+  }
+
+  // The week's allowance, from the app's usage page.
+  const windows: MimoUsageWindow[] = []
+  try {
+    const use = await mimoPage(session, creds, '/user/usage', fetchFn)
+    const percent = typeof use?.percent === 'number' ? use.percent : undefined
+    const reset = typeof use?.resetDate === 'string' ? use.resetDate : undefined
+    // No plan: the free offer shows no allowance.
+    if (percent !== undefined && reset !== undefined) {
+      const window: MimoUsageWindow = {
+        label: '7 days',
+        usedPercent: Math.max(0, Math.min(100, 100 - percent)),
+      }
+      const at = mimoServerTime(reset)
+      if (at !== undefined) window.resetsAt = at
+      windows.push(window)
+    }
+  } catch {
+    // The plan alone, when the week's allowance can't be read.
+  }
+  return { plan, ...renewsAt === undefined ? {} : { renewsAt }, windows }
+}
