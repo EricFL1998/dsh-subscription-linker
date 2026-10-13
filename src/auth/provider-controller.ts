@@ -201,6 +201,9 @@ export class ProviderController<S extends SessionBase> {
     const pending = this.options.flow.pending()
     const keys = Object.keys(accounts)
     const spec = this.options.spec
+    // A stored token within its life is reported as fresh; a lapsed one reads as expired
+    // until a real request refreshes it. This is honest (the stored expiry is what we
+    // know) and avoids a network call on every status poll.
     return {
       provider: spec.id,
       displayName: spec.displayName,

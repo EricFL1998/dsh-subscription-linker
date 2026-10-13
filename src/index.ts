@@ -310,6 +310,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   registerSubscriptionRpc(ctx, registry, balanceContext)
 
   // Warm each route's live catalog for an install that is already signed in.
+  // Discovery resolves tokens, which may open a browser on a dead grant; that is a
+  // deliberate choice on startup (the catalog must be current), but it means a
+  // lapsed Antigravity grant will show its consent page once per launch.
   for (const id of registry.ids()) {
     void registry.discover(id, false).catch((error: unknown) => {
       onWarn(`${id} startup discovery failed: ${error instanceof Error ? error.message : String(error)}`)
