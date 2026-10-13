@@ -215,17 +215,25 @@ export function shortWindow(label: string): string {
  *
  * A credit balance (WorkBuddy's Credits, a wallet) is money: it reads as the raw
  * `used`/`limit` count. A quota is a share of an allowance: it reads as the spent
- * percent. A window that states both prefers the money figure, since that is what
- * the provider is actually metering.
+ * percent. The two are told apart by what the window is called — a credit or wallet
+ * names money, a time window names an allowance — because both state the same fields.
  *
  * @param window - the metered window.
  * @returns the display figure.
  */
-export function windowAmount(window: Pick<UsageWindow, 'used' | 'limit' | 'usedPercent'>): string {
-  if (window.used !== undefined && window.limit !== undefined) {
+export function windowAmount(window: Pick<UsageWindow, 'label' | 'used' | 'limit' | 'usedPercent'>): string {
+  if (isCreditWindow(window.label) && window.used !== undefined && window.limit !== undefined) {
     return `${String(window.used)}/${String(window.limit)}`
   }
   return `${String(Math.round(window.usedPercent ?? 0))}%`
+}
+
+/** Credit-like window labels: money, not a share of an allowance. */
+const CREDIT_LABELS = /credit|wallet|balance|token|point|积分|额度/i
+
+/** Whether a window's label names a credit balance rather than a time quota. */
+function isCreditWindow(label: string): boolean {
+  return CREDIT_LABELS.test(label)
 }
 
 /**
