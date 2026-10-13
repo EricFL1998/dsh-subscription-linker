@@ -594,6 +594,9 @@ export class AntigravityAdapter extends LlmAdapter {
       const accounts = typeof this.options.tokens.accounts === 'function'
         ? await this.options.tokens.accounts()
         : []
+      // Surface the account pool and the 429 outcome to the caller, so a non-switch is
+      // diagnosable from the browser where the node stdout is hidden.
+      const diag: string[] = [`pool=${accounts.join(',') || '(none)'}`]
       const tried = new Set<string>()
       let token = await this.options.tokens.resolve()
       // Move an account known to be spent (from a past failure) to the back, so a fresh
@@ -617,19 +620,28 @@ export class AntigravityAdapter extends LlmAdapter {
         // A spent allowance (402/429) moves to the next account, remembering when this
         // one refills so later requests skip it until then.
         if (!response.ok && (response.status === 402 || response.status === 429) && order.length > 1) {
+          diag.push(`429 on ${token.account}, moving to next`)
           this.noteSpent(token.account)
           const resetAt = await this.resetAt(token.account)
           allowanceScheduler.noteReset(ANTIGRAVITY_PROVIDER_ID, token.account, resetAt)
           continue
         }
-        if (!response.ok) throw await httpLlmError(response, 'Antigravity API')
+        if (!response.ok) {
+          diag.push(`fail ${response.status} on ${token.account} (no switch)`)
+          const error = await httpLlmError(response, 'Antigravity API')
+          // The diagnostic rides the message so it surfaces where the user sees the
+          // failure, since the node half's stdout is unreachable in the desktop shell.
+          error.message = `${error.message} [${diag.join(' | ')}]`
+          throw error
+        }
         if (response.body === null) {
           throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
         }
         yield* streamAntigravity(response.body, () => { watchdog.pulse() })
         return
       }
-      throw new LlmError('Antigravity API: every account\'s allowance is spent', EMPTY_RESPONSE_CODE)
+      const exhausted = new LlmError(`Antigravity API: every account's allowance is spent [${diag.join(' | ')}]`, EMPTY_RESPONSE_CODE)
+      throw exhausted
     } catch (error: unknown) {
       throw mapFetchFailure('Antigravity API', this.refreshHint(error), watchdog, options.signal)
     } finally {

@@ -44,4 +44,24 @@ describe('AllowanceScheduler', () => {
     assert.equal(s.isSpentUntilReset('grok', 'a'), false)
     assert.equal(s.isSpentUntilReset('kimi', 'a'), true)
   })
+
+  test('clear forgets one account so it is no longer spent', () => {
+    const s = new AllowanceScheduler()
+    const future = Date.now() + 60_000
+    s.noteReset('kimi', 'a', future)
+    s.noteReset('kimi', 'b', future)
+    assert.equal(s.isSpentUntilReset('kimi', 'a'), true)
+    s.clear('kimi', 'a')
+    assert.equal(s.isSpentUntilReset('kimi', 'a'), false)
+    // Other accounts are untouched.
+    assert.equal(s.isSpentUntilReset('kimi', 'b'), true)
+  })
+
+  test('clear on an unknown provider or account is a no-op', () => {
+    const s = new AllowanceScheduler()
+    s.clear('unknown', 'a')
+    s.noteReset('kimi', 'a', Date.now() + 60_000)
+    s.clear('kimi', 'unknown')
+    assert.equal(s.isSpentUntilReset('kimi', 'a'), true)
+  })
 })

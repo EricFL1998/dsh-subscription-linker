@@ -30,6 +30,7 @@ import type { ModelPreferences } from '../settings.js'
 import type { AuthFlow } from './flow.js'
 import type { SessionBase, TokenStore } from './store.js'
 import { accountLabelOf, accountKeyOf } from './store.js'
+import { allowanceScheduler } from './allowance-scheduler.js'
 import type { TokenManager } from './tokens.js'
 
 /** A login that has just started. */
@@ -344,7 +345,12 @@ export class ProviderController<S extends SessionBase> {
   async logout(account?: string): Promise<ProviderStatus> {
     this.refused.delete(account ?? '')
     const key = account ?? await this.options.store.defaultAccount()
-    if (key !== undefined) await this.options.store.remove(key)
+    if (key !== undefined) {
+      await this.options.store.remove(key)
+      // The signed-out account's remembered allowance state is no longer meaningful;
+      // drop it so the chip and the scheduler stop treating it as a live account.
+      allowanceScheduler.clear(this.options.spec.id, key)
+    }
     return this.status()
   }
 

@@ -48,6 +48,19 @@ export class AllowanceScheduler {
   }
 
   /**
+   * Forget one account's remembered state, when the account is removed.
+   *
+   * A signed-out account's allowance state is no longer meaningful — there is no
+   * account to schedule around — and a re-added account starts fresh.
+   *
+   * @param provider - the provider route id.
+   * @param account - the account key to forget.
+   */
+  clear(provider: string, account: string): void {
+    this.byProvider.get(provider)?.delete(account)
+  }
+
+  /**
    * Whether one account's allowance is known to be spent now.
    *
    * True when the account was recorded with a reset time that is still in the future:
