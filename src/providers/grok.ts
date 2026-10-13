@@ -363,8 +363,15 @@ export function isImageModel(id: string): boolean {
   return IMAGE_MODEL.test(id)
 }
 
-/** Model ids that are the fast/lightspeed variant of a base model, matched per base. */
-const FAST_VARIANT = /(?:^|[-_@])(?:fast|lightspeed|turbo|quick)(?=[-_@]|$)/i
+/**
+ * Model ids that are the fast/lightspeed variant of a base model, matched per base.
+ *
+ * The vocabulary is the providers' own: xAI says `fast` (`grok-4.7-build-fast`), the
+ * Claude/Codex world says `lightspeed` or `turbo`, and Kimi says `highspeed`
+ * (`kimi-for-coding-highspeed`). A word has to stand on its own, so `highspeed` never
+ * matches inside another word.
+ */
+const FAST_VARIANT = /(?:^|[-_@])(?:fast|lightspeed|turbo|quick|highspeed)(?=[-_@]|$)/i
 
 /** True when a model id names a fast/lightspeed variant of a base model. */
 export function isFastVariant(id: string): boolean {
@@ -379,6 +386,58 @@ export function baseModelOf(id: string): string {
     .replace(/[-_]$/, '')
     .replace(/-(?:build|beta|alpha|rc|stable)$/i, '')
     .replace(/[-_]$/, '')
+}
+
+/**
+ * The fast variant of one picker row, from either side of the pair.
+ *
+ * Shared by every route that discovers fast ids, so the composer's quick-mode button
+ * behaves the same wherever a fast model is identifiable: it finds the pair when asked
+ * about the base row, and when asked about the fast id itself — which is what the
+ * selection becomes once the mode is on — so it can switch back off again.
+ */
+export class FastVariantIndex {
+  private readonly byBase = new Map<string, string>()
+  private readonly rowOfVariant = new Map<string, string>()
+
+  /** Forget every pair, before re-reading a catalog. */
+  clear(): void {
+    this.byBase.clear()
+    this.rowOfVariant.clear()
+  }
+
+  /**
+   * Record one id, if it names a fast variant.
+   *
+   * The first variant named for a row wins: a catalog that lists two spellings of the
+   * same variant (`kimi-for-coding-highspeed` and `kimi-k2.7-code-highspeed`) offers one
+   * button, and the earlier entry is the more specific one.
+   *
+   * @param id - a wire id from a catalog.
+   * @param rowOf - maps a base id to the picker row that serves it, when the catalog
+   *   spells the base differently from the variant's own prefix.
+   */
+  note(id: string, rowOf?: (base: string) => string | undefined): void {
+    if (!isFastVariant(id)) return
+    const base = baseModelOf(id)
+    if (base.length === 0) return
+    const row = rowOf?.(base) ?? base
+    if (!this.byBase.has(row)) this.byBase.set(row, id)
+    if (!this.rowOfVariant.has(id)) this.rowOfVariant.set(id, row)
+  }
+
+  /** The fast variant's wire id for one picker row, when the catalog named one. */
+  variantOf(baseId: string): string | undefined {
+    return this.byBase.get(baseId)
+  }
+
+  /** The pair one picker id belongs to, from either side. */
+  pairOf(id: string): { baseId: string, wireId: string } | undefined {
+    const direct = this.byBase.get(id)
+    if (direct !== undefined) return { baseId: id, wireId: direct }
+    const row = this.rowOfVariant.get(id)
+    return row === undefined ? undefined : { baseId: row, wireId: id }
+  }
 }
 
 /** A context-size suffix like `@500k` on a model id. */
@@ -430,7 +489,7 @@ export class GrokAdapter extends LlmAdapter {
   /** Capability metadata from the CLI catalog, keyed by model id. */
   private readonly metadata = new Map<string, GrokCliMetadata>()
   /** Fast-variant wire id per base model, for the picker's quick-mode button. */
-  private readonly fastVariants = new Map<string, string>()
+  private readonly fastVariants = new FastVariantIndex()
   /** Image-generation model id, when discovery reported one. */
   private imageModel: string | undefined
 
@@ -623,27 +682,12 @@ export class GrokAdapter extends LlmAdapter {
 
   /** The fast/lightspeed variant wire id for a base model, when discovery reported one. */
   fastVariant(baseId: string): string | undefined {
-    return this.fastVariants.get(baseId)
+    return this.fastVariants.variantOf(baseId)
   }
 
-  /**
-   * The fast pair one picker id belongs to, from either side.
-   *
-   * The picker's own row is the base id, but selecting the fast variant makes that
-   * variant the current selection, so the button must still find its pair — and know
-   * which id to switch back to — when asked about the fast id itself.
-   *
-   * @param id - the selected model id.
-   * @returns the base model and the fast variant's wire id, or undefined when the
-   *   model has no fast variant.
-   */
+  /** The fast pair one picker id belongs to, from either side. */
   fastPairOf(id: string): { baseId: string, wireId: string } | undefined {
-    const direct = this.fastVariants.get(id)
-    if (direct !== undefined) return { baseId: id, wireId: direct }
-    for (const [base, wire] of this.fastVariants) {
-      if (wire === id) return { baseId: base, wireId: wire }
-    }
-    return undefined
+    return this.fastVariants.pairOf(id)
   }
 
   /** The image-generation model id, when discovery reported one. */
@@ -801,8 +845,7 @@ export class GrokAdapter extends LlmAdapter {
     for (const id of ids) {
       if (NON_CHAT_ID.test(id) || isImageModel(id)) continue
       if (isFastVariant(id)) {
-        const base = baseModelOf(id)
-        if (base.length > 0 && !this.fastVariants.has(base)) this.fastVariants.set(base, id)
+        this.fastVariants.note(id)
         continue
       }
       const ctx = contextOf(id)

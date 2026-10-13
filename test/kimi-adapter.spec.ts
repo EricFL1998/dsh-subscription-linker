@@ -80,6 +80,44 @@ describe('KimiAdapter catalog', () => {
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
   })
 
+  test('pairs the fast variant its own aliases name', async () => {
+    const adapter = new KimiAdapter(options())
+    // `kimi-for-coding-highspeed` is listed as an accepted id of the row, which is the
+    // recognition the composer's quick-mode button needs — no discovery run required.
+    assert.deepEqual(adapter.fastPairOf('kimi-for-coding'), {
+      baseId: 'kimi-for-coding',
+      wireId: 'kimi-for-coding-highspeed',
+    })
+    // Asked about the fast id itself — which is what the selection becomes — the pair
+    // still names the row to switch back to.
+    assert.deepEqual(adapter.fastPairOf('kimi-for-coding-highspeed'), {
+      baseId: 'kimi-for-coding',
+      wireId: 'kimi-for-coding-highspeed',
+    })
+    assert.equal(adapter.fastPairOf('k3'), undefined)
+    // The fast id is not a picker row of its own, and it resolves under its own id so a
+    // fast selection is never rewritten onto its base.
+    const models = await adapter.listModels('kimi')
+    assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), false)
+    const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
+    assert.equal(resolved.id, 'kimi-for-coding-highspeed')
+    assert.equal(resolved.name, 'Kimi for Coding')
+    assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
+  })
+
+  test('folds a live fast id into the row it belongs to', async () => {
+    const fetchFn: typeof fetch = async () =>
+      Response.json({ data: [{ id: 'kimi-for-coding' }, { id: 'kimi-for-coding-turbo' }, { id: 'k3' }] })
+    const adapter = new KimiAdapter(options({ discovery: true, fetchFn }))
+    // The live variant is not a row of its own; it rides its row, and being live it
+    // replaces the curated alias for that row.
+    assert.deepEqual(await adapter.fetchCatalog('token'), ['kimi-for-coding', 'k3'])
+    assert.deepEqual(adapter.fastPairOf('kimi-for-coding'), {
+      baseId: 'kimi-for-coding',
+      wireId: 'kimi-for-coding-turbo',
+    })
+  })
+
   test('exposes the reasoning ladder with its default', async () => {
     const adapter = new KimiAdapter(options())
     const resolved = await adapter.resolveModel('kimi', 'k3')

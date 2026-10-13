@@ -198,10 +198,10 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
     modelVariants: (id: string) => {
-      const fast = adapter.fastVariant(id)
+      const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
-        ...fast === undefined ? {} : { fast },
+        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId },
         ...image === undefined ? {} : { image },
       }
     },

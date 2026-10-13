@@ -47,7 +47,7 @@ import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import { prepareMoonshotTool } from '../translate/moonshot-schema.js'
 import type { ImageResolver } from '../translate/responses.js'
-import { isImageModel, isFastVariant, baseModelOf } from './grok.js'
+import { isImageModel, isFastVariant, baseModelOf, FastVariantIndex } from './grok.js'
 
 /** Model ids that are clearly not chat models. */
 const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
@@ -244,8 +244,14 @@ export class KimiAdapter extends LlmAdapter {
   private discovered: readonly string[] | undefined
   /** Image-generation model id, when discovery reported one. */
   private imageModel: string | undefined
-  /** Fast-variant wire id per base model, for the picker's quick-mode button. */
-  private readonly fastVariants = new Map<string, string>()
+  /**
+   * Fast-variant wire id per picker row, for the composer's quick-mode button.
+   *
+   * Seeded from the curated aliases — `kimi-for-coding-highspeed` is one — so the button
+   * exists before any discovery run, and then updated from the live catalog, which is
+   * the authority on what this account actually serves.
+   */
+  private readonly fastVariants = new FastVariantIndex()
 
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
@@ -255,6 +261,30 @@ export class KimiAdapter extends LlmAdapter {
 
   constructor(private readonly options: KimiAdapterOptions) {
     super()
+    this.seedCuratedFastVariants()
+  }
+
+  /**
+   * Record the fast variants the curated catalog already names as aliases.
+   *
+   * The alias is the recognition: `kimi-for-coding-highspeed` is stated as an accepted
+   * id of `kimi-for-coding`, so the route can offer the quick-mode button without
+   * waiting for a live list that may never name it. A row a live catalog already paired
+   * keeps that pairing, so this only fills the gaps.
+   */
+  private seedCuratedFastVariants(): void {
+    for (const entry of KIMI_MODELS) {
+      for (const alias of entry.aliases ?? []) {
+        // Every alias of one row maps back to that row, so a variant whose own prefix
+        // names another alias (`kimi-k2.7-code-highspeed`) still pairs with the row.
+        this.fastVariants.note(alias, (base) => this.entryFor(base)?.id ?? base)
+      }
+    }
+  }
+
+  /** The fast pair one picker id belongs to, from either side. */
+  fastPairOf(id: string): { baseId: string, wireId: string } | undefined {
+    return this.fastVariants.pairOf(id)
   }
 
   /**
@@ -312,9 +342,9 @@ export class KimiAdapter extends LlmAdapter {
     return this.imageModel
   }
 
-  /** The fast/lightspeed variant wire id for a base model, when discovery reported one. */
+  /** The fast/lightspeed variant wire id for a picker row. */
   fastVariant(baseId: string): string | undefined {
-    return this.fastVariants.get(baseId)
+    return this.fastVariants.variantOf(baseId)
   }
 
   /** The ids the picker must currently omit. */
@@ -348,9 +378,13 @@ export class KimiAdapter extends LlmAdapter {
       }
     }
     const reasoning = reasoningInfo(entry)
+    // A fast variant is a wire id of its own — the button switches to it and back, so the
+    // selection must keep that id — while an ordinary alias is just another spelling of
+    // the row and resolves onto it.
+    const pair = this.fastVariants.pairOf(model)
     return {
       provider: KIMI_PROVIDER_ID,
-      id: entry.id,
+      id: pair !== undefined && pair.wireId === model ? model : entry.id,
       name: entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
@@ -569,15 +603,19 @@ export class KimiAdapter extends LlmAdapter {
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
       // Image models are never picker rows: they are agent-called, always on.
       this.imageModel = allIds.find((id) => isImageModel(id))
-      // Fast/lightspeed variants ride with their base model: they share the base's
-      // visibility switch and are reached by a picker button, not a separate row.
+      // Fast/lightspeed variants ride with their base row: they share the row's
+      // visibility switch and are reached by the composer's quick-mode button, not a
+      // separate row. The live list is the authority on what this account serves, so it
+      // is recorded first and the curated aliases only fill the gaps it leaves.
       this.fastVariants.clear()
       for (const id of allIds) {
-        if (!isFastVariant(id)) continue
-        const base = baseModelOf(id)
-        if (!this.fastVariants.has(base)) this.fastVariants.set(base, id)
+        this.fastVariants.note(id, (base) => this.entryFor(base)?.id ?? base)
       }
-      const ids = allIds.filter((id) => !NON_CHAT_ID.test(id))
+      this.seedCuratedFastVariants()
+      const ids = allIds
+        .filter((id) => !NON_CHAT_ID.test(id))
+        .map((id) => (isFastVariant(id) ? this.entryFor(baseModelOf(id))?.id ?? baseModelOf(id) : id))
+        .filter((id, index, list) => list.indexOf(id) === index)
       if (ids.length === 0) {
         this.options.onWarn?.('Kimi model discovery returned an empty catalog; using the built-in catalog')
         return undefined
