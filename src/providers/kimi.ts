@@ -105,6 +105,9 @@ const EFFORT_WIRE_MAP: Record<string, string> = {
   max: 'max',
 }
 
+/** The rung id the composer's quick-mode button selects. */
+const FAST_RUNG = 'highspeed'
+
 /** Display metadata for the reasoning ladder shared by every live coding model. */
 const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
   none: { name: 'Off', description: 'Answer without spending thinking tokens' },
@@ -115,8 +118,9 @@ const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
   max: { name: 'Max', description: 'Highest thinking budget Kimi accepts' },
   // Not a thinking budget: this rung is the model's fast variant, which the composer's
   // quick-mode button selects. It rides the effort channel so the row keeps its own id —
-  // a swapped model id would leave the picker with no way back to the standard model.
-  fast: { name: 'Fast', description: 'Highspeed variant of this model' },
+  // a swapped model id would leave the picker with no way back. Kimi's own word for it
+  // is "highspeed", which is what the rung is named here.
+  [FAST_RUNG]: { name: 'Highspeed', description: 'Kimi highspeed variant of this model' },
 }
 
 /**
@@ -181,7 +185,7 @@ function effortInfo(effort: string) {
  */
 function reasoningInfo(entry: KimiModelEntry, fast = false) {
   const efforts = entry.reasoningEfforts
-  const ids = fast ? [...efforts ?? [], 'fast'] : efforts
+  const ids = fast ? [...efforts ?? [], FAST_RUNG] : efforts
   if (ids === undefined || ids.length === 0) return undefined
   const defaultEffort = entry.defaultEffort ?? ids[ids.length - 1]
   return {
@@ -411,7 +415,7 @@ export class KimiAdapter extends LlmAdapter {
     // Fast mode rides the reasoning channel: `fast` is a rung of the row, not a model id
     // of its own, so the row the picker selected stays dispatchable and the user can
     // always select the standard model again. Only the wire id changes.
-    const fast = String(options.reasoningEffort ?? '') === 'fast'
+    const fast = String(options.reasoningEffort ?? '') === FAST_RUNG
     const model = fast ? this.fastVariants.variantOf(options.model) ?? options.model : options.model
     const call = { ...options, model }
     // Kimi has no `fast` effort; the variant already carries the behaviour.

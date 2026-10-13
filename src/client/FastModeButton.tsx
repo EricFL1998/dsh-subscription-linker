@@ -53,7 +53,7 @@ export interface FastModeButtonInjected {
  * @returns the button, or null when this model has no fast variant.
  */
 export function FastModeButton({ call, isOwnProvider, modelDirectory, useProjection }: FastModeButtonInjected & SessionStandardProps): ReactNode {
-  const [pair, setPair] = useState<{ wireId: string, baseId?: string } | undefined>(undefined)
+  const [pair, setPair] = useState<{ rung: string } | undefined>(undefined)
   // A switch that the host refuses must not look like a dead button: the reason is kept
   // and shown, because the only alternative is a control that silently does nothing.
   const [failure, setFailure] = useState<{ code?: string, message: string } | undefined>(undefined)
@@ -71,9 +71,9 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
     void call('model-variants', { provider, id: model })
       .then((result) => {
         if (!live) return
-        setPair(result?.fast === undefined
-          ? undefined
-          : { wireId: result.fast, ...result.fastBase === undefined ? {} : { baseId: result.fastBase } })
+        // The rung is the provider's own word (xAI `lightspeed`, Kimi `highspeed`), so
+        // the picker reads a name the model's own docs use, not a generic "Fast".
+        setPair(result?.fast === undefined ? undefined : { rung: result.fastRung ?? 'fast' })
       })
       .catch(() => { if (live) setPair(undefined) })
     return () => { live = false }
@@ -83,10 +83,9 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
   useEffect(() => { setFailure(undefined) }, [model])
 
   if (pair === undefined || provider === undefined || model === undefined || modelDirectory?.select === undefined) return null
-  // Fast mode is the row's `fast` reasoning rung, so the model id never changes and the
+  // Fast mode is the row's fast reasoning rung, so the model id never changes and the
   // picker always shows the row the user can switch back to.
-  const active = (selection?.next ?? selection?.lastUsed)?.reasoningEffort === 'fast'
-  // The row the rung belongs to: what the picker selected, or the pair's own base.
+  const active = (selection?.next ?? selection?.lastUsed)?.reasoningEffort === pair.rung
   const target = model
 
   const base = active
@@ -115,7 +114,7 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
           setFailure(undefined)
           // Turning it off drops the rung, which the host then reads as the model's own
           // default. The model id is never swapped, so this cannot strand the selection.
-          const next = active ? { provider, model: target } : { provider, model: target, reasoningEffort: 'fast' }
+          const next = active ? { provider, model: target } : { provider, model: target, reasoningEffort: pair.rung }
           void Promise.resolve(modelDirectory.select?.(next))
             .then((result) => {
               // The directory reports its own outcome: a refused selection carries why.

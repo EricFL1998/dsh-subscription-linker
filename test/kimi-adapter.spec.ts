@@ -112,7 +112,7 @@ describe('KimiAdapter catalog', () => {
     // The row carries the `fast` rung, which is what the quick-mode button selects.
     assert.equal(
       (await adapter.resolveModel('kimi', 'kimi-for-coding')).reasoning?.efforts
-        .some((effort) => String(effort.id) === 'fast'),
+        .some((effort) => String(effort.id) === 'highspeed'),
       true,
     )
   })
@@ -502,7 +502,7 @@ describe('KimiAdapter model order', () => {
     const adapter = new KimiAdapter(options({ fetchFn }))
     // The selection keeps the row's own id — that is what the host validated — and the
     // request goes to the variant, with no `fast` effort sent as a thinking budget.
-    await collect(adapter.stream(request({ model: 'kimi-for-coding', reasoningEffort: ReasoningEffortId('fast') })))
+    await collect(adapter.stream(request({ model: 'kimi-for-coding', reasoningEffort: ReasoningEffortId('highspeed') })))
     assert.equal(body().model, 'kimi-for-coding-highspeed')
     assert.equal(body().reasoning_effort, undefined)
   })

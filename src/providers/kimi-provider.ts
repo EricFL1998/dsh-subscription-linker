@@ -201,7 +201,7 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
       const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
-        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId },
+        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: 'highspeed' },
         ...image === undefined ? {} : { image },
       }
     },

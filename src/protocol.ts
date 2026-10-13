@@ -355,6 +355,14 @@ export interface ModelVariants {
    * already the fast variant, which is not itself a listed row.
    */
   fastBase?: string
+  /**
+   * The reasoning rung that selects the fast variant.
+   *
+   * Each provider names its own variant (xAI `lightspeed`, Kimi `highspeed`), so the
+   * rung is the provider's word — the picker reads it, and the stream maps it back to
+   * the variant's wire id. Defaults to `fast`.
+   */
+  fastRung?: string
   /** Image-generation model wire id, when the provider reported one. */
   image?: string
 }

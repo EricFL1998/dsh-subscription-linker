@@ -92,16 +92,20 @@ export const GROK_PREEMPT_MS = 2 * 60 * 1000
 /** Hosts an authorization server endpoint may live on. */
 const TRUSTED_AUTH_HOSTS = new Set(['auth.x.ai', 'accounts.x.ai'])
 
+/** The rung id the composer's quick-mode button selects. */
+const FAST_RUNG = 'lightspeed'
+
 /** Display metadata for the reasoning ladder xAI documents. */
 const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
   none: { name: 'Off', description: 'Answer without spending thinking tokens' },
   low: { name: 'Low', description: 'Short chain of thought' },
   medium: { name: 'Medium', description: 'Balanced thinking budget' },
   high: { name: 'High', description: 'Deep chain of thought' },
-  // Not a thinking budget: this rung is the model's fast variant, which the composer's
-  // quick-mode button selects. It rides the effort channel so the row keeps its own id —
-  // a swapped model id would leave the picker with no way back to the standard model.
-  fast: { name: 'Fast', description: 'Lightspeed variant of this model' },
+  // Not a thinking budget: this rung is the model's fast/lightspeed variant, which the
+  // composer's quick-mode button selects. It rides the effort channel so the row keeps
+  // its own id — a swapped model id would leave the picker with no way back. xAI's own
+  // word for it is "lightspeed", which is what the rung is named here.
+  [FAST_RUNG]: { name: 'Lightspeed', description: 'xAI lightspeed variant of this model' },
 }
 
 /**
@@ -194,7 +198,7 @@ function effortInfo(effort: string) {
  */
 function reasoningInfo(entry: CatalogEntry, fast = false) {
   const efforts = entry.reasoningEfforts
-  const ids = fast ? [...efforts ?? [], 'fast'] : efforts
+  const ids = fast ? [...efforts ?? [], FAST_RUNG] : efforts
   if (ids === undefined || ids.length === 0) return undefined
   return {
     efforts: ids.map(effortInfo),
@@ -655,7 +659,7 @@ export class GrokAdapter extends LlmAdapter {
     // Fast mode rides the reasoning channel: `fast` is a rung of the row, not a model id
     // of its own, so the row the picker selected stays dispatchable and the user can
     // always select the standard model again. Only the wire id changes.
-    const fast = String(options.reasoningEffort ?? '') === 'fast'
+    const fast = String(options.reasoningEffort ?? '') === FAST_RUNG
     const model = fast ? this.fastVariants.variantOf(base) ?? base : base
     const call = { ...options, model }
     // xAI has no `fast` effort; the variant already carries the behaviour.
@@ -1181,7 +1185,7 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
       const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
-        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId },
+        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: 'lightspeed' },
         ...image === undefined ? {} : { image },
       }
     },
