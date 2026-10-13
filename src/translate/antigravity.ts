@@ -71,7 +71,7 @@ export interface AntigravityRequest {
 export function antigravityReasoning(model: string) {
   const ids = model.startsWith('claude-') ? ['high']
     : model.startsWith('gpt-oss-') ? ['medium']
-      : model.startsWith('gemini-3.1-pro') || model === 'gemini-pro-agent' ? ['low', 'high']
+      : model.startsWith('gemini-3.1-pro') || model === 'gemini-pro' || model === 'gemini-pro-agent' ? ['low', 'high']
         : /^gemini-(?:2\.5|3)/.test(model) ? ['low', 'medium', 'high'] : []
   const fixed = /^gemini-.*-(low|medium|high)$/.exec(model)?.[1]
   const efforts = fixed !== undefined && ids.includes(fixed) ? [fixed] : ids
@@ -107,9 +107,9 @@ export function antigravityThinking(
   let budget: number
   if (model.startsWith('claude-')) budget = 1024
   else if (model.startsWith('gpt-oss-')) budget = 8192
-  else if (model.startsWith('gemini-3.1-pro') || model === 'gemini-pro-agent') {
+  else if (model.startsWith('gemini-3.1-pro') || model === 'gemini-pro' || model === 'gemini-pro-agent') {
     budget = effort === 'high' ? 10001 : 1001
-  } else if (model.startsWith('gemini-3.5-flash') || model === 'gemini-3-flash-agent') {
+  } else if (model.startsWith('gemini-3.5-flash') || model === 'gemini-3-flash' || model === 'gemini-3-flash-agent') {
     budget = effort === 'high' ? 10000 : effort === 'medium' ? 4000 : 1000
   } else {
     budget = effort === 'high' ? -1 : effort === 'medium' ? 4000 : 1000

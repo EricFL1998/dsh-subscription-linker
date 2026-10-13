@@ -72,46 +72,16 @@ export function isImageModel(id: string): boolean {
   return IMAGE_MODEL.test(id)
 }
 
-/** A model id whose suffix or infix names a fixed reasoning tier, folded into its base family. */
-const TIER_MARKED = /(?:^|[-_])(?:extra-low|low|medium|high|max|agent)(?:$|[-_])/i
-
-/** True when a model id names a specific tier of a family, not a model with a ladder. */
-export function isTierMarked(id: string): boolean {
-  return TIER_MARKED.test(id)
-}
-
-/** The base family a tier-marked id belongs to (`gemini-3-flash-agent` → `gemini-3-flash`). */
-export function baseFamilyOf(id: string): string {
-  // Remove the tier token wherever it sits (suffix or infix), then tidy any trailing
-  // separator the removal left behind.
-  return id
-    .replace(/[-_](?:extra-low|low|medium|high|max|agent)(?=[-_]|$)/i, '')
-    .replace(/[-_]$/, '')
-}
-
 /**
- * The canonical base family for a gemini flash model id.
+ * The wire id one gemini flash family and effort level map to when no live listing
+ * has been parsed yet.
  *
- * Antigravity names the same flash model several ways: `gemini-3.5-flash` in one
- * group, `gemini-3.5-flash-agent` (its High tier) in another, `gemini-3.5-flash-low`
- * elsewhere, `gemini-3.8-flash-tiered` for the tiered variant. They all dispatch to
- * one family per generation, so the picker shows one row. Different generations
- * (3 vs 3.5 vs 3.8) are different families; flash-lite and flash-image are their own
- * families; other families (pro, …) keep their id.
- */
-export function geminiBaseOf(id: string): string {
-  const match = /^(gemini-\d+(?:\.\d+)?)-flash/.exec(id)
-  return match?.[1] ?? id
-}
-
-/**
- * The wire id to send for one gemini flash family and reasoning effort.
- *
- * The service names tiers inconsistently: the High tier of 3.5 Flash is
- * `gemini-3.5-flash-high` in some groups and `gemini-3.5-flash-agent` in others;
- * 3.8 Flash is `gemini-3.8-flash-tiered`. The picker shows the base family with a
- * ladder; this maps the chosen level back to the wire id the endpoint accepts.
- * When no specific mapping is known, the effort is appended as a suffix.
+ * The live listing is the authority (see `wireIdFor`); this is the fallback that
+ * keeps a cold start — a persisted selection used before discovery ran — from
+ * sending a bare family id the endpoint does not serve. The service names tiers
+ * inconsistently: the High tier of 3.5 Flash is `gemini-3.5-flash-high` in some
+ * groups and `gemini-3.5-flash-agent` in others; 3.8 Flash is
+ * `gemini-3.8-flash-tiered`.
  */
 export function geminiTierId(base: string, effort: string): string {
   if (effort === 'high') {
@@ -138,10 +108,18 @@ const EFFORT_WORDS: readonly { word: string, level: string }[] = [
   { word: 'extra-low', level: 'minimal' },
   { word: 'xhigh', level: 'xhigh' },
   { word: 'minimal', level: 'minimal' },
+  // A flash family's High tier is spelled `-high`, `-tiered` or `-agent` depending on
+  // the generation, so all three mean the same rung of the ladder.
+  { word: 'tiered', level: 'high' },
+  { word: 'agent', level: 'high' },
   { word: 'low', level: 'low' },
   { word: 'medium', level: 'medium' },
   { word: 'high', level: 'high' },
+  { word: 'max', level: 'max' },
 ]
+
+/** A ladder's canonical order. */
+const LEVEL_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 /** An id's family and the level its effort word says, '' when it has none. */
 function splitEffortId(id: string): { family: string, effort: string } {
@@ -169,91 +147,128 @@ function nameEffort(name: string): { base: string, effort: string } {
   return { base: name.slice(0, open).trim(), effort }
 }
 
-/** One family of Antigravity's ids, as magpie groups them. */
-interface Family {
+/** One variant of a family: one wire id and the level its own naming states. */
+interface Variant {
   id: string
-  variants: { id: string, name: string, contextWindow: number, inputModalities: readonly string[], efforts: readonly string[] }[]
-  efforts: string[]
+  contextWindow: number
+  /** The modalities this id advertises (never absent: text at the least). */
+  inputModalities: NonNullable<CatalogEntry['inputModalities']>
+  /** The rung this id is, '' when nothing says — the family's default then. */
+  level: string
 }
 
-/** Group raw entries into families by stripping effort words. */
+/** One family of Antigravity's models, as the service itself names them. */
+interface Family {
+  /** The display name with any level bracket removed: `Gemini 3.5 Flash`. */
+  name: string
+  variants: Variant[]
+  /** The ids' own base with the level word removed (`gemini-3.8-flash`), '' when none. */
+  base: string
+}
+
+/**
+ * Group raw entries into the families the service names.
+ *
+ * Grouping follows the display name, not the id, because the service names the family
+ * and lets the wire id drift: the High tier of Gemini 3.5 Flash is
+ * `gemini-3-flash-agent` — an id that names a different generation than the name it
+ * carries. A level is stated by the name's own bracket when it has one, and by the
+ * id's effort word otherwise.
+ *
+ * @param raw - one entry per wire id the listing exposed.
+ * @returns the families, in the order their first member appeared.
+ */
 function familiesOf(raw: CatalogEntry[]): Family[] {
-  const byId = new Map<string, Family>()
+  const byName = new Map<string, Family>()
   const order: Family[] = []
   for (const entry of raw) {
-    const { family } = splitEffortId(entry.id)
-    let f = byId.get(family)
+    const { base: name, effort: named } = nameEffort(entry.name)
+    let f = byName.get(name)
     if (f === undefined) {
-      f = { id: family, variants: [], efforts: [] }
-      byId.set(family, f)
+      f = { name, variants: [], base: '' }
+      byName.set(name, f)
       order.push(f)
     }
+    const { family: idBase, effort: idLevel } = splitEffortId(entry.id)
+    if (f.base === '' && idBase !== entry.id) f.base = idBase
     f.variants.push({
       id: entry.id,
-      name: entry.name,
       contextWindow: entry.contextWindow,
       inputModalities: entry.inputModalities ?? ['text'],
-      efforts: entry.reasoningEfforts ?? [],
+      level: named !== '' ? named : idLevel,
     })
-  }
-  // Determine each variant's effort: prefer the name's bracket, else the id's word.
-  // magpie: a family is only ids that are one id with an effort word after it — a
-  // variant named like another but with an id of its own (gemini-3-flash-agent is
-  // "Gemini 3.5 Flash (High)") stays a variant of its own family, as the name says.
-  for (const f of order) {
-    const named: string[] = []
-    for (const v of f.variants) {
-      const { effort } = nameEffort(v.name)
-      if (effort !== '' && !named.includes(effort)) named.push(effort)
-    }
-    for (const v of f.variants) {
-      let effort = splitEffortId(v.id).effort
-      // When every variant's name says a distinct level, the name wins over the id.
-      if (named.length === f.variants.length && named.length > 1) {
-        effort = nameEffort(v.name).effort
-      }
-      f.efforts.push(effort)
-    }
   }
   return order
 }
 
-/** The id for each effort level, '' the default. */
-function byEffort(f: Family): Map<string, string> {
-  const out = new Map<string, string>()
-  for (let i = 0; i < f.variants.length; i++) {
-    if (!out.has(f.efforts[i]!)) out.set(f.efforts[i]!, f.variants[i]!.id)
+/** The rungs a family defaults to, best first, when no variant is the bare model. */
+const DEFAULT_ORDER = ['xhigh', 'high', 'medium', 'low', 'minimal', 'max'] as const
+
+/** The variant whose id the family's row carries: the bare model, else its top rung. */
+function defaultVariant(f: Family): Variant {
+  const bare = f.variants.find((v) => v.level === '')
+  if (bare !== undefined) return bare
+  for (const level of DEFAULT_ORDER) {
+    const found = f.variants.find((v) => v.level === level)
+    if (found !== undefined) return found
   }
-  if (!out.has('')) {
-    out.set('', out.get('high') ?? '')
-    for (const level of ['xhigh', 'high', 'medium', 'low', 'minimal']) {
-      if (out.get('') === '') out.set('', out.get(level) ?? '')
-    }
-  }
-  return out
+  return f.variants[0]!
+}
+
+/**
+ * The wire id each picker row must send per effort level, as the last parsed family
+ * listing reported it.
+ *
+ * Collapsing gives the picker one row per family, but the endpoint only serves the
+ * suffixed ids the listing named: the High tier of Gemini 3.5 Flash is
+ * `gemini-3-flash-agent`, and `gpt-oss-120b` only exists as `gpt-oss-120b-medium`.
+ * Nothing here is invented — a level the listing did not name falls back to the
+ * family's own default id, and only a tiered gemini family may synthesise the tier
+ * spelling the endpoint accepts (see `geminiTierId`).
+ */
+const wireIds = new Map<string, { levels: Map<string, string>, base: string }>()
+
+/**
+ * The wire id one picker row and effort level must dispatch.
+ *
+ * @param rowId - the row the picker offered.
+ * @param effort - the chosen level, when the caller picked one.
+ * @returns the wire id, or undefined when no live listing covers this row.
+ */
+export function wireIdFor(rowId: string, effort?: string): string | undefined {
+  const row = wireIds.get(rowId)
+  if (row === undefined) return undefined
+  const chosen = effort === undefined ? undefined : row.levels.get(effort)
+  if (chosen !== undefined) return chosen
+  // A tiered gemini family the listing exposed only one way still takes its own tier
+  // spelling for the three levels this build knows (`gemini-3.8-flash` + low →
+  // `gemini-3.8-flash-low`). Nothing else is synthesised.
+  const tiered = effort === 'low' || effort === 'medium' || effort === 'high'
+  if (tiered && row.base !== '' && row.base !== rowId) return geminiTierId(row.base, effort)
+  return row.levels.get('') ?? rowId
 }
 
 /** Collapse families into one row each, as magpie does. */
 export function collapseFamilies(raw: CatalogEntry[]): CatalogEntry[] {
   const out: CatalogEntry[] = []
   for (const f of familiesOf(raw)) {
-    if (f.variants.length === 1) {
-      out.push(raw.find((e) => e.id === f.variants[0]!.id)!)
-      continue
-    }
-    const def = byEffort(f).get('') ?? f.variants[0]!.id
-    const defVariant = f.variants.find((v) => v.id === def) ?? f.variants[0]!
-    const efforts: string[] = []
-    for (const level of ['minimal', 'low', 'medium', 'high', 'xhigh']) {
-      if (f.efforts.includes(level)) efforts.push(level)
-    }
-    const modalities = defVariant.inputModalities as CatalogEntry['inputModalities']
+    const levels = new Map<string, string>()
+    for (const v of f.variants) if (!levels.has(v.level)) levels.set(v.level, v.id)
+    const def = defaultVariant(f)
+    levels.set('', def.id)
+    wireIds.set(def.id, { levels, base: f.base })
+    const aliases = f.variants.map((v) => v.id).filter((id) => id !== def.id)
     out.push({
-      id: f.id,
-      name: nameEffort(defVariant.name).base || f.id,
+      // The row keeps an id the account listed, so a selection made from it stays
+      // dispatchable; the name is what the picker shows.
+      id: def.id,
+      name: f.name,
+      ...aliases.length === 0 ? {} : { aliases },
       contextWindow: Math.min(...f.variants.map((v) => v.contextWindow)),
-      ...(modalities === undefined ? {} : { inputModalities: modalities }),
-      reasoningEfforts: efforts,
+      inputModalities: def.inputModalities,
+      // Only the rungs this listing really serves: a level with no id of its own must
+      // not be offered as a choice the request would ignore.
+      reasoningEfforts: LEVEL_ORDER.filter((level) => levels.has(level)),
     })
   }
   return out
@@ -330,11 +345,11 @@ const NON_AGENT = /(?:^|[-_])(?:tab|tabs|commit|transcription|audio|embedding|co
 /**
  * Read the agent-callable catalog from a `fetchAvailableModels` response.
  *
- * Every listed id is a wire id the response itself named, so each row stays
- * dispatchable; the filter removes the surfaces the agent envelope cannot call
- * (tabs, commit messages, transcription, standalone image generation) and keeps the
- * response's own grouping order. A tier-suffixed id advertises no effort ladder,
- * because its suffix already fixes the tier.
+ * The response's own grouping decides which ids the agent envelope may call; this
+ * removes the surfaces it cannot (tabs, commit messages, transcription, standalone
+ * image generation) and keeps the response's own order. Tiers of one family then
+ * collapse into the single picker row that serves them, with a wire-id map so the
+ * request still names an id the account listed (see `wireIdFor`).
  *
  * @param payload - the decoded response.
  * @returns the catalog entries, in the response's order.
@@ -342,21 +357,6 @@ const NON_AGENT = /(?:^|[-_])(?:tab|tabs|commit|transcription|audio|embedding|co
 export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
   if (!isRecord(payload) || !isRecord(payload.models)) return []
   const models = payload.models as Record<string, unknown>
-  // TEMP diagnostics: write the raw model-id list to a file so an over-eager filter is
-  // inspectable after a discovery run, since the node half's stdout is unreachable in
-  // the desktop shell.
-  try {
-    const all = Object.keys(models)
-    const kept = agentIds(payload)
-    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    const { homedir } = require('node:os') as typeof import('node:os')
-    const { join } = require('node:path') as typeof import('node:path')
-    writeFileSync(
-      join(homedir(), '.dsh', 'antigravity-models-debug.json'),
-      JSON.stringify({ all, kept, dropped: all.filter((id) => !kept.includes(id)) }, null, 2),
-      'utf8',
-    )
-  } catch { /* diagnostics never break parsing */ }
   const raw: CatalogEntry[] = []
   for (const wireId of agentIds(payload)) {
     // Image-generation models are never picker rows: they are agent-called, always on.

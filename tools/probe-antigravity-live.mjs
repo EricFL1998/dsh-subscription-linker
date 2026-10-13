@@ -40,6 +40,13 @@ for (const key of Object.keys(accounts)) {
   const rawIds = Object.keys(rawModels)
   const ids = result.entries.map((entry) => entry.id)
   console.log('RAW:', rawIds.length, 'KEPT:', ids.length)
+  // The picker row is the family; each level must still dispatch an id the account
+  // itself listed. Printing the mapping is the check that no row can 404.
+  const { wireIdFor } = await import('../lib/providers/antigravity-catalog.js')
+  for (const entry of result.entries) {
+    const ladder = (entry.reasoningEfforts ?? []).map((level) => `${level}→${wireIdFor(entry.id, level) ?? entry.id}`)
+    console.log(`  row ${entry.id} | ${entry.name} | ${ladder.join(' ') || '(no ladder)'}`)
+  }
   console.log('KEPT ids:', ids.join(', '))
   console.log('DROPPED:', rawIds.filter((id) => !ids.includes(id)).join(', ') || '(none)')
   // Flag which dropped ids are image / fast variants.
