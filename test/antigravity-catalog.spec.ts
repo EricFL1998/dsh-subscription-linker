@@ -42,7 +42,7 @@ describe('parseAntigravityModels', () => {
       'gemini-pro',
       'gemini-3.8-flash',
       'claude-sonnet-4-6',
-      'gpt-oss-120b-medium',
+      'gpt-oss-120b',
     ])
     // Image models, tabs, commit messages and transcription are not agent-callable.
     assert.equal(entries.some((entry) => /image|tab|commit|transcription/.test(entry.id)), false)

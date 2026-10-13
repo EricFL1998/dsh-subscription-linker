@@ -93,7 +93,7 @@ export class TokenManager<S extends SessionBase> {
       )
     }
     const { account: key, session } = found
-    if (!force && Date.now() + this.preemptMs < session.expiresAt) {
+    if (!force && Date.now() < session.expiresAt) {
       return { account: key, accessToken: session.accessToken, expiresAt: session.expiresAt }
     }
     const refreshed = await this.refresh(key, session)
