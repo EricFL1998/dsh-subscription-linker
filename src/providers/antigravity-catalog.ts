@@ -15,6 +15,7 @@
 
 import type { UsageWindow } from '../protocol.js'
 import type { CatalogEntry } from './catalog.js'
+import { baseCandidatesOf } from './grok.js'
 
 /** Effort rungs that fold into one picker row. */
 const EFFORTS = ['low', 'medium', 'high'] as const
@@ -173,7 +174,9 @@ interface Family {
  * and lets the wire id drift: the High tier of Gemini 3.5 Flash is
  * `gemini-3-flash-agent` — an id that names a different generation than the name it
  * carries. A level is stated by the name's own bracket when it has one, and by the
- * id's effort word otherwise.
+ * id's effort word otherwise; the family a variant belongs to is the longest listed
+ * prefix of its own id, so `gemini-3.5-flash-low` folds into whichever listed row its
+ * prefix names with no hand-written family map.
  *
  * @param raw - one entry per wire id the listing exposed.
  * @returns the families, in the order their first member appeared.
@@ -181,15 +184,26 @@ interface Family {
 function familiesOf(raw: CatalogEntry[]): Family[] {
   const byName = new Map<string, Family>()
   const order: Family[] = []
+  const listed = new Set(raw.map((entry) => entry.id))
+  const familyOf = (id: string, fallback: string): string => {
+    for (const base of baseCandidatesOf(id)) {
+      if (listed.has(base)) return base
+    }
+    return fallback
+  }
   for (const entry of raw) {
     const { base: name, effort: named } = nameEffort(entry.name)
-    let f = byName.get(name)
+    const { family: idBase, effort: idLevel } = splitEffortId(entry.id)
+    // The family's key: the name's bracket-free base, when the name states a level, so
+    // "Gemini 3.5 Flash (Medium)" is always that family even if no listed id starts
+    // with `gemini-3.5-flash`; otherwise the longest listed prefix of the id itself.
+    const familyBase = named !== '' ? name : (idBase !== entry.id ? familyOf(entry.id, name) : name)
+    let f = byName.get(familyBase)
     if (f === undefined) {
-      f = { name, variants: [], base: '' }
-      byName.set(name, f)
+      f = { name: familyBase, variants: [], base: '' }
+      byName.set(familyBase, f)
       order.push(f)
     }
-    const { family: idBase, effort: idLevel } = splitEffortId(entry.id)
     if (f.base === '' && idBase !== entry.id) f.base = idBase
     f.variants.push({
       id: entry.id,
