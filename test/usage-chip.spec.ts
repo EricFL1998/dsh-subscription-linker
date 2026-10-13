@@ -112,14 +112,16 @@ describe('mergeAccountWindows', () => {
     assert.equal(merged[0]?.resetsAt, sooner)
   })
 
-  test('orders windows most-spent first', () => {
+  test('orders windows by period, shortest first', () => {
+    // The rolling `5h` window reads before the `weekly` one, the way the providers state
+    // them — a reader scans what resets soonest as the nearer limit.
     const merged = mergeAccountWindows([
       reading('a', [
-        { label: '5h', usedPercent: 10 },
         { label: 'weekly', usedPercent: 90 },
+        { label: '5h', usedPercent: 10 },
       ]),
     ])
-    assert.deepEqual(merged.map((window) => window.label), ['weekly', '5h'])
+    assert.deepEqual(merged.map((window) => window.label), ['5h', 'weekly'])
   })
 
   test('leaves a credit balance out of the merge, since money is not a shared allowance', () => {

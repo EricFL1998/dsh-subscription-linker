@@ -318,8 +318,17 @@ export function mergeAccountWindows(readings: readonly AccountReading[]): readon
       ...resets.length === 0 ? {} : { resetsAt: Math.min(...resets) },
     })
   }
-  // Most-spent first, so the line leads with the window that will stop work soonest.
-  return merged.sort((left, right) => (right.usedPercent ?? 0) - (left.usedPercent ?? 0))
+  // Order by window period, shortest first: the rolling `5h` window reads before the
+  // `weekly` one, the way the providers state them and the way a reader scans (what
+  // resets soonest is the nearer limit). Unrecognised labels keep their input order.
+  const order = (label: string): number => {
+    const short = shortWindow(label)
+    if (short === '5h' || short === 's') return 0
+    if (short === '1d' || short === 'mo') return 1
+    if (short === '7d') return 2
+    return 3
+  }
+  return merged.sort((left, right) => order(left.label) - order(right.label))
 }
 
 /**

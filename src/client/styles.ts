@@ -331,6 +331,18 @@ export const usageChipCss = `
   color: var(--dsw-alias-label-primary, #e8e8e8);
   font-variant-numeric: tabular-nums;
 }
+.dsh-subscription-usage-chip-account {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* A hairline between accounts, so two sign-ins read as two groups not one run. */
+  padding-top: 6px;
+  border-top: 1px solid var(--dsw-alias-border-secondary, #ffffff14);
+}
+.dsh-subscription-usage-chip-account:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
 .dsh-subscription-usage-chip-panel {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -338,9 +350,9 @@ export const usageChipCss = `
   z-index: 20;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: 168px;
-  padding: 10px 12px;
+  gap: 10px;
+  min-width: 180px;
+  padding: 12px 14px;
   border: 1px solid var(--dsw-alias-border-secondary, #ffffff1f);
   border-radius: var(--dsw-radius-md, 10px);
   background: var(--dsw-alias-bg-layer-2, #26262a);
@@ -355,7 +367,7 @@ export const usageChipCss = `
 .dsh-subscription-usage-chip-meter {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 .dsh-subscription-usage-chip-meterHead {
   display: flex;
