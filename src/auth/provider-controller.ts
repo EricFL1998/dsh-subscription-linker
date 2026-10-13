@@ -385,6 +385,12 @@ export class ProviderController<S extends SessionBase> {
    * @param force - fetch again even when a list was already read this session.
    * @returns a fresh status.
    */
+  /**
+   * Re-read the endpoint's live model list.
+   *
+   * @param force - fetch again even when a list was already read this session.
+   * @returns a fresh status.
+   */
   async discover(force = false): Promise<ProviderStatus> {
     const spec = this.options.spec
     if (!spec.discovery) return this.status()
@@ -392,22 +398,30 @@ export class ProviderController<S extends SessionBase> {
     // A logged-out install has nothing to discover, and warning about it on
     // every startup would be noise.
     if (!await this.options.store.hasAny()) return this.status()
-    let accessToken: string
-    try {
-      accessToken = (await this.options.tokens.resolve()).accessToken
-    } catch (error: unknown) {
-      // Discovery is a convenience: an unusable session is reported by the
-      // card's account list, not as a second failure here.
-      this.options.onWarn?.(`${spec.id} model discovery skipped: ${messageOf(error)}`)
-      return this.status()
+    // The catalog is the union of every signed-in account's live list, because one
+    // model id draws on the whole pool: a model any account can serve must appear, and
+    // which account answers at call time is the scheduler's choice. A model only the
+    // non-default account has is offered, then may fall through to it on dispatch.
+    const discovered: string[] = []
+    for (const account of Object.keys(await this.options.store.list())) {
+      let accessToken: string
+      try {
+        accessToken = (await this.options.tokens.resolve(account)).accessToken
+      } catch (error: unknown) {
+        this.options.onWarn?.(`${spec.id} model discovery for ${account} skipped: ${messageOf(error)}`)
+        continue
+      }
+      const ids = await spec.discover(accessToken)
+      if (ids !== undefined) {
+        for (const id of ids) if (!discovered.includes(id)) discovered.push(id)
+      }
     }
-    const ids = await spec.discover(accessToken)
-    if (ids !== undefined) {
-      this.discovered = ids
-      spec.applyDiscovery?.(ids)
+    if (discovered.length > 0) {
+      this.discovered = discovered
+      spec.applyDiscovery?.(discovered)
       // A model this route now serves is no longer hand-added: keeping the extra
       // entry would list it as manual and invite a pointless "remove" later.
-      await this.forgetDiscovered(ids)
+      await this.forgetDiscovered(discovered)
       this.options.onCatalogChanged?.()
     }
     return this.status()

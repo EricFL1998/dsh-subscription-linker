@@ -104,8 +104,13 @@ function agentIds(payload: unknown): string[] {
       if (id === 'gemini-3.1-flash-image') push(id)
     }
   }
-  if (isRecord(payload.tieredModelIds) && Array.isArray(payload.tieredModelIds.flash)) {
-    for (const id of payload.tieredModelIds.flash) push(id)
+  if (isRecord(payload.tieredModelIds)) {
+    for (const key of Object.keys(payload.tieredModelIds)) {
+      const list = (payload.tieredModelIds as Record<string, unknown>)[key]
+      if (Array.isArray(list)) {
+        for (const id of list) push(id)
+      }
+    }
   }
   // No usable grouping: fall back to every entry, which is still better than nothing
   // as long as the non-agent surfaces are excluded.
