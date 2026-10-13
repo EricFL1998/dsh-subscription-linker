@@ -402,6 +402,8 @@ export class GrokAdapter extends LlmAdapter {
   private discovered: readonly string[] | undefined
   /** Capability metadata from the CLI catalog, keyed by model id. */
   private readonly metadata = new Map<string, GrokCliMetadata>()
+  /** Fast-variant wire id per base model, for the picker's quick-mode button. */
+  private readonly fastVariants = new Map<string, string>()
 
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
@@ -578,6 +580,11 @@ export class GrokAdapter extends LlmAdapter {
     for (const [id, meta] of metadata) this.metadata.set(id, meta)
   }
 
+  /** The fast/lightspeed variant wire id for a base model, when discovery reported one. */
+  fastVariant(baseId: string): string | undefined {
+    return this.fastVariants.get(baseId)
+  }
+
   /** The curated catalog, for the Settings page's model list. */
   catalogEntries(): readonly CatalogEntry[] {
     return this.catalog()
@@ -663,18 +670,24 @@ export class GrokAdapter extends LlmAdapter {
         return undefined
       }
       const payload = await response.json() as { data?: { id?: unknown }[] }
-      // Fast/lightspeed variants ride with their base model: they share the base's
-      // visibility switch and are reached by a picker button, not a separate row.
-      const ids = (payload.data ?? [])
+      const rawIds = (payload.data ?? [])
         .map((entry) => entry.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0 && !NON_CHAT_ID.test(id))
+      // Fast/lightspeed variants ride with their base model: they share the base's
+      // visibility switch and are reached by a picker button, not a separate row.
+      this.fastVariants.clear()
+      for (const id of rawIds) {
+        if (!isFastVariant(id)) continue
+        const base = baseModelOf(id)
+        if (!this.fastVariants.has(base)) this.fastVariants.set(base, id)
+      }
+      const ids = rawIds
         .map((id) => (isFastVariant(id) ? baseModelOf(id) : id))
         .filter((id, index, list) => list.indexOf(id) === index)
       if (ids.length === 0) {
         this.options.onWarn?.('xAI model discovery returned an empty catalog; using the built-in catalog')
         return undefined
       }
-      // Keep the fast-variant ids discoverable for the picker button, keyed by their base.
       const metadata = await this.fetchCliMetadata(fetchFn, signal)
       for (const [id, meta] of metadata) this.metadata.set(id, meta)
       return ids
@@ -870,6 +883,7 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
       { key: 'credentialFile', value: options.credentialFile },
     ],
     applyDiscovery: (ids) => { adapter.discover(ids) },
+    fastVariant: (baseId) => adapter.fastVariant(baseId),
   }
 
   const controller = new ProviderController<GrokSession>({
@@ -900,5 +914,9 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
     removeModel: (id: string) => controller.removeModel(id),
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
+    modelVariants: (id: string) => {
+      const fast = adapter.fastVariant(id)
+      return fast === undefined ? undefined : { fast }
+    },
   }
 }

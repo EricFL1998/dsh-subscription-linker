@@ -12,6 +12,7 @@
 import { BAD_REQUEST, ProviderError } from '../errors.js'
 import type {
   LoginStart,
+  ModelVariants,
   ProviderStatus,
   RefreshResult,
   SubscriptionStatus,
@@ -54,6 +55,8 @@ export interface ProviderRoute {
   removeModel(id: string): Promise<ProviderStatus>
   usage(force?: boolean): Promise<ProviderUsageResult>
   reload(): Promise<ProviderStatus>
+  /** Fast and image variants for one model, when the route's discovery reported them. */
+  modelVariants?(id: string): Promise<ModelVariants | undefined> | ModelVariants | undefined
 }
 
 /**
@@ -200,5 +203,11 @@ export class SubscriptionRegistry {
   async reload(): Promise<SubscriptionStatus> {
     await Promise.all([...this.byId.values()].map((route) => route.reload()))
     return this.status()
+  }
+
+  /** The fast and image variants for one model, as the route's discovery reported them. */
+  async modelVariants(provider: string, id: string): Promise<ModelVariants | undefined> {
+    const route = this.route(provider)
+    return route.modelVariants?.(id)
   }
 }

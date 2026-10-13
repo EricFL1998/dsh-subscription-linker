@@ -86,6 +86,8 @@ export interface ProviderSpec<S extends SessionBase> {
   applyDiscovery?(ids: readonly string[]): void
   /** Read one account's plan and metered allowances, when the provider states them. */
   usage?(accessToken: string, account: string): Promise<ProviderUsageRead | undefined>
+  /** The fast/lightspeed variant wire id for a base model, when the provider reported one. */
+  fastVariant?(baseId: string): string | undefined
 }
 
 /** What a provider's usage read returns, before the controller stamps it. */
@@ -271,16 +273,20 @@ export class ProviderController<S extends SessionBase> {
     // A hand-added id the adapter has not merged yet is appended here, with the
     // conservative metadata this build can honestly state. The adapter carries the
     // same ids for the picker; this list must not depend on its async refresh.
-    const rows: ModelSummary[] = listed.map((entry) => ({
-      id: entry.id,
-      name: entry.name,
-      ...entry.description === undefined ? {} : { description: entry.description },
-      contextWindow: entry.contextWindow,
-      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
-      ...entry.defaultEffort === undefined ? {} : { defaultEffort: entry.defaultEffort },
-      visible: !hidden.has(entry.id),
-      ...userAdded.has(entry.id) ? { userAdded: true } : {},
-    }))
+    const rows: ModelSummary[] = listed.map((entry) => {
+      const fast = this.options.spec.fastVariant?.(entry.id)
+      return {
+        id: entry.id,
+        name: entry.name,
+        ...entry.description === undefined ? {} : { description: entry.description },
+        contextWindow: entry.contextWindow,
+        ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+        ...entry.defaultEffort === undefined ? {} : { defaultEffort: entry.defaultEffort },
+        visible: !hidden.has(entry.id),
+        ...userAdded.has(entry.id) ? { userAdded: true } : {},
+        ...fast === undefined ? {} : { fastVariant: fast },
+      }
+    })
     for (const id of added) {
       if (known.has(id) || own.has(id)) continue
       known.add(id)

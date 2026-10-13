@@ -30,6 +30,7 @@ export const RPC_ENDPOINTS = [
   'reload',
   'deepseek-balance',
   'ccswitch-balance',
+  'model-variants',
 ] as const
 
 /** One endpoint name. */
@@ -144,6 +145,8 @@ export interface ModelSummary {
    * hidden or moved; the page renders it without those controls.
    */
   pinned?: boolean
+  /** Fast/lightspeed variant wire id, when the provider reported one for this base. */
+  fastVariant?: string
 }
 
 /** One metered allowance of a subscription plan. */
@@ -315,6 +318,7 @@ export interface RpcMap {
   reload: { payload: undefined, value: SubscriptionStatus }
   'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
+  'model-variants': { payload: DiscoverRequest, value: ModelVariantsResult }
 }
 
 /** One currency's wallet balance, as the platform reports it. */
@@ -339,6 +343,15 @@ export type BalanceResult =
   | { ok: true, balance: AccountBalance }
   /** The account is signed out, or the read failed. */
   | { ok: false }
+
+/** One model's fast variant, as discovery reported it. */
+export interface ModelVariants {
+  /** Fast/lightspeed variant wire id, when the provider reported one. */
+  fast?: string
+}
+
+/** Result of `model-variants`: the variants for one model id. */
+export type ModelVariantsResult = ModelVariants | undefined
 
 /** Payload of `deepseek-balance`. */
 export interface DeepSeekBalanceRequest {

@@ -273,6 +273,14 @@ async function runEndpoint(
       return await queryUsageBalance({ apiKey, baseUrl })
         ?? await queryCcSwitchBalance({ apiKey, baseUrl })
     }
+    case 'model-variants': {
+      // The fast variant for one model, as the route's discovery reported it. The picker
+      // uses this to show a quick-mode button without listing the variant as its own row.
+      const provider = requiredProvider(payload, endpoint)
+      const id = typeof (payload as Record<string, unknown>).id === 'string' ? (payload as Record<string, unknown>).id as string : undefined
+      if (id === undefined) return undefined
+      return registry.modelVariants(provider, id)
+    }
     case 'reload':
       return registry.reload()
     default:
