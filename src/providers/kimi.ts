@@ -47,6 +47,10 @@ import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import { prepareMoonshotTool } from '../translate/moonshot-schema.js'
 import type { ImageResolver } from '../translate/responses.js'
+import { isImageModel, isFastVariant, baseModelOf } from './grok.js'
+
+/** Model ids that are clearly not chat models. */
+const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
 
 /** One catalog entry exposed as a selectable model. */
 export type KimiModelEntry = CatalogEntry
@@ -238,6 +242,10 @@ export interface KimiAdapterOptions {
 export class KimiAdapter extends LlmAdapter {
   /** Live catalog ids seen this session, used to accept renamed models. */
   private discovered: readonly string[] | undefined
+  /** Image-generation model id, when discovery reported one. */
+  private imageModel: string | undefined
+  /** Fast-variant wire id per base model, for the picker's quick-mode button. */
+  private readonly fastVariants = new Map<string, string>()
 
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
@@ -285,7 +293,9 @@ export class KimiAdapter extends LlmAdapter {
     if (await this.options.tokens.session() === undefined) return []
     await this.syncUserModels()
     const hidden = await this.hidden()
-    return resolveCatalog(this.catalog(), [], hidden).entries.map((entry) => ({
+    // Image models are never picker rows: they are agent-called, always on.
+    const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
+    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({
       provider: KIMI_PROVIDER_ID,
       id: entry.id,
       name: entry.name,
@@ -296,6 +306,16 @@ export class KimiAdapter extends LlmAdapter {
 
 
 
+
+  /** The image-generation model id, when discovery reported one. */
+  imageModelId(): string | undefined {
+    return this.imageModel
+  }
+
+  /** The fast/lightspeed variant wire id for a base model, when discovery reported one. */
+  fastVariant(baseId: string): string | undefined {
+    return this.fastVariants.get(baseId)
+  }
 
   /** The ids the picker must currently omit. */
   private async hidden(): Promise<ReadonlySet<string>> {
@@ -544,9 +564,20 @@ export class KimiAdapter extends LlmAdapter {
         return undefined
       }
       const payload = await response.json() as { data?: { id?: unknown }[] }
-      const ids = (payload.data ?? [])
+      const allIds = (payload.data ?? [])
         .map((entry) => entry.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      // Image models are never picker rows: they are agent-called, always on.
+      this.imageModel = allIds.find((id) => isImageModel(id))
+      // Fast/lightspeed variants ride with their base model: they share the base's
+      // visibility switch and are reached by a picker button, not a separate row.
+      this.fastVariants.clear()
+      for (const id of allIds) {
+        if (!isFastVariant(id)) continue
+        const base = baseModelOf(id)
+        if (!this.fastVariants.has(base)) this.fastVariants.set(base, id)
+      }
+      const ids = allIds.filter((id) => !NON_CHAT_ID.test(id))
       if (ids.length === 0) {
         this.options.onWarn?.('Kimi model discovery returned an empty catalog; using the built-in catalog')
         return undefined

@@ -164,6 +164,7 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
       { key: 'credentialFile', value: options.credentialFile },
     ],
     applyDiscovery: (ids) => { adapter.discover(ids) },
+    fastVariant: (baseId) => adapter.fastVariant(baseId),
   }
 
   const controller = new ProviderController<KimiSession>({
@@ -196,5 +197,13 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
     removeModel: (id: string) => controller.removeModel(id),
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
+    modelVariants: (id: string) => {
+      const fast = adapter.fastVariant(id)
+      const image = adapter.imageModelId()
+      return {
+        ...fast === undefined ? {} : { fast },
+        ...image === undefined ? {} : { image },
+      }
+    },
   }
 }

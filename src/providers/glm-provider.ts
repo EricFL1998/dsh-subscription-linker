@@ -210,5 +210,9 @@ export function createGlmProvider(options: GlmProviderOptions): ProviderRoute {
     removeModel: (id: string) => controller.removeModel(id),
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
+    modelVariants: (id: string) => {
+      const image = adapter.imageModelId()
+      return image === undefined ? undefined : { image }
+    },
   }
 }
