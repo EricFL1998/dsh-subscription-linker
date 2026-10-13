@@ -482,7 +482,12 @@ export class GrokAdapter extends LlmAdapter {
 
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
     await this.syncUserModels()
+    // A fast variant is not a catalog row of its own: it answers with its base model's
+    // metadata — the same 500k window, name and ladder the picker shows — while the id
+    // stays the fast wire id the request must send.
+    const pair = this.fastPairOf(model)
     const entry = findEntry(this.catalog(), model)
+      ?? (pair === undefined ? undefined : findEntry(this.catalog(), pair.baseId))
     if (entry === undefined) {
       const template = findEntry(GROK_MODELS, 'grok-4.6')
       const reasoning = template === undefined ? undefined : reasoningInfo(template)
@@ -498,7 +503,7 @@ export class GrokAdapter extends LlmAdapter {
     const reasoning = reasoningInfo(entry)
     return {
       provider: GROK_PROVIDER_ID,
-      id: entry.id,
+      id: model,
       name: entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
@@ -567,13 +572,16 @@ export class GrokAdapter extends LlmAdapter {
         ...meta?.defaultEffort === undefined ? {} : { defaultEffort: meta.defaultEffort },
       })
     }
-    // The seeds also pick up live metadata (context window, reasoning ladder).
+    // The seeds also pick up live metadata (reasoning ladder, default effort). The
+    // curated context window is never narrowed by a live figure: the CLI catalog states
+    // 256k for `grok-4.7`, which serves 500k, and a live read may only widen what this
+    // build ships.
     const seeded = GROK_MODELS.map((entry) => {
       const meta = this.metadata.get(entry.id)
       if (meta === undefined) return entry
       return {
         ...entry,
-        contextWindow: meta.contextWindow ?? entry.contextWindow,
+        contextWindow: Math.max(entry.contextWindow, meta.contextWindow ?? 0),
         ...meta.reasoningEfforts === undefined ? {} : { reasoningEfforts: meta.reasoningEfforts },
         ...meta.defaultEffort === undefined ? {} : { defaultEffort: meta.defaultEffort },
       }

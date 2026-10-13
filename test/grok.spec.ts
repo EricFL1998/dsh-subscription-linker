@@ -334,8 +334,14 @@ describe('GrokAdapter catalog', () => {
     assert.equal(adapter.fastPairOf('grok-4.5'), undefined)
     const models = await adapter.listModels('grok')
     assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), false)
-    // The CLI catalog's window applies to the seed it names.
-    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+    // The CLI catalog states 256k for grok-4.7, which really serves 500k: a live read
+    // may widen what this build ships, never narrow it.
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+    // The fast variant answers with its base model's metadata under its own wire id.
+    const fast = await adapter.resolveModel('grok', 'grok-4.7-build-fast')
+    assert.equal(fast.id, 'grok-4.7-build-fast')
+    assert.equal(fast.name, 'Grok 4.7')
+    assert.equal(fast.context?.contextWindow, 500_000)
   })
 
   test('honours the hidden-model set', async () => {
