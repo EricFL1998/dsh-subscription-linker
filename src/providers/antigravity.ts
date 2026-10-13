@@ -647,7 +647,10 @@ export class AntigravityAdapter extends LlmAdapter {
       // diagnosable from the browser where the node stdout is hidden.
       const diag: string[] = [`pool=${accounts.join(',') || '(none)'}`]
       const tried = new Set<string>()
-      let token = await this.options.tokens.resolve()
+      // Resolve without preempt: use the stored token if it is still within its life,
+      // refresh only when it has actually expired. The 5-minute preempt was causing
+      // a refresh on every stream, which made Google show the consent page.
+      let token = await this.resolveNoPreempt()
       // Stay on the default account until it refuses. opencodex keeps account affinity —
       // a request stays on one account and only moves after a 429 — because switching
       // accounts on every request is what reads to Google as two accounts in play at once
@@ -748,6 +751,19 @@ export class AntigravityAdapter extends LlmAdapter {
   /** Remember an account as spent (its exact reset is learned separately). */
   private noteSpent(account: string): void {
     this.options.onWarn?.(`antigravity: account ${account} allowance spent; moving to another account`)
+  }
+
+  /** Resolve the default account's token without the preempt window. */
+  private async resolveNoPreempt(): Promise<{ account: string, accessToken: string, expiresAt: number }> {
+    const found = await this.options.tokens.session()
+    if (found === undefined) {
+      throw new ProviderError(`${ANTIGRAVITY_PROVIDER_NAME} no account is signed in`, REAUTH_REQUIRED)
+    }
+    const { account, session } = found
+    if (Date.now() < session.expiresAt) {
+      return { account, accessToken: session.accessToken, expiresAt: session.expiresAt }
+    }
+    return await this.options.tokens.resolve(account, true)
   }
 
   /** Translate an auth failure into the message a user can act on. */
