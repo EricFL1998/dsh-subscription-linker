@@ -455,7 +455,7 @@ export async function fetchAntigravityModels(input: {
   signal?: AbortSignal
   /** Origins to try in order, when the caller must not inherit one request base. */
   origins?: readonly string[]
-}): Promise<{ entries: CatalogEntry[], quotas: Map<string, { remainingFraction?: number, resetTime?: string }> }> {
+}): Promise<{ entries: CatalogEntry[], quotas: Map<string, { remainingFraction?: number, resetTime?: string }>, raw: Record<string, unknown> }> {
   const payload = await callInternal<AntigravityModelsResponse>(
     'fetchAvailableModels',
     { project: input.projectId },
@@ -467,6 +467,19 @@ export async function fetchAntigravityModels(input: {
   if (typeof models !== 'object' || models === null) {
     throw new LlmError('Antigravity models endpoint returned no models object', 'MALFORMED_RESPONSE')
   }
+  // TEMP diagnostics: write the raw model-id list to a file so an over-eager filter is
+  // inspectable after a discovery run, since the node half's stdout is unreachable in
+  // the desktop shell.
+  try {
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    const { homedir } = require('node:os') as typeof import('node:os')
+    const { join } = require('node:path') as typeof import('node:path')
+    writeFileSync(
+      join(homedir(), '.dsh', 'antigravity-raw-models.json'),
+      JSON.stringify(Object.keys(models), null, 2),
+      'utf8',
+    )
+  } catch { /* diagnostics never break parsing */ }
   // The response names far more than the agent may call; the filter keeps the
   // callable grouping and reports the per-model quota for the fallback path.
   const entries = parseAntigravityModels(payload)
@@ -478,7 +491,7 @@ export async function fetchAntigravityModels(input: {
     const quota = (model as { quotaInfo?: { remainingFraction?: number, resetTime?: string } } | null)?.quotaInfo
     if (quota !== undefined) quotas.set(id, quota)
   }
-  return { entries, quotas }
+  return { entries, quotas, raw: models }
 }
 
 /** One quota window in the shape the protocol uses. */
