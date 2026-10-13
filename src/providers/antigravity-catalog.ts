@@ -94,12 +94,14 @@ export function baseFamilyOf(id: string): string {
  *
  * Antigravity names the same flash model several ways: `gemini-3.5-flash` in one
  * group, `gemini-3.5-flash-agent` (its High tier) in another, `gemini-3.5-flash-low`
- * elsewhere. They all dispatch to one family, so the picker shows one row. Different
- * generations (3 vs 3.5) are different families; other families (pro, …) keep their id.
+ * elsewhere, `gemini-3.8-flash-tiered` for the tiered variant. They all dispatch to
+ * one family per generation, so the picker shows one row. Different generations
+ * (3 vs 3.5 vs 3.8) are different families; flash-lite and flash-image are their own
+ * families; other families (pro, …) keep their id.
  */
 export function geminiBaseOf(id: string): string {
-  const match = /^(gemini-\d+(?:\.\d+)?)-flash/.exec(id)
-  return match?.[0] ?? id
+  const match = /^(gemini-\d+(?:\.\d+)?-flash)/.exec(id)
+  return match?.[1] ?? id
 }
 
 /** Antigravity's own reasoning ladder, per model family. */
@@ -220,7 +222,7 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
     // `gemini-3.5-flash-agent` (its High tier), `gemini-3.5-flash-low` are one family.
     // The row carries the family's reasoning ladder; picking a level routes to the tier.
     const family = geminiBaseOf(stripped)
-    if (/^gemini-.*-flash$/.test(family)) {
+    if (/^gemini-/.test(family) && family.includes('-flash')) {
       if (seenBase.has(family)) continue
       seenBase.add(family)
       const baseInfo = modelInfo(models[family]) ?? info
