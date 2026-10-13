@@ -94,9 +94,7 @@ test('workbuddyHeaders carries the account, client, and enterprise attribution',
   assert.equal(headers.Authorization, 'Bearer at')
   assert.equal(headers['X-User-Id'], 'u1')
   assert.equal(headers['X-Enterprise-Id'], 'ent1')
-  assert.equal(headers['X-Tenant-Id'], 'ent1')
-  assert.equal(headers['X-IDE-Name'], 'WorkBuddy')
-  assert.match(headers['User-Agent'], /^WorkBuddy\//)
+  assert.equal(headers['User-Agent'], 'CLI/2.63.2 CodeBuddy/2.63.2')
 })
 
 test('workbuddyStale and workbuddyRefreshable read the token lifetimes', () => {
@@ -159,7 +157,7 @@ test('the stream posts chat completions with the WorkBuddy headers', async () =>
   }
   const adapter = new WorkBuddyAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
   const chunks = await collect(adapter.stream(request()))
-  assert.match(seenUa, /^WorkBuddy\//)
+  assert.equal(seenUa, 'CLI/2.63.2 CodeBuddy/2.63.2')
   assert.equal(seenBody.model, 'hy4-preview-f')
   assert.equal(seenBody.stream, true)
   assert.ok(Array.isArray(seenBody.messages))
@@ -223,7 +221,8 @@ test('readWorkBuddyUsage reads the precise spent against the live packages', asy
   const credits = read.windows[0]!
   assert.equal(credits.label, 'Credits')
   assert.equal(credits.used, 425)
-  assert.equal(credits.limit, 1075 + 425)
+  assert.equal(credits.limit, 1500)
+  assert.ok(Math.abs(credits.usedPercent! - (100 * 425) / 1500) < 0.001)
   assert.ok(credits.resetsAt !== undefined)
 })
 

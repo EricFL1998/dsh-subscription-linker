@@ -27,7 +27,7 @@ import { proxiedFetch, type FetchFn } from '../http.js'
 import type { TokenManager } from '../auth/tokens.js'
 import type { CatalogEntry } from './catalog.js'
 import { findEntry } from './catalog.js'
-import { WORKBUDDY_ENDPOINT, WORKBUDDY_UA_VERSION, workbuddyHeaders, type WorkBuddyTokenSet, type WorkBuddySession } from '../auth/workbuddy-flow.js'
+import { WORKBUDDY_ENDPOINT, workbuddyHeaders, type WorkBuddyTokenSet, type WorkBuddySession } from '../auth/workbuddy-flow.js'
 import { recordSpend } from './workbuddy-credits.js'
 
 /** The `workbuddy` provider route key (China build). */
@@ -142,13 +142,6 @@ function unflagMessages(messages: Record<string, unknown>[]): Record<string, unk
     }
   }
   return messages
-}
-
-/** 32 hex digits, for the chat ids WorkBuddy's own client makes. */
-function randomHex(): string {
-  const bytes = new Uint8Array(16)
-  crypto.getRandomValues(bytes)
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 /** A tool's name may hold letters, digits, `_`, `-`; another character is refused. */
@@ -340,18 +333,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
       const body = this.requestBody(options)
       const response = await this.fetchFn(WORKBUDDY_API, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'text/event-stream',
-          ...workbuddyHeaders(token),
-          // Name the chat the way WorkBuddy's own client does: the conversation, the
-          // turn, and the message. Without these the gateway counts the request under no
-          // client and cuts the stream, which is why the reply stopped after a few seconds.
-          'X-Conversation-Message-ID': randomHex(),
-          'X-Request-ID': randomHex(),
-          'X-Conversation-Request-ID': randomHex(),
-          'X-Conversation-ID': randomHex(),
-        },
+        headers: workbuddyHeaders(token),
         body: JSON.stringify(body),
         signal: watchdog.signal,
       })

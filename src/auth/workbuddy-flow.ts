@@ -286,25 +286,20 @@ async function workbuddyEnterprise(
   return pick && typeof pick.enterpriseId === 'string' ? pick.enterpriseId.trim() : ''
 }
 
-/** The headers WorkBuddy's desktop app sends with a chat and its account. */
+/** The headers WorkBuddy's chat gateway accepts: its own CLI's, nothing more. */
 export function workbuddyHeaders(token: WorkBuddyTokenSet): Record<string, string> {
   const headers: Record<string, string> = {
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Origin': 'https://copilot.tencent.com',
+    'Referer': 'https://copilot.tencent.com/',
+    'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
+    'Content-Type': 'application/json',
     'Authorization': `Bearer ${token.accessToken}`,
-    'X-User-Id': token.uid ?? '',
+    ...token.uid === undefined || token.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': token.uid },
+    ...token.enterpriseId === undefined || token.enterpriseId === '' ? { 'X-No-Enterprise-Id': '1' } : { 'X-Enterprise-Id': token.enterpriseId },
     'X-Domain': workbuddyDomain(token),
     'X-Product': 'SaaS',
-    'X-IDE-Type': 'WorkBuddy',
-    'User-Agent': `WorkBuddy/${WORKBUDDY_UA_VERSION}`,
-    'X-Requested-With': 'XMLHttpRequest',
-    'X-Agent-Intent': 'craft',
-    'X-Agent-Purpose': 'conversation',
-    'X-IDE-Name': 'WorkBuddy',
-    'X-IDE-Version': WORKBUDDY_UA_VERSION,
-  }
-  const enterprise = typeof token.enterpriseId === 'string' ? token.enterpriseId.trim() : ''
-  if (enterprise !== '') {
-    headers['X-Enterprise-Id'] = enterprise
-    headers['X-Tenant-Id'] = enterprise
   }
   return headers
 }
@@ -591,7 +586,7 @@ export async function claimWorkBuddyCheckin(
 export async function readWorkBuddyCredits(
   token: WorkBuddyTokenSet,
   fetchFn: typeof fetch,
-): Promise<{ remaining: number, nearestExpiryMs?: number } | null> {
+): Promise<{ remaining: number, total: number, nearestExpiryMs?: number } | null> {
   const pad = (n: number): string => n.toString().padStart(2, '0')
   const fmt = (date: Date): string =>
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
@@ -617,18 +612,21 @@ export async function readWorkBuddyCredits(
     return undefined
   }
   let remaining = 0
+  let totalSize = 0
   let nearestExpiryMs: number | undefined
   let livePackages = 0
   for (const account of accounts) {
     const num = (key: string): number => capacity(account[key])
     const monthly = num('CapacityType') === 4
     const remain = monthly ? num('CycleCapacityRemain') : num('CapacityRemain')
+    const size = monthly ? num('CycleCapacitySize') : num('CapacitySize')
     const capped = remain < 0 ? 0 : remain
     const cycleEndMs = parseDate(account.CycleEndTime)
     const expiresAtMs = monthly ? undefined : parseDate(account.ExpiredTime) ?? cycleEndMs
     if (!monthly && (capped <= 0 || (expiresAtMs !== undefined && expiresAtMs <= Date.now()))) continue
     livePackages += 1
     remaining += capped
+    totalSize += size > 0 ? size : capped
     if (expiresAtMs !== undefined && (nearestExpiryMs === undefined || expiresAtMs < nearestExpiryMs)) {
       nearestExpiryMs = expiresAtMs
     }
@@ -636,7 +634,7 @@ export async function readWorkBuddyCredits(
   // No live package reads as "this account doesn't use the package list" — an enterprise
   // account, say — so the caller falls through to its own meter.
   if (livePackages === 0) return null
-  return { remaining, ...nearestExpiryMs === undefined ? {} : { nearestExpiryMs } }
+  return { remaining, total: totalSize, ...nearestExpiryMs === undefined ? {} : { nearestExpiryMs } }
 }
 
 /** The account's credits from its resource summary: the plan's used against granted. */
@@ -695,10 +693,14 @@ export async function readWorkBuddyUsage(
     const credits = await readWorkBuddyCredits(token, fetchFn)
     if (credits !== null) {
       const window: WorkBuddyUsageWindow = { label: 'Credits', used: spend?.spent ?? 0 }
-      if (credits.remaining > 0 || (spend?.spent ?? 0) > 0) {
-        const limit = credits.remaining + (spend?.spent ?? 0)
-        window.limit = limit
-        window.usedPercent = limit > 0 ? (100 * (spend?.spent ?? 0)) / limit : 0
+      // The bar reads spent against the total the packages grant, not remaining-plus-spent,
+      // so a fresh cycle's spend shows small against its full grant.
+      if (credits.total > 0) {
+        window.limit = credits.total
+        window.usedPercent = (100 * (spend?.spent ?? 0)) / credits.total
+      } else if ((spend?.spent ?? 0) > 0) {
+        window.limit = spend?.spent ?? 0
+        window.usedPercent = 100
       }
       if (credits.nearestExpiryMs !== undefined) window.resetsAt = credits.nearestExpiryMs
       const out: { plan: string, windows: WorkBuddyUsageWindow[], checkin?: WorkBuddyCheckin } = { plan: plan ?? 'Free', windows: [window] }
