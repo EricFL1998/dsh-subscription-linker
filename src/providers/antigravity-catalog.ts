@@ -141,6 +141,14 @@ const NON_AGENT = /(?:^|[-_])(?:tab|tabs|commit|transcription|audio|embedding|co
 export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
   if (!isRecord(payload) || !isRecord(payload.models)) return []
   const models = payload.models as Record<string, unknown>
+  // TEMP diagnostics: surface the raw model-id list so an over-eager filter is visible
+  // from the browser, where the node half's stdout is unreachable.
+  try {
+    const all = Object.keys(models)
+    const kept = agentIds(payload)
+    const dropped = all.filter((id) => !kept.includes(id))
+    console.warn(`[subscription-oauth] antigravity models: ${all.length} raw, ${kept.length} kept, dropped: ${dropped.join(', ')}`)
+  } catch { /* diagnostics never break parsing */ }
   const entries: CatalogEntry[] = []
   for (const wireId of agentIds(payload)) {
     const info = modelInfo(models[wireId])
