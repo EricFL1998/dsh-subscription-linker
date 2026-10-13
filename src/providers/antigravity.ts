@@ -69,6 +69,36 @@ export const ANTIGRAVITY_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 /** Google's profile endpoint, used for the account label. */
 export const ANTIGRAVITY_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
 
+/** Minimum beat between Antigravity dispatch attempts, so a refused account is not re-hit
+ *  at once and a sweep across the pool does not become a burst. */
+export const ANTIGRAVITY_PACING_MS = 2_000
+
+/** The last moment an Antigravity dispatch started; the next waits out the beat. */
+let lastAntigravityDispatchAt = 0
+
+/**
+ * Wait out the Antigravity pacing beat before a dispatch attempt.
+ *
+ * A request right after a refused one is what turns a transient Google safety check into
+ * a sustained block; a short, provider-scoped pause between attempts is the discipline
+ * that keeps the pool reachable. Aborts when the caller's signal fires.
+ *
+ * @param signal - the caller's abort signal.
+ */
+async function paceAntigravityAttempt(signal: AbortSignal): Promise<void> {
+  const wait = lastAntigravityDispatchAt + ANTIGRAVITY_PACING_MS - Date.now()
+  lastAntigravityDispatchAt = Date.now()
+  if (wait <= 0 || signal.aborted) return
+  await new Promise<void>((resolve) => {
+    const onAbort = (): void => { clearTimeout(timer); resolve() }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, wait)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /** Default Cloud Code Assist origin. */
 export const ANTIGRAVITY_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
 
@@ -607,20 +637,12 @@ export class AntigravityAdapter extends LlmAdapter {
         if (tried.has(accountKey)) continue
         tried.add(accountKey)
         token = await this.options.tokens.resolve(accountKey)
-        // A transport failure (DNS, connect timeout) on one account may be that account's
-        // path, not the provider's; try the next account before giving up, the same way a
-        // spent allowance does. A lone account still surfaces the real error.
-        let response: Response
-        try {
-          response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
-        } catch (error: unknown) {
-          const transport = error instanceof TypeError || (error as { name?: string }).name === 'AbortError'
-          if (transport && order.length > 1 && !watchdog.timedOut) {
-            diag.push(`transport on ${token.account}, moving to next`)
-            continue
-          }
-          throw error
-        }
+        // Pacing: a connect attempt right after a refused one is what turns a transient
+        // Google safety check into a sustained block, so the streamer waits out a short
+        // beat before each retry. opencodex keeps this discipline with a request pacer;
+        // this is the same idea narrowed to one provider.
+        await paceAntigravityAttempt(watchdog.signal)
+        let response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
         if (response.status === 401 || response.status === 403) {
           // The stored token was accepted locally but refused on the wire; force one
           // refresh. A 403 that survives the refresh is Google's "verify your account"
