@@ -89,6 +89,19 @@ export function baseFamilyOf(id: string): string {
     .replace(/[-_]$/, '')
 }
 
+/**
+ * The canonical base family for a gemini flash model id.
+ *
+ * Antigravity names the same flash model several ways: `gemini-3.5-flash` in one
+ * group, `gemini-3.5-flash-agent` (its High tier) in another, `gemini-3.5-flash-low`
+ * elsewhere. They all dispatch to one family, so the picker shows one row. Different
+ * generations (3 vs 3.5) are different families; other families (pro, …) keep their id.
+ */
+export function geminiBaseOf(id: string): string {
+  const match = /^(gemini-\d+(?:\.\d+)?)-flash/.exec(id)
+  return match?.[0] ?? id
+}
+
 /** Antigravity's own reasoning ladder, per model family. */
 export function antigravityEffortsFor(model: string): readonly string[] {
   if (/^claude-/.test(model)) return ['low', 'medium', 'high', 'max']
@@ -201,10 +214,26 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
     // Image-generation models are never picker rows: they are agent-called, always on.
     if (isImageModel(wireId)) continue
     const info = modelInfo(models[wireId])
-    // Tier-marked ids (gemini-3.5-flash-low, gemini-3-flash-agent, …) are the family's
-    // fixed tiers; they fold into the base family row so the picker shows one entry with
-    // a ladder, not one row per tier. The base row is inserted the first time a tier of
-    // it is seen.
+    // Strip any tier suffix first so all naming schemes meet as a clean base id.
+    const stripped = isTierMarked(wireId) ? baseFamilyOf(wireId) : wireId
+    // All gemini flash ids collapse into one row per generation: `gemini-3.5-flash`,
+    // `gemini-3.5-flash-agent` (its High tier), `gemini-3.5-flash-low` are one family.
+    // The row carries the family's reasoning ladder; picking a level routes to the tier.
+    const family = geminiBaseOf(stripped)
+    if (/^gemini-.*-flash$/.test(family)) {
+      if (seenBase.has(family)) continue
+      seenBase.add(family)
+      const baseInfo = modelInfo(models[family]) ?? info
+      entries.push({
+        id: family,
+        name: displayNameOf(family, models[family] as Record<string, unknown> ?? {}),
+        contextWindow: baseInfo.maxTokens ?? baseInfo.maxInputTokens ?? baseInfo.inputTokenLimit ?? 1_048_576,
+        inputModalities: baseInfo.supportsImages === true ? ['text', 'image'] : ['text'],
+        reasoningEfforts: antigravityEffortsFor(family),
+      })
+      continue
+    }
+    // Other tier-marked ids (claude-…-max, gpt-oss-…-high, …) fold into their base.
     if (isTierMarked(wireId)) {
       const base = baseFamilyOf(wireId)
       if (seenBase.has(base)) continue
