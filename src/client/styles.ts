@@ -397,3 +397,51 @@ export const usageChipCss = `
   background: var(--dsw-alias-state-success-primary, #067647);
 }
 `
+
+/**
+ * The composer's quick-mode button stylesheet.
+ *
+ * It renders in the composer's own control row — the same row as the model selector —
+ * so it borrows that row's geometry: a compact, borderless control that only colours on
+ * hover and when the mode is on. Tokens carry fallbacks for hosts that define none.
+ */
+export const fastModeCss = `
+.dsh-subscription-fast-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #8a8f98);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dsh-subscription-fast-mode:hover {
+  background: var(--dsw-alias-interactive-bg-hover, #ffffff14);
+}
+.dsh-subscription-fast-mode:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-focus, #4d6bfe);
+  outline-offset: 1px;
+}
+/* Off: the bolt is dim, so an available mode reads as an invitation, not a state. */
+.dsh-subscription-fast-mode[data-active="false"] .dsh-subscription-fast-mode-bolt {
+  opacity: 0.55;
+}
+/* On: the control takes the accent, which is the only thing distinguishing the fast
+   variant from its base — both answer with the same model name. */
+.dsh-subscription-fast-mode[data-active="true"] {
+  background: var(--dsw-alias-interactive-bg-active, #ffffff1f);
+  color: var(--dsw-alias-label-primary, #e8e8e8);
+}
+.dsh-subscription-fast-mode[data-active="true"] .dsh-subscription-fast-mode-bolt {
+  color: var(--dsw-alias-state-warning-primary, #f5a524);
+}
+.dsh-subscription-fast-mode-label {
+  font-variant-numeric: tabular-nums;
+}
+`

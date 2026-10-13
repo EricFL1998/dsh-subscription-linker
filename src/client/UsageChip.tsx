@@ -86,18 +86,6 @@ export interface UsageChipInjected {
    * `undefined` when the provider has no balance source or did not answer.
    */
   ccSwitchBalance: CcSwitchBalanceCall
-  /**
-   * The session's model directory, when the host exposes it.
-   *
-   * Read for the current selection (so the chip can name the model, not just the
-   * provider); written when the quick-mode button routes to a fast variant.
-   */
-  modelDirectory?: {
-    /** The directory store, for reading the current selection. */
-    store?: unknown
-    /** Select one model; resolves when the picker has accepted it. */
-    select?: (selection: { provider: string, model: string }) => Promise<unknown>
-  } | undefined
 }
 
 /** One model choice, as the host records it. */
@@ -400,14 +388,11 @@ export function formatReset(at: number | undefined, now: number): string | undef
  * @param props - injected RPC caller, copy, and the session's provider reader.
  * @returns the chip, or null when there is nothing true to say.
  */
-export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, modelDirectory, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
+export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
   const [reading, setReading] = useState<ChipReading | undefined>(undefined)
   const [accountReadings, setAccountReadings] = useState<readonly AccountReading[] | undefined>(undefined)
   const [balance, setBalance] = useState<readonly ChipBalance[] | undefined>(undefined)
   const [ccBalance, setCcBalance] = useState<{ currency: string, total: string } | undefined>(undefined)
-  const [fastVariant, setFastVariant] = useState<string | undefined>(undefined)
-  const [fastBase, setFastBase] = useState<string | undefined>(undefined)
-  const [fastActive, setFastActive] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [open, setOpen] = useState(false)
   // The last route that answered, so a switch to a foreign provider leaves the last own
@@ -418,30 +403,6 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
   // with the new provider instead of waiting for the next unrelated render.
   const selection = useProjection('modelSelection', (value) => (value as ModelSelectionProjection))
   const selected = providerOf(selection)
-
-  // The fast variant for the current model, from the route's discovery. Read on selection
-  // change; absent when the model has no fast variant or the route did not report one.
-  const selectedModel = selection?.next?.model ?? selection?.lastUsed?.model
-  useEffect(() => {
-    if (selected === undefined || selectedModel === undefined || !isOwnProvider(selected)) {
-      setFastVariant(undefined)
-      setFastBase(undefined)
-      setFastActive(false)
-      return
-    }
-    let live = true
-    void call('model-variants', { provider: selected, id: selectedModel })
-      .then((result) => {
-        if (!live) return
-        setFastVariant(result?.fast)
-        setFastBase(result?.fastBase)
-        setFastActive(result?.fast !== undefined && result.fast === selectedModel)
-      })
-      .catch(() => {
-        if (live) { setFastVariant(undefined); setFastBase(undefined); setFastActive(false) }
-      })
-    return () => { live = false }
-  }, [selected, selectedModel, isOwnProvider, call])
 
   // A non-subscription provider has no usage windows to meter, so the chip shows its
   // balance instead, read by cc-switch's query. The host's account (deepseek-account)
@@ -649,25 +610,6 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
         }}
       >
         <span className="dsh-subscription-usage-chip-label">{short}</span>
-        {fastVariant !== undefined && modelDirectory?.select !== undefined && (
-          <span
-            className="dsh-subscription-usage-chip-fast"
-            role="button"
-            aria-pressed={fastActive}
-            title={fastActive ? 'Fast mode (active)' : 'Switch to fast mode'}
-            onClick={(event) => {
-              event.stopPropagation()
-              if (selected === undefined) return
-              // Fast mode is the fast variant being the current selection; switching it
-              // off returns to the base model the variant belongs to.
-              const target = fastActive ? (fastBase ?? selectedModel) : fastVariant
-              if (target === undefined || target === selectedModel) return
-              void modelDirectory.select?.({ provider: selected, model: target })
-            }}
-          >
-            ⚡
-          </span>
-        )}
         {merged.map((window) => (
           <span className="dsh-subscription-usage-chip-cell" key={window.label}>
             <span className="dsh-subscription-usage-chip-window">{shortWindow(window.label)}</span>

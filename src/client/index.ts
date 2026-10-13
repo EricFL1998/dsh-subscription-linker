@@ -19,6 +19,8 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 
 import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
+import { FastModeButton } from './FastModeButton.js'
+import type { FastModeButtonInjected } from './FastModeButton.js'
 import { UsageChip } from './UsageChip.js'
 import type { UsageChipInjected } from './UsageChip.js'
 import { createSubscriptionsCall, createAccountBalanceCall, createCcSwitchBalanceCall } from './subscriptions-rpc.js'
@@ -27,6 +29,7 @@ import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
+export type { FastModeButtonInjected } from './FastModeButton.js'
 export type { UsageChipInjected } from './UsageChip.js'
 export type { SubscriptionsKey } from './locales.js'
 export { createSubscriptionsCall, SubscriptionsRpcError } from './subscriptions-rpc.js'
@@ -47,6 +50,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * is another.
      */
     'conversation.composer.dock': { kind: 'list', scope: 'session' }
+    /**
+     * The composer's row of compact controls, rendered immediately before its model seat.
+     *
+     * The shell declares it as a session-scoped list; this plugin's quick-mode button is
+     * one entry, which is what puts it at the model selector's left.
+     */
+    'conversation.input.right': { kind: 'list', scope: 'session' }
   }
 
   /**
@@ -86,10 +96,23 @@ const SECTION_ORDER = 92
 const CHIP_ORDER = 10
 
 /**
+ * Composer-control position: ahead of the shell's own entries in that row, if it ever
+ * adds any, so the quick-mode button stays adjacent to the model selector it belongs to.
+ */
+const FAST_MODE_ORDER = 10
+
+/** The host's per-session model directory resolver, as far as this plugin reads it. */
+interface ModelDirectories {
+  directoryFor?: (sessionId: string) => {
+    select?: (selection: { provider: string, model: string }) => Promise<unknown>
+  } | undefined
+}
+
+/**
  * Required services: `slots` carries the registration seat, `connection` the
  * RPC caller, `locale` the copy dictionaries, and `modelDirectories` the picker's
- * per-session model directory (read for the current selection, written when the
- * chip's quick-mode button routes to a fast variant).
+ * per-session model directory (written when the quick-mode button routes to a fast
+ * variant).
  */
 export const inject = ['slots', 'connection', 'locale', 'modelDirectories']
 
@@ -108,6 +131,9 @@ export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as unknown as ConnectionHandle
   const t = ctx.locale.bind(NS) as SubscriptionsSectionInjected['t']
   const call = createSubscriptionsCall(connection.rpc)
+  // Read once: the resolver is a service, and the per-session directory is resolved at
+  // registration time (see `modelDirectoryFor`).
+  const modelDirectories = ctx.get('modelDirectories') as ModelDirectories | undefined
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'subscriptions',
@@ -121,31 +147,52 @@ export function apply(ctx: ClientContext): void {
   // pills sit at order 0. This chip rides beside them and shows the allowance of the
   // provider the session is using. The scope hands `inject` the session id, but the chip
   // reads the selection from its own projection prop, so nothing here needs it.
-  const modelDirectories = ctx.get('modelDirectories') as
-    | { directoryFor?: (id: string) => { store?: unknown, select?: (selection: unknown) => Promise<unknown> } | undefined }
-    | undefined
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
     id: 'subscription-usage',
     order: CHIP_ORDER,
-    inject: (sessionId?: string): UsageChipInjected => ({
+    inject: (): UsageChipInjected => ({
       call,
       t: t as unknown as UsageChipInjected['t'],
       isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
       accountBalance: createAccountBalanceCall(connection.rpc),
       ccSwitchBalance: createCcSwitchBalanceCall(connection.rpc),
-      // The session's model directory: read for the current selection, written when the
-      // quick-mode button routes to a fast variant. Absent on a host without it.
-      modelDirectory: sessionId === undefined || modelDirectories?.directoryFor === undefined
-        ? undefined
-        : (() => {
-            const directory = modelDirectories.directoryFor?.(sessionId)
-            if (directory === undefined || directory.select === undefined) return undefined
-            return {
-              store: directory.store,
-              select: (selection: { provider: string, model: string }) => directory.select?.(selection) ?? Promise.resolve(),
-            }
-          })(),
     }),
   }, UsageChip))
+
+  // The composer renders this seat immediately before its model selector, so the
+  // quick-mode button lands at the picker's left. It renders nothing unless the current
+  // model really has a fast variant, so a route without one shows no control at all.
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'subscription-fast-mode',
+    order: FAST_MODE_ORDER,
+    inject: (sessionId?: string): FastModeButtonInjected => ({
+      call,
+      isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
+      modelDirectory: modelDirectoryFor(modelDirectories, sessionId),
+    }),
+  }, FastModeButton))
+}
+
+/**
+ * The session's model directory, in the shape the quick-mode button writes through.
+ *
+ * Absent when the host exposes no directory for the session, or exposes one that cannot
+ * select — in which case the button renders nothing rather than a dead control.
+ *
+ * @param modelDirectories - the host's directory resolver, when it has one.
+ * @param sessionId - the session whose directory is wanted.
+ * @returns the reader/writer pair, or undefined.
+ */
+function modelDirectoryFor(
+  modelDirectories: ModelDirectories | undefined,
+  sessionId: string | undefined,
+): FastModeButtonInjected['modelDirectory'] {
+  if (sessionId === undefined || modelDirectories?.directoryFor === undefined) return undefined
+  const directory = modelDirectories.directoryFor(sessionId)
+  if (directory?.select === undefined) return undefined
+  return {
+    select: (selection: { provider: string, model: string }) => directory.select?.(selection) ?? Promise.resolve(),
+  }
 }
