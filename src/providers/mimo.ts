@@ -361,12 +361,13 @@ export class MimoAdapter extends LlmAdapter {
             }
             yield { type: 'text-delta', index: 0, text: delta }
           }
-          if (chunk.usage !== undefined) {
-            const input = chunk.usage.prompt_tokens ?? 0
-            const output = chunk.usage.completion_tokens ?? 0
+          const usage = chunk.usage
+          if (usage !== undefined && usage !== null) {
+            const input = usage.prompt_tokens ?? 0
+            const output = usage.completion_tokens ?? 0
             yield {
               type: 'usage',
-              usage: { inputTokens: input, outputTokens: output, totalTokens: chunk.usage.total_tokens ?? input + output },
+              usage: { inputTokens: input, outputTokens: output, totalTokens: usage.total_tokens ?? input + output },
             }
           }
         }

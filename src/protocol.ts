@@ -28,6 +28,7 @@ export const RPC_ENDPOINTS = [
   'removeModel',
   'usage',
   'reload',
+  'auto-state',
   'setAutoOn',
   'deepseek-balance',
   'ccswitch-balance',
@@ -317,6 +318,7 @@ export interface RpcMap {
   removeModel: { payload: ModelIdRequest, value: SubscriptionStatus }
   usage: { payload: DiscoverRequest, value: UsageResult }
   reload: { payload: undefined, value: SubscriptionStatus }
+  'auto-state': { payload: undefined, value: AutoStateResult }
   setAutoOn: { payload: SetAutoOnRequest, value: AutoStateResult }
   'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }

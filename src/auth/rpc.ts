@@ -245,6 +245,8 @@ async function runEndpoint(
     }
     case 'usage':
       return registry.usage(requiredProvider(payload, endpoint), booleanField(payload, 'force'))
+    case 'auto-state':
+      return registry.autoState()
     case 'setAutoOn': {
       const enabled = booleanField(payload, 'enabled')
       if (enabled === undefined) throw new ProviderError('setAutoOn requires an enabled flag', BAD_REQUEST)

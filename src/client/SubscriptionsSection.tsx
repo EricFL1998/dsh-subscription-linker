@@ -285,6 +285,8 @@ const styles: Record<string, CSSProperties> = {
   },
   /** The metered windows under one account row: no border, just the meters. */
   usageInline: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 },
+  /** The auto provider's on/off row: a label and its switch. */
+  autoSwitchRow: { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' },
   modelRow: {
     display: 'flex', alignItems: 'flex-start', gap: 8,
     cursor: 'pointer', fontSize: 13, lineHeight: '20px',
@@ -510,6 +512,9 @@ function ProviderCard(props: {
   onRemoveModel(id: string): void
   onRefreshUsage(): void
   onReload(): void
+  /** Whether the `auto` provider is offered; flips it. Only the auto card sets these. */
+  autoOn?: boolean
+  onSetAutoOn?(enabled: boolean): void
 }) {
   const { status, t, busyAction, message } = props
   const [copied, setCopied] = useState(false)
@@ -740,6 +745,20 @@ function ProviderCard(props: {
       )}
       {message?.tone === 'error' && <p className="dsh-subscription-error">{message.text}</p>}
       {message?.tone === 'success' && <p className="dsh-subscription-success">{message.text}</p>}
+
+      {/* The auto provider's master switch: off keeps it out of the picker entirely. */}
+      {status.provider === 'auto' && props.onSetAutoOn !== undefined && (
+        <label style={styles.autoSwitchRow}>
+          <span style={styles.modelName}>{t('autoSwitchLabel')}</span>
+          <input
+            type="checkbox"
+            className="dsh-subscription-switch"
+            checked={props.autoOn ?? true}
+            disabled={busyAction}
+            onChange={(event) => { props.onSetAutoOn?.(event.target.checked) }}
+          />
+        </label>
+      )}
 
       {accounts.map((account) => {
         const usageEntry = (status.usage ?? []).find((entry) => entry.account === account.account)
@@ -1086,8 +1105,19 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [error, setError] = useState<string | undefined>(undefined)
   const [messages, setMessages] = useState<Record<string, CardMessage>>({})
   const [busyAction, setBusyAction] = useState(false)
+  const [autoOn, setAutoOn] = useState(true)
   const mounted = useRef(true)
   const timer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+
+  /** Read whether the `auto` provider is offered, so its card can render the switch. */
+  useEffect(() => {
+    if (call === undefined) return
+    let live = true
+    void call('auto-state', undefined)
+      .then((result) => { if (live) setAutoOn(result.enabled) })
+      .catch(() => { /* the switch defaults to on */ })
+    return () => { live = false }
+  }, [call])
 
   /** Fetch the current state; a failure is shown rather than swallowed. */
   const refresh = useCallback(async (): Promise<void> => {
@@ -1101,6 +1131,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (mounted.current) setError(t('actionFailed', { message: messageOf(caught) }))
     }
   }, [call, t])
+
+  /** Flip the `auto` provider on or off. */
+  const setAuto = useCallback(async (enabled: boolean): Promise<void> => {
+    if (call === undefined) return
+    setBusyAction(true)
+    try {
+      const result = await call('setAutoOn', { enabled })
+      if (!mounted.current) return
+      setAutoOn(result.enabled)
+      await refresh()
+    } catch (caught: unknown) {
+      if (mounted.current) setError(t('actionFailed', { message: messageOf(caught) }))
+    } finally {
+      if (mounted.current) setBusyAction(false)
+    }
+  }, [call, refresh, t])
 
   const stopPolling = useCallback((): void => {
     if (timer.current !== undefined) {
@@ -1356,6 +1402,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           onRemoveModel={(id) => { removeModel(provider.provider, id) }}
           onRefreshUsage={() => { refreshUsage(provider.provider) }}
           onReload={() => { reload(provider.provider) }}
+          {...provider.provider !== 'auto' ? {} : { autoOn, onSetAutoOn: (enabled: boolean) => { void setAuto(enabled) } }}
         />
       ))}
     </div>
