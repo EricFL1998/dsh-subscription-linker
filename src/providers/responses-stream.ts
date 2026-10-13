@@ -23,6 +23,37 @@ import { streamResponses } from '../translate/responses.js'
 import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
 
 /**
+ * Minimum beat between dispatch attempts on one route, so a refused account is not
+ * re-hit at once and a sweep across the pool does not become a burst. opencodex keeps
+ * this discipline with a request pacer; this is the same idea narrowed to one plugin.
+ */
+export const DISPATCH_PACING_MS = 2_000
+
+/** Per-route last-dispatch instants, so each route paces its own attempts. */
+const lastDispatchAt = new Map<string, number>()
+
+/**
+ * Wait out a route's pacing beat before a dispatch attempt.
+ *
+ * @param route - the route key pacing its own attempts.
+ * @param signal - the caller's abort signal.
+ */
+async function paceDispatch(route: string, signal: AbortSignal): Promise<void> {
+  const last = lastDispatchAt.get(route) ?? 0
+  const wait = last + DISPATCH_PACING_MS - Date.now()
+  lastDispatchAt.set(route, Date.now())
+  if (wait <= 0 || signal.aborted) return
+  await new Promise<void>((resolve) => {
+    const onAbort = (): void => { clearTimeout(timer); resolve() }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, wait)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/**
  * Build the cross-account hooks one route needs to draw on its whole account pool.
  *
  * Every Responses-wire route (Kimi, Grok, GLM, Ark) meters per account and can run out;
@@ -195,6 +226,10 @@ export async function* streamProviderResponses<S extends SessionBase>(
 
     for (const accountKey of tryAccounts) {
       let token = await tokens.resolve(accountKey)
+      // Pace each dispatch: a request right after a refused one is what turns a
+      // transient safety check into a sustained block, so the streamer waits out a
+      // short beat before each attempt (the same discipline opencodex keeps).
+      await paceDispatch(label, watchdog.signal)
       // Track which accounts a spent-allowance already moved past, so a later model
       // in the chain does not re-try an account known to be exhausted.
       const spent = new Set<string>()
