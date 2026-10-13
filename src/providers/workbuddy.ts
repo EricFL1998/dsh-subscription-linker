@@ -1,0 +1,319 @@
+/**
+ * The WorkBuddy China wire adapter serving the `workbuddy` route.
+ *
+ * WorkBuddy chats are chat completions at `https://copilot.tencent.com/v2/chat/completions`,
+ * streamed only, and the API refuses a request whose User-Agent is not
+ * `WorkBuddy/<version>`. The route ships the China build's catalog (Hy, GLM, Kimi,
+ * DeepSeek, MiniMax). Adapted from magpie's `workbuddy` for this plugin's contracts.
+ *
+ * @module dsh-plugin-subscription-oauth/providers/workbuddy
+ */
+
+import {
+  LlmAdapter,
+  errorChain,
+  ReasoningEffortId,
+  type GenerateOptions,
+  type LlmModelInfo,
+  type LlmProviderInfo,
+  type LlmResolvedModelInfo,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+
+import { idleWatchdog, mapFetchFailure } from './common.js'
+import { proxiedFetch, type FetchFn } from '../http.js'
+import type { TokenManager } from '../auth/tokens.js'
+import type { CatalogEntry } from './catalog.js'
+import { findEntry } from './catalog.js'
+import { WORKBUDDY_ENDPOINT, WORKBUDDY_UA_VERSION, workbuddyHeaders, type WorkBuddyTokenSet, type WorkBuddySession } from '../auth/workbuddy-flow.js'
+
+/** The `workbuddy` provider route key (China build). */
+export const WORKBUDDY_PROVIDER_ID = 'workbuddy'
+/** Human name for the route and its cards. */
+export const WORKBUDDY_PROVIDER_NAME = 'WorkBuddy'
+/** Where the Settings page sends someone to get an account. */
+export const WORKBUDDY_CODE_URL = 'https://copilot.tencent.com'
+/** The chat completions endpoint. */
+const WORKBUDDY_API = `${WORKBUDDY_ENDPOINT}/v2/chat/completions`
+/** The model the picker preselects. */
+export const WORKBUDDY_DEFAULT_MODEL = 'hy4-preview-f'
+
+/** One signed-in WorkBuddy session, as stored. */
+export interface WorkBuddyStored {
+  accessToken: string
+  refreshToken?: string
+  expiresAt: number
+  accountId?: string
+  email?: string
+  uid?: string
+  enterpriseId?: string
+  domain?: string
+  tokenType?: string
+  refreshExpiresAt?: number
+}
+
+/** The China build's catalog, [id, name, context, efforts?]. */
+const CN_MODELS: readonly (readonly [string, string, number] | readonly [string, string, number, readonly string[]])[] = [
+  ['auto', 'Auto', 168_000],
+  ['hy4-preview-f', 'Hy4 preview', 1_000_000, ['high']],
+  ['hy3', 'Hy3', 192_000, ['low', 'high']],
+  ['hy3-x', 'Hy3-X', 192_000, ['low', 'high']],
+  ['deepseek-v4.1-flash', 'Deepseek-V4.1-Flash', 1_000_000],
+  ['glm-5.3', 'GLM-5.3', 1_000_000, ['low', 'high', 'max']],
+  ['glm-5.3-flash', 'GLM-5.3-Flash', 1_000_000, ['low', 'high', 'max']],
+  ['glm-5.2', 'GLM-5.2', 1_000_000, ['high', 'xhigh']],
+  ['glm-5.1', 'GLM-5.1', 200_000],
+  ['glm-5v-turbo', 'GLM-5v-Turbo', 200_000],
+  ['minimax-m3', 'MiniMax-M3', 512_000],
+  ['kimi-k3-1', 'Kimi-K3', 1_000_000, ['low', 'high', 'xhigh']],
+  ['kimi-k2.7', 'Kimi-K2.7-Code', 256_000],
+  ['kimi-k2.6', 'Kimi-K2.6', 256_000],
+  ['deepseek-v4-pro', 'Deepseek-V4-Pro', 1_000_000, ['none', 'high', 'xhigh']],
+]
+
+/** The catalog the route serves. */
+export const WORKBUDDY_CATALOG: readonly CatalogEntry[] = CN_MODELS.map((entry) => {
+  const [id, name, contextWindow, efforts] = entry
+  return {
+    id,
+    name,
+    contextWindow,
+    ...efforts === undefined ? {} : { reasoningEfforts: efforts as readonly string[] },
+  }
+})
+
+/** A chat-completions choice delta, as the wire frames it. */
+interface ChatChunk {
+  choices?: { delta?: { content?: string, role?: string }, index?: number }[]
+  usage?: { prompt_tokens?: number, completion_tokens?: number, total_tokens?: number }
+}
+
+/** Constructor dependencies for {@link WorkBuddyAdapter}. */
+export interface WorkBuddyAdapterOptions {
+  streamIdleTimeoutMs: number
+  tokens: TokenManager<WorkBuddySession>
+  onWarn?: (message: string) => void
+  hiddenModels?: () => Promise<ReadonlySet<string>>
+  userModels?: () => Promise<readonly string[]>
+  fetchFn?: FetchFn
+}
+
+/** The WorkBuddy China wire adapter serving the `workbuddy` route. */
+export class WorkBuddyAdapter extends LlmAdapter {
+  private readonly fetchFn: FetchFn
+
+  constructor(private readonly options: WorkBuddyAdapterOptions) {
+    super()
+    this.fetchFn = options.fetchFn ?? proxiedFetch
+  }
+
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: WORKBUDDY_PROVIDER_NAME }
+  }
+
+  override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    if (await this.options.tokens.session() === undefined) return []
+    const hidden = await this.hidden()
+    return WORKBUDDY_CATALOG.filter((entry) => !hidden.has(entry.id)).map((entry) => ({
+      provider: WORKBUDDY_PROVIDER_ID,
+      id: entry.id,
+      name: entry.name,
+      ...entry.description === undefined ? {} : { description: entry.description },
+      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+    }))
+  }
+
+  private async hidden(): Promise<ReadonlySet<string>> {
+    if (this.options.hiddenModels === undefined) return new Set()
+    try {
+      return await this.options.hiddenModels()
+    } catch {
+      return new Set()
+    }
+  }
+
+  /** The catalog the Settings list reads. */
+  catalogEntries(): readonly CatalogEntry[] {
+    return WORKBUDDY_CATALOG
+  }
+
+  /** The entries the route itself serves, without hand-added extras. */
+  ownCatalogEntries(): readonly CatalogEntry[] {
+    return WORKBUDDY_CATALOG
+  }
+
+  override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const entry = findEntry(WORKBUDDY_CATALOG, model)
+    if (entry === undefined) {
+      return {
+        provider: WORKBUDDY_PROVIDER_ID,
+        id: model,
+        name: model,
+        context: { contextWindow: 0 },
+        inputModalities: ['text', 'image'],
+      }
+    }
+    return {
+      provider: WORKBUDDY_PROVIDER_ID,
+      id: entry.id,
+      name: entry.name,
+      ...entry.description === undefined ? {} : { description: entry.description },
+      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+      context: { contextWindow: entry.contextWindow },
+      ...entry.reasoningEfforts === undefined || entry.reasoningEfforts.length === 0
+        ? {}
+        : { reasoning: { efforts: entry.reasoningEfforts.map((id) => ({ id: ReasoningEffortId(id), name: id })) } },
+    }
+  }
+
+  override providerRetryPolicy(): undefined {
+    return undefined
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const held = await this.options.tokens.session()
+    if (held === undefined) throw new Error('WorkBuddy is not signed in')
+    const token = this.tokenOf(held.session)
+    const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
+    try {
+      const response = await this.fetchFn(WORKBUDDY_API, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          ...workbuddyHeaders(token),
+        },
+        body: JSON.stringify(this.requestBody(options)),
+        signal: watchdog.signal,
+      })
+      if (!response.ok || response.body === null) {
+        throw await this.errorOf(response)
+      }
+      yield* this.readStream(response, watchdog)
+    } catch (error) {
+      throw mapFetchFailure(WORKBUDDY_PROVIDER_NAME, error, watchdog, options.signal)
+    } finally {
+      watchdog.stop()
+    }
+  }
+
+  /** The stored session's fields as the token the request signs with. */
+  private tokenOf(session: WorkBuddySession): WorkBuddyTokenSet {
+    return {
+      accessToken: session.accessToken,
+      expiresAt: session.expiresAt,
+      ...session.refreshToken === undefined ? {} : { refreshToken: session.refreshToken },
+      ...session.uid === undefined ? {} : { uid: session.uid },
+      ...session.enterpriseId === undefined ? {} : { enterpriseId: session.enterpriseId },
+      ...session.domain === undefined ? {} : { domain: session.domain },
+      ...session.tokenType === undefined ? {} : { tokenType: session.tokenType },
+      ...session.refreshExpiresAt === undefined ? {} : { refreshExpiresAt: session.refreshExpiresAt },
+    }
+  }
+
+  private requestBody(options: GenerateOptions): Record<string, unknown> {
+    const messages: Record<string, unknown>[] = []
+    if (options.system !== undefined && options.system.trim() !== '') {
+      messages.push({ role: 'system', content: options.system })
+    }
+    for (const message of options.messages) {
+      messages.push(this.toChatMessage(message))
+    }
+    return {
+      model: options.model,
+      messages,
+      ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
+      stream: true,
+    }
+  }
+
+  private toChatMessage(message: GenerateOptions['messages'][number]): Record<string, unknown> {
+    const role = message.role === 'assistant' ? 'assistant' : 'user'
+    const textParts: string[] = []
+    for (const block of message.content) {
+      if (block.type === 'text') textParts.push(block.text)
+    }
+    return { role, content: textParts.join('\n') }
+  }
+
+  /** Turn a non-2xx into an LlmError, naming WorkBuddy's specific refusals. */
+  private async errorOf(response: Response): Promise<unknown> {
+    const text = await response.text().catch(() => '')
+    let body: Record<string, unknown> = {}
+    try {
+      body = JSON.parse(text) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    const code = Number(body.code ?? (body.data as Record<string, unknown> | undefined)?.code ?? 0)
+    const message = String(body.msg ?? (body.error as Record<string, unknown> | undefined)?.message ?? body.message ?? text.slice(0, 200) ?? `HTTP ${response.status}`)
+    if (/unapproved channel|illegal api invocation/i.test(text)) {
+      return new Error(`${message} — WorkBuddy refuses chats from Codex and Claude Code; use another client or add another provider`)
+    }
+    if (code === 11140 || /account has been restricted due to unusual activity/i.test(text)) {
+      return new Error(`${message} — WorkBuddy restricted this account; it stays out until WorkBuddy lifts that`)
+    }
+    if (code === 14018 || /credits exhausted|额度已用尽/i.test(text)) {
+      return new Error(`${message} — WorkBuddy requires an active credit package even for 0-rate free models`)
+    }
+    const { LlmError } = await import('@deepseek-ai/dsh-llm')
+    return new LlmError(
+      `${WORKBUDDY_PROVIDER_NAME} request failed (HTTP ${response.status}): ${message}`,
+      response.status === 401 || response.status === 403 ? 'INVALID_CREDENTIAL'
+        : response.status === 429 ? 'RATE_LIMIT'
+          : response.status >= 500 ? 'SERVER' : 'HTTP_ERROR',
+      { status: response.status },
+    )
+  }
+
+  private async *readStream(response: Response, watchdog: ReturnType<typeof idleWatchdog>): AsyncIterable<StreamChunk> {
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let started = false
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        watchdog.pulse()
+        buffer += decoder.decode(value, { stream: true })
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const data = frame
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('\n')
+          if (data === '' || data === '[DONE]') continue
+          let chunk: ChatChunk
+          try {
+            chunk = JSON.parse(data) as ChatChunk
+          } catch {
+            continue
+          }
+          const delta = chunk.choices?.[0]?.delta?.content
+          if (typeof delta === 'string' && delta !== '') {
+            if (!started) {
+              yield { type: 'block-start', index: 0, blockType: 'text' }
+              started = true
+            }
+            yield { type: 'text-delta', index: 0, text: delta }
+          }
+          if (chunk.usage !== undefined) {
+            const input = chunk.usage.prompt_tokens ?? 0
+            const output = chunk.usage.completion_tokens ?? 0
+            yield {
+              type: 'usage',
+              usage: { inputTokens: input, outputTokens: output, totalTokens: chunk.usage.total_tokens ?? input + output },
+            }
+          }
+        }
+      }
+      if (started) yield { type: 'block-end', index: 0, block: { type: 'text', text: '' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } finally {
+      reader.cancel().catch(() => {})
+    }
+  }
+}
