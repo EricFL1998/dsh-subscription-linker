@@ -332,18 +332,22 @@ describe('GrokAdapter catalog', () => {
     // Asked about the fast id itself, the pair still names the row to switch back to.
     assert.deepEqual(adapter.fastPairOf('grok-4.7-build-fast'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
     assert.equal(adapter.fastPairOf('grok-4.5'), undefined)
-    // The row is published under the variant id, and the base id is withheld so the
-    // variant does not appear as a second row.
+    // The row keeps its own id, so the picker always offers a way back to the standard
+    // model; the variant is a wire id the `fast` rung dispatches, never a picker row.
     const models = await adapter.listModels('grok')
-    assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), true)
-    assert.equal(models.some((model) => model.id === 'grok-4.7'), false)
+    assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), false)
+    assert.equal(models.some((model) => model.id === 'grok-4.7'), true)
     // The CLI catalog states 256k for grok-4.7, which really serves 500k: a live read
     // may widen what this build ships, never narrow it.
     assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
-    // The fast variant answers with its base model's metadata under its own wire id.
+    // The row declares the `fast` rung, which is what the quick-mode button selects.
+    const base = await adapter.resolveModel('grok', 'grok-4.7')
+    assert.equal(base.reasoning?.efforts.some((effort) => String(effort.id) === 'fast'), true)
+    // The fast variant still resolves, with its base model's metadata, under its own wire
+    // id — a session that selected it before this build keeps working.
     const fast = await adapter.resolveModel('grok', 'grok-4.7-build-fast')
     assert.equal(fast.id, 'grok-4.7-build-fast')
-    assert.equal(fast.name, 'Grok 4.7 Fast')
+    assert.equal(fast.name, 'Grok 4.7')
     assert.equal(fast.context?.contextWindow, 500_000)
   })
 
@@ -418,6 +422,25 @@ describe('GrokAdapter requests', () => {
     assert.equal(seenHeaders.get('accept'), 'text/event-stream')
     // The harness attribution is present without a CLI product token.
     assert.match(seenHeaders.get('user-agent') ?? '', /^deepseek-harness\//)
+  })
+
+  test('the fast rung dispatches the variant under the row id', async () => {
+    let seenBody: Record<string, unknown> = {}
+    const fetchFn: typeof fetch = async (input, init) => {
+      if (String(input).includes('/models')) {
+        return jsonResponse({ data: [{ id: 'grok-4.7' }, { id: 'grok-4.7-build-fast' }] })
+      }
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([{ type: 'response.completed', response: {} }])
+    }
+    const adapter = new GrokAdapter(adapterOptions({ discovery: true, fetchFn }))
+    await adapter.fetchCatalog('token', undefined)
+    assert.deepEqual(adapter.fastPairOf('grok-4.7'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
+    // The selection keeps the row's own id — that is what the host validated — and the
+    // request goes to the variant, with no `fast` effort sent to xAI.
+    await collect(adapter.stream(request({ model: 'grok-4.7', reasoningEffort: ReasoningEffortId('fast') })))
+    assert.equal(seenBody.model, 'grok-4.7-build-fast')
+    assert.equal(Object.hasOwn(seenBody, 'reasoning'), false)
   })
 
   test('streams a response into harness chunks', async () => {

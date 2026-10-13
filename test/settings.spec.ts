@@ -174,7 +174,7 @@ describe('KimiAdapter visibility', () => {
     }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'],
+      ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'],
     )
   })
 
@@ -183,13 +183,13 @@ describe('KimiAdapter visibility', () => {
     const adapter = new KimiAdapter(adapterOptions({ hiddenModels: async () => hidden }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding-highspeed', 'k3', 'k3[1m]'],
+      ['kimi-for-coding', 'k3', 'k3[1m]'],
     )
     // A settings change takes effect at the next query, with no rebuild.
     hidden = new Set(['k3', 'k3-256k'])
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding-highspeed', 'k3[1m]'],
+      ['kimi-for-coding', 'k3[1m]'],
     )
   })
 

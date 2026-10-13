@@ -71,7 +71,7 @@ describe('KimiAdapter catalog', () => {
     // The fast variant rides beside its row in the host-facing list: the host validates
     // a GUI selection against that list and refuses an unknown id, so the variant must
     // be present even though the picker's model seat shows only the row.
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'])
     assert.equal(models[0]?.provider, 'kimi')
     assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
   })
@@ -98,15 +98,23 @@ describe('KimiAdapter catalog', () => {
       wireId: 'kimi-for-coding-highspeed',
     })
     assert.equal(adapter.fastPairOf('k3'), undefined)
-    // The fast id is present in the host-facing list — the host validates a selection
-    // against that list — and it resolves under its own id so a fast selection is never
-    // rewritten onto its base.
+    // The host-facing list holds the row under its own id — the host validates every GUI
+    // selection against that list — so the picker always offers a way back to the
+    // standard model. The fast id is a wire id, not a picker row.
     const models = await adapter.listModels('kimi')
-    assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), true)
+    assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), false)
+    assert.equal(models.some((model) => model.id === 'kimi-for-coding'), true)
     const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
-    assert.equal(resolved.id, 'kimi-for-coding-highspeed')
-    assert.equal(resolved.name, 'Kimi for Coding Fast')
+    // An alias resolves onto the row's own id, so a stale fast selection unsticks itself.
+    assert.equal(resolved.id, 'kimi-for-coding')
+    assert.equal(resolved.name, 'Kimi for Coding')
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
+    // The row carries the `fast` rung, which is what the quick-mode button selects.
+    assert.equal(
+      (await adapter.resolveModel('kimi', 'kimi-for-coding')).reasoning?.efforts
+        .some((effort) => String(effort.id) === 'fast'),
+      true,
+    )
   })
 
   test('folds a live fast id into the row it belongs to', async () => {
@@ -144,21 +152,21 @@ describe('KimiAdapter catalog', () => {
     const adapter = new KimiAdapter(options())
     adapter.discover(['kimi-for-coding', 'k3', 'k3-256k'])
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'])
   })
 
   test('appends live ids this build does not know', async () => {
     const adapter = new KimiAdapter(options())
     adapter.discover(['k3', 'k3-next', 'k3-next', 'kimi-k3'])
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
     assert.match(models.at(-1)?.description ?? '', /model list/)
   })
 
   test('appends configured extra models', async () => {
     const adapter = new KimiAdapter(options({ extraModels: ['k3-next', 'k3'], discovery: true }))
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
     assert.match(models.at(-1)?.description ?? '', /plugin configuration/)
   })
 })
@@ -456,7 +464,7 @@ describe('KimiAdapter model order', () => {
     const adapter = new KimiAdapter(options({ userModels: async () => ['k3-next'] }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'],
+      ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'],
     )
     // It has no shipped metadata, so the standard window is advertised.
     const resolved = await adapter.resolveModel('kimi', 'k3-next')
@@ -467,7 +475,7 @@ describe('KimiAdapter model order', () => {
     const known = new KimiAdapter(options({ userModels: async () => ['k3'] }))
     assert.deepEqual(
       (await known.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'],
+      ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'],
     )
   })
 
@@ -487,5 +495,15 @@ describe('KimiAdapter model order', () => {
     const adapter = new KimiAdapter(options({ fetchFn }))
     await collect(adapter.stream(request({ model: 'k3[1m]' })))
     assert.equal(body().model, 'k3[1m]')
+  })
+
+  test('the fast rung dispatches the highspeed variant under the row id', async () => {
+    const { fetchFn, body } = recorder()
+    const adapter = new KimiAdapter(options({ fetchFn }))
+    // The selection keeps the row's own id — that is what the host validated — and the
+    // request goes to the variant, with no `fast` effort sent as a thinking budget.
+    await collect(adapter.stream(request({ model: 'kimi-for-coding', reasoningEffort: ReasoningEffortId('fast') })))
+    assert.equal(body().model, 'kimi-for-coding-highspeed')
+    assert.equal(body().reasoning_effort, undefined)
   })
 })

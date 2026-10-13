@@ -98,6 +98,10 @@ const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
   low: { name: 'Low', description: 'Short chain of thought' },
   medium: { name: 'Medium', description: 'Balanced thinking budget' },
   high: { name: 'High', description: 'Deep chain of thought' },
+  // Not a thinking budget: this rung is the model's fast variant, which the composer's
+  // quick-mode button selects. It rides the effort channel so the row keeps its own id —
+  // a swapped model id would leave the picker with no way back to the standard model.
+  fast: { name: 'Fast', description: 'Lightspeed variant of this model' },
 }
 
 /**
@@ -182,12 +186,18 @@ function effortInfo(effort: string) {
   return { id: ReasoningEffortId(effort), name: label.name, description: label.description }
 }
 
-/** The reasoning block for a catalog entry, or undefined when it supports none. */
-function reasoningInfo(entry: CatalogEntry) {
+/**
+ * The reasoning block for a catalog entry, or undefined when it supports none.
+ *
+ * @param entry - the catalog row.
+ * @param fast - add the `fast` rung when this row has a fast variant.
+ */
+function reasoningInfo(entry: CatalogEntry, fast = false) {
   const efforts = entry.reasoningEfforts
-  if (efforts === undefined || efforts.length === 0) return undefined
+  const ids = fast ? [...efforts ?? [], 'fast'] : efforts
+  if (ids === undefined || ids.length === 0) return undefined
   return {
-    efforts: efforts.map(effortInfo),
+    efforts: ids.map(effortInfo),
     ...entry.defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(entry.defaultEffort) },
   }
 }
@@ -577,24 +587,18 @@ export class GrokAdapter extends LlmAdapter {
     if (await this.options.tokens.session() === undefined) return []
     await this.syncUserModels()
     const hidden = await this.hidden()
-    // The host validates a GUI selection against the exact ids `listModels` returns
-    // and refuses an unknown one with `session/model-unavailable`, and its picker
-    // lists every returned id as its own row. So a fast variant is published under
-    // its base id: selecting it names the variant the request must send, and the
-    // base's own id is withheld so the variant does not appear twice.
+    // One row per model, always under the model's own id: the host validates every GUI
+    // selection against this list, so publishing only the fast variant would leave the
+    // picker with no way back to the standard model. Fast mode is the row's `fast`
+    // reasoning rung instead (see `stream`).
     const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
-    const listed = resolveCatalog(imageless, [], hidden).entries.map((entry) => {
-      const fast = this.fastVariants.variantOf(entry.id)
-      const id = fast ?? entry.id
-      return {
-        provider: GROK_PROVIDER_ID,
-        id,
-        name: entry.name,
-        ...entry.description === undefined ? {} : { description: entry.description },
-        ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
-      }
-    })
-    return listed
+    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({
+      provider: GROK_PROVIDER_ID,
+      id: entry.id,
+      name: entry.name,
+      ...entry.description === undefined ? {} : { description: entry.description },
+      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+    }))
   }
 
 
@@ -630,14 +634,13 @@ export class GrokAdapter extends LlmAdapter {
         ...reasoning === undefined ? {} : { reasoning },
       }
     }
-    const reasoning = reasoningInfo(entry)
-    // The fast selection names itself "Fast" so the picker trigger reads the mode, not
-    // the base model it replaces; the id stays the fast wire id the request must send.
-    const fast = pair !== undefined && pair.wireId === model
+    // A row with a fast variant offers the `fast` rung; the picker shows the row under
+    // its own name and the mode as the effort, which is what the trigger already reads.
+    const reasoning = reasoningInfo(entry, this.fastVariants.variantOf(entry.id) !== undefined)
     return {
       provider: GROK_PROVIDER_ID,
       id: model,
-      name: fast ? `${entry.name} Fast` : entry.name,
+      name: entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
       context: { contextWindow: entry.contextWindow },
@@ -648,8 +651,16 @@ export class GrokAdapter extends LlmAdapter {
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     // Resolve @Nk context suffixes to the largest variant the endpoint offers.
-    const model = this.resolveModelId(options.model)
-    return streamProviderResponses({ ...options, model }, {
+    const base = this.resolveModelId(options.model)
+    // Fast mode rides the reasoning channel: `fast` is a rung of the row, not a model id
+    // of its own, so the row the picker selected stays dispatchable and the user can
+    // always select the standard model again. Only the wire id changes.
+    const fast = String(options.reasoningEffort ?? '') === 'fast'
+    const model = fast ? this.fastVariants.variantOf(base) ?? base : base
+    const call = { ...options, model }
+    // xAI has no `fast` effort; the variant already carries the behaviour.
+    if (fast) delete call.reasoningEffort
+    return streamProviderResponses(call, {
       label: 'xAI API',
       tokens: this.options.tokens,
       request: (call, model, accessToken, signal) => this.request(call, model, accessToken, signal),
