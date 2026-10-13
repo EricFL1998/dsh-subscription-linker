@@ -255,14 +255,69 @@ export interface AccountReading {
  * @param usage - every account the route answered for.
  * @returns one reading per account that states a figure, in the route's order.
  */
+/**
+ * Reduce a route's per-account usage to one reading per account.
+ *
+ * A provider can hold several accounts (two Antigravity sign-ins, say). Every account's
+ * windows are kept as the route stated them — a percentage-metered quota and a credit
+ * balance (`credits`) alike — so the per-account panel shows the real figures, and the
+ * compact line's merge decides which to integrate.
+ *
+ * @param usage - every account the route answered for.
+ * @returns one reading per account that states any window, in the route's order.
+ */
 export function accountReadingsOf(usage: readonly ProviderUsage[]): readonly AccountReading[] {
   const out: AccountReading[] = []
   for (const entry of usage) {
-    const windows = entry.windows.filter((candidate) => candidate.usedPercent !== undefined)
-    if (windows.length === 0) continue
-    out.push({ account: entry.account, windows, ...entry.plan === undefined ? {} : { plan: entry.plan } })
+    if (entry.windows.length === 0) continue
+    out.push({ account: entry.account, windows: entry.windows, ...entry.plan === undefined ? {} : { plan: entry.plan } })
   }
   return out
+}
+
+/**
+ * Merge every account's percentage-metered windows into one figure per label.
+ *
+ * The chip's compact line integrates the whole pool: two accounts at 50 percent read as
+ * one window at 50 percent (the same allowance spent twice as wide), not two lines. A
+ * credit balance (`credits`) is money, not a share of a shared allowance, so it is not
+ * merged — it stays on the per-account panel, where it reads correctly. Only windows
+ * that state a `usedPercent` (a share of an allowance) merge.
+ *
+ * @param readings - one per account, from {@link accountReadingsOf}.
+ * @returns one merged window per percentage-metered label, most-spent first.
+ */
+export function mergeAccountWindows(readings: readonly AccountReading[]): readonly UsageWindow[] {
+  const byLabel = new Map<string, UsageWindow[]>()
+  for (const reading of readings) {
+    for (const window of reading.windows) {
+      // Only a percentage-metered window merges. A credit balance (a bare used/limit
+      // pair) is money, not a share of a shared allowance, and averaging it across
+      // accounts would misread money as a quota.
+      if (window.usedPercent === undefined) continue
+      const list = byLabel.get(window.label) ?? []
+      list.push(window)
+      byLabel.set(window.label, list)
+    }
+  }
+  const merged: UsageWindow[] = []
+  for (const [label, list] of byLabel) {
+    // Percentages average across accounts: the pool's spent share is the mean of each
+    // account's spent share (accounts share an allowance, they do not add to it).
+    const withPercent = list.filter((window) => window.usedPercent !== undefined)
+    if (withPercent.length === 0) continue
+    const usedPercent = withPercent.reduce((sum, window) => sum + (window.usedPercent ?? 0), 0) / withPercent.length
+    // The pool's reset is the soonest account reset: the window refills when the first
+    // account's does.
+    const resets = list.map((window) => window.resetsAt).filter((at): at is number => typeof at === 'number')
+    merged.push({
+      label,
+      usedPercent: Math.max(0, Math.min(100, usedPercent)),
+      ...resets.length === 0 ? {} : { resetsAt: Math.min(...resets) },
+    })
+  }
+  // Most-spent first, so the line leads with the window that will stop work soonest.
+  return merged.sort((left, right) => (right.usedPercent ?? 0) - (left.usedPercent ?? 0))
 }
 
 /**
@@ -523,10 +578,10 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
 
   if (accountReadings === undefined || accountReadings.length === 0) return null
   const short = shortLabel(selected ?? '', selected ?? '')
+  // The compact line integrates the whole pool; the panel shows each account's own
+  // figures, so a merged glance hides nothing a per-account look cannot recover.
+  const merged = mergeAccountWindows(accountReadings)
 
-  // One model id draws on every account the provider holds, so the chip shows each
-  // account's allowance on its own line — a merged figure would hide that one account is
-  // spent while another is free. With a single account the line reads exactly as before.
   return (
     <span className="dsh-subscription-usage-chip">
       {/* An element, so unmounting the chip takes its rules with it. */}
@@ -543,16 +598,12 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
         }}
       >
         <span className="dsh-subscription-usage-chip-label">{short}</span>
-        {accountReadings.map((account) => (
-          <span className="dsh-subscription-usage-chip-cell" key={account.account} title={account.account}>
-            {account.windows.map((window) => (
-              <span className="dsh-subscription-usage-chip-window" key={window.label}>
-                <span>{shortWindow(window.label)}</span>
-                <span className="dsh-subscription-usage-chip-value">
-                  {`${String(Math.round(window.usedPercent ?? 0))}%`}
-                </span>
-              </span>
-            ))}
+        {merged.map((window) => (
+          <span className="dsh-subscription-usage-chip-cell" key={window.label}>
+            <span className="dsh-subscription-usage-chip-window">{shortWindow(window.label)}</span>
+            <span className="dsh-subscription-usage-chip-value">
+              {`${String(Math.round(window.usedPercent ?? 0))}%`}
+            </span>
           </span>
         ))}
       </button>
@@ -568,20 +619,26 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
               </span>
               {account.windows.map((window) => {
                 const windowReset = formatReset(window.resetsAt, now)
+                // A credit balance reads as money (`used`/`limit`), a quota as a percent.
+                const amount = window.usedPercent === undefined && window.used !== undefined && window.limit !== undefined
+                  ? `${String(window.used)}/${String(window.limit)}`
+                  : `${String(Math.round(window.usedPercent ?? 0))}%`
                 return (
                   <span className="dsh-subscription-usage-chip-meter" key={window.label}>
                     <span className="dsh-subscription-usage-chip-meterHead">
                       <span>{window.label}</span>
                       <span className="dsh-subscription-usage-chip-detail">
-                        {`${String(Math.round(window.usedPercent ?? 0))}%${windowReset === undefined ? '' : ` · ${windowReset}`}`}
+                        {`${amount}${windowReset === undefined ? '' : ` · ${windowReset}`}`}
                       </span>
                     </span>
-                    <span className="dsh-subscription-usage-chip-track" aria-hidden="true">
-                      <span
-                        className="dsh-subscription-usage-chip-fill"
-                        style={{ width: `${String(Math.max(0, Math.min(100, window.usedPercent ?? 0)))}%` }}
-                      />
-                    </span>
+                    {window.usedPercent !== undefined && (
+                      <span className="dsh-subscription-usage-chip-track" aria-hidden="true">
+                        <span
+                          className="dsh-subscription-usage-chip-fill"
+                          style={{ width: `${String(Math.max(0, Math.min(100, window.usedPercent ?? 0)))}%` }}
+                        />
+                      </span>
+                    )}
                   </span>
                 )
               })}

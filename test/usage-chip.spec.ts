@@ -11,7 +11,8 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { balanceOf, formatBalance, formatReset, pickWindow, providerOf, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
+import { accountReadingsOf, balanceOf, formatBalance, formatReset, mergeAccountWindows, pickWindow, providerOf, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
+import type { AccountReading } from '../src/client/UsageChip.js'
 import type { ProviderUsage, UsageWindow } from '../src/protocol.js'
 
 /** One account's usage with the given windows. */
@@ -76,6 +77,59 @@ describe('shortWindow', () => {
 
   test('truncates a long unrecognised name rather than dropping it', () => {
     assert.equal(shortWindow('fortnightly'), 'fort')
+  })
+})
+
+describe('mergeAccountWindows', () => {
+  const reading = (account: string, windows: UsageWindow[]): AccountReading => ({ account, windows })
+
+  test('averages the same share across accounts into one window', () => {
+    // Two accounts at 50 % of the same allowance read as one window at 50 % of the pool.
+    const merged = mergeAccountWindows([
+      reading('a', [{ label: 'weekly', usedPercent: 50 }]),
+      reading('b', [{ label: 'weekly', usedPercent: 50 }]),
+    ])
+    assert.equal(merged.length, 1)
+    assert.equal(merged[0]?.label, 'weekly')
+    assert.equal(merged[0]?.usedPercent, 50)
+  })
+
+  test('averages percentages when amounts are not stated', () => {
+    const merged = mergeAccountWindows([
+      reading('a', [{ label: '5h', usedPercent: 20 }]),
+      reading('b', [{ label: '5h', usedPercent: 60 }]),
+    ])
+    assert.equal(merged[0]?.usedPercent, 40)
+  })
+
+  test('takes the soonest reset across accounts', () => {
+    const sooner = Date.now() + 60_000
+    const later = Date.now() + 120_000
+    const merged = mergeAccountWindows([
+      reading('a', [{ label: 'weekly', usedPercent: 50, resetsAt: later }]),
+      reading('b', [{ label: 'weekly', usedPercent: 50, resetsAt: sooner }]),
+    ])
+    assert.equal(merged[0]?.resetsAt, sooner)
+  })
+
+  test('orders windows most-spent first', () => {
+    const merged = mergeAccountWindows([
+      reading('a', [
+        { label: '5h', usedPercent: 10 },
+        { label: 'weekly', usedPercent: 90 },
+      ]),
+    ])
+    assert.deepEqual(merged.map((window) => window.label), ['weekly', '5h'])
+  })
+
+  test('leaves a credit balance out of the merge, since money is not a shared allowance', () => {
+    const merged = mergeAccountWindows([
+      reading('a', [{ label: 'credits', used: 1, limit: 2 }]),
+      reading('b', [{ label: 'weekly', usedPercent: 30 }]),
+    ])
+    // `credits` is money, not a share of a shared allowance, so it is not merged into the
+    // compact line; only the percentage-metered `weekly` is.
+    assert.deepEqual(merged.map((window) => window.label), ['weekly'])
   })
 })
 
