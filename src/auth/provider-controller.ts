@@ -95,6 +95,8 @@ export interface ProviderUsageRead {
   plan?: string
   renewsAt?: number
   windows: readonly UsageWindow[]
+  /** Daily check-in state, when the provider states one. */
+  checkin?: { active: boolean, todayCheckedIn: boolean, streakDays: number, todayCredit: number }
   /**
    * Why these figures are not the provider's primary accounting.
    *
@@ -598,6 +600,7 @@ export class ProviderController<S extends SessionBase> {
           fetchedAt: Date.now(),
           ...read.plan === undefined ? {} : { plan: read.plan },
           ...read.renewsAt === undefined ? {} : { renewsAt: read.renewsAt },
+          ...read.checkin === undefined ? {} : { checkin: read.checkin },
           ...read.usageError === undefined ? {} : { substitute: true },
         }
         this.usageByAccount.set(account, entry)

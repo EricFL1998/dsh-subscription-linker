@@ -355,15 +355,38 @@ function windowAmount(window: UsageWindow): string {
   return '—'
 }
 
-/** One account's metered windows, rendered under its account row. */
+/** One account's metered windows and check-in, rendered under its account row. */
 function AccountUsage(props: {
   entry: ProviderUsage | undefined
   t: SubscriptionsSectionInjected['t']
+  busyAction: boolean
+  onCheckin?(): void
 }) {
-  const { entry, t } = props
+  const { entry, t, busyAction, onCheckin } = props
   if (entry === undefined) return null
+  const checkin = entry.checkin
   return (
     <div style={styles.usageInline}>
+      {checkin?.active === true && (
+        <div style={styles.usageLine}>
+          <span style={styles.modelName}>
+            {t('checkinTitle')}
+            {' · '}
+            {checkin.todayCheckedIn ? t('checkinDone', { days: checkin.streakDays }) : t('checkinPending')}
+          </span>
+          {!checkin.todayCheckedIn && onCheckin !== undefined && (
+            <button
+              type="button"
+              className="dsh-subscription-quiet"
+              style={styles.pushRight}
+              disabled={busyAction}
+              onClick={onCheckin}
+            >
+              {t('checkinClaim')}
+            </button>
+          )}
+        </div>
+      )}
       {entry.windows.map((window) => (
         <div key={`${entry.account}-${window.label}`} style={styles.usageRow}>
           <div style={styles.usageLine}>
@@ -515,6 +538,8 @@ function ProviderCard(props: {
   /** Whether the `auto` provider is offered; flips it. Only the auto card sets these. */
   autoOn?: boolean
   onSetAutoOn?(enabled: boolean): void
+  /** Claim one account's daily check-in reward, when the route has one. */
+  onCheckin?(account: string): void
 }) {
   const { status, t, busyAction, message } = props
   const [copied, setCopied] = useState(false)
@@ -799,7 +824,12 @@ function ProviderCard(props: {
               {t('logout')}
             </button>
           </div>
-          <AccountUsage entry={usageEntry} t={t} />
+          <AccountUsage
+            entry={usageEntry}
+            t={t}
+            busyAction={busyAction}
+            {...props.onCheckin === undefined ? {} : { onCheckin: () => { props.onCheckin?.(account.account) } }}
+          />
         </div>
         )
       })}
@@ -1148,6 +1178,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [call, refresh, t])
 
+  /** Claim one account's daily check-in reward, then refresh the figures. */
+  const checkin = useCallback(async (provider: string, account: string): Promise<void> => {
+    if (call === undefined) return
+    setBusyAction(true)
+    try {
+      const result = await call('checkin', { provider, account })
+      if (!mounted.current) return
+      setMessages((previous) => ({
+        ...previous,
+        [provider]: {
+          tone: 'success',
+          text: result.already
+            ? t('checkinAlready', { days: result.streakDays })
+            : t('checkinClaimed', { credit: result.credit, days: result.streakDays }),
+        },
+      }))
+      await refresh()
+    } catch (caught: unknown) {
+      if (mounted.current) setError(t('actionFailed', { message: messageOf(caught) }))
+    } finally {
+      if (mounted.current) setBusyAction(false)
+    }
+  }, [call, refresh, t])
+
   const stopPolling = useCallback((): void => {
     if (timer.current !== undefined) {
       clearInterval(timer.current)
@@ -1403,6 +1457,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           onRefreshUsage={() => { refreshUsage(provider.provider) }}
           onReload={() => { reload(provider.provider) }}
           {...provider.provider !== 'auto' ? {} : { autoOn, onSetAutoOn: (enabled: boolean) => { void setAuto(enabled) } }}
+          {...provider.provider !== 'workbuddy' ? {} : { onCheckin: (account: string) => { void checkin(provider.provider, account) } }}
         />
       ))}
     </div>

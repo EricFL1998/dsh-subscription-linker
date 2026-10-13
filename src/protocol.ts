@@ -30,6 +30,7 @@ export const RPC_ENDPOINTS = [
   'reload',
   'auto-state',
   'setAutoOn',
+  'checkin',
   'deepseek-balance',
   'ccswitch-balance',
   'model-variants',
@@ -175,6 +176,8 @@ export interface ProviderUsage {
   renewsAt?: number
   /** Metered allowances, most relevant first. */
   windows: readonly UsageWindow[]
+  /** Daily check-in state, when the provider states one. */
+  checkin?: { active: boolean, todayCheckedIn: boolean, streakDays: number, todayCredit: number }
   /** Epoch milliseconds these figures were read. */
   fetchedAt: number
   /**
@@ -320,6 +323,7 @@ export interface RpcMap {
   reload: { payload: undefined, value: SubscriptionStatus }
   'auto-state': { payload: undefined, value: AutoStateResult }
   setAutoOn: { payload: SetAutoOnRequest, value: AutoStateResult }
+  checkin: { payload: CheckinRequest, value: CheckinResult }
   'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
   'model-variants': { payload: ModelVariantsRequest, value: ModelVariantsResult }
@@ -388,6 +392,19 @@ export interface SetAutoOnRequest {
 /** Result of `setAutoOn`: the `auto` provider's live enabled state. */
 export interface AutoStateResult {
   enabled: boolean
+}
+
+/** Payload of `checkin`: which account claims today's reward. */
+export interface CheckinRequest {
+  provider: string
+  account: string
+}
+
+/** Result of `checkin`: the credit granted and the streak after claiming. */
+export interface CheckinResult {
+  credit: number
+  streakDays: number
+  already: boolean
 }
 
 /** Payload of `deepseek-balance`. */

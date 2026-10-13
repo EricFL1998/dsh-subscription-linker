@@ -360,6 +360,14 @@ export interface WorkBuddyUsageWindow {
   resetsAt?: number
 }
 
+/** The account's check-in state, from the billing activity endpoint. */
+export interface WorkBuddyCheckin {
+  active: boolean
+  todayCheckedIn: boolean
+  streakDays: number
+  todayCredit: number
+}
+
 /** A capacity the billing API sends, as a string or number; empty is 0. */
 function capacity(value: unknown): number {
   if (value === null || value === undefined || value === '') return 0
@@ -410,13 +418,41 @@ async function workbuddyMeter(
   return isRecord(env.data) ? env.data : null
 }
 
+/** Read the account's daily check-in state, without changing anything. */
+export async function readWorkBuddyCheckin(
+  token: WorkBuddyTokenSet,
+  fetchFn: typeof fetch,
+): Promise<WorkBuddyCheckin> {
+  const data = await workbuddyMeter(token, '/billing/meter/checkin-activity-status', {}, fetchFn)
+  if (data === null) return { active: false, todayCheckedIn: false, streakDays: 0, todayCredit: 0 }
+  const num = (key: string): number => typeof data[key] === 'number' ? data[key] : 0
+  return {
+    active: data.active === true,
+    todayCheckedIn: data.today_checked_in === true,
+    streakDays: num('streak_days'),
+    todayCredit: num('today_credit'),
+  }
+}
+
+/** Claim today's check-in reward; resolves with the credit granted and the streak. */
+export async function claimWorkBuddyCheckin(
+  token: WorkBuddyTokenSet,
+  fetchFn: typeof fetch,
+): Promise<{ credit: number, streakDays: number }> {
+  const data = await workbuddyMeter(token, '/billing/meter/daily-checkin', {}, fetchFn)
+  if (data === null) return { credit: 0, streakDays: 0 }
+  const num = (key: string): number => typeof data[key] === 'number' ? data[key] : 0
+  return { credit: num('credit'), streakDays: num('streak_days') }
+}
+
 /** The account's credits from its resource summary: the plan's used against granted. */
 function usageOfSummary(summary: Record<string, unknown> | null, plan: string | undefined): {
   plan: string
   windows: WorkBuddyUsageWindow[]
+  checkin?: WorkBuddyCheckin
 } {
   const isPaid = summary?.IsPaidUser === true
-  const out: { plan: string, windows: WorkBuddyUsageWindow[] } = { plan: plan ?? (isPaid ? 'Pro' : 'Free'), windows: [] }
+  const out: { plan: string, windows: WorkBuddyUsageWindow[], checkin?: WorkBuddyCheckin } = { plan: plan ?? (isPaid ? 'Pro' : 'Free'), windows: [] }
   let total = 0
   let used = 0
   const packages = Array.isArray(summary?.Packages) ? summary.Packages.filter(isRecord) : []
@@ -456,7 +492,7 @@ export async function readWorkBuddyUsage(
   token: WorkBuddyTokenSet,
   plan: string | undefined,
   fetchFn: typeof fetch,
-): Promise<{ plan: string, windows: WorkBuddyUsageWindow[] }> {
+): Promise<{ plan: string, windows: WorkBuddyUsageWindow[], checkin?: WorkBuddyCheckin }> {
   const summary = await workbuddyMeter(token, '/billing/meter/get-user-resource-summary', {}, fetchFn)
   const out = usageOfSummary(summary, plan)
   // An enterprise account's summary has no packages: its credits are the enterprise meter's.
@@ -464,11 +500,18 @@ export async function readWorkBuddyUsage(
     try {
       const enterprise = enterpriseUsageOf(await workbuddyMeter(token, '/billing/meter/get-enterprise-user-usage', {}, fetchFn))
       if (enterprise !== null) {
-        return { plan: plan ?? 'Enterprise', windows: [enterprise] }
+        out.windows = [enterprise]
+        out.plan = plan ?? 'Enterprise'
       }
     } catch {
       // The personal-account refusal (10001) leaves the card as the summary said.
     }
+  }
+  // Fold the check-in state in beside the credits: the card shows today's status and streak.
+  try {
+    out.checkin = await readWorkBuddyCheckin(token, fetchFn)
+  } catch {
+    // A check-in read failure never hides the credits.
   }
   return out
 }

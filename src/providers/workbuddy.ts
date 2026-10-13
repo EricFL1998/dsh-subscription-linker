@@ -98,7 +98,7 @@ interface ChatChunk {
     }
     index?: number
   }[]
-  usage?: { prompt_tokens?: number, completion_tokens?: number, total_tokens?: number }
+  usage?: { prompt_tokens?: number, completion_tokens?: number, total_tokens?: number, credit?: number }
 }
 
 /** Constructor dependencies for {@link WorkBuddyAdapter}. */

@@ -56,6 +56,8 @@ export interface ProviderRoute {
   removeModel(id: string): Promise<ProviderStatus>
   usage(force?: boolean): Promise<ProviderUsageResult>
   reload(): Promise<ProviderStatus>
+  /** Claim one account's daily check-in reward, when the route has one. */
+  checkin?(account: string): Promise<{ credit: number, streakDays: number, already: boolean }>
   /** Fast and image variants for one model, when the route's discovery reported them. */
   modelVariants?(id: string): Promise<ModelVariants | undefined> | ModelVariants | undefined
 }
@@ -223,5 +225,12 @@ export class SubscriptionRegistry {
   async setAutoOn(enabled: boolean): Promise<{ enabled: boolean }> {
     await this.preferences.setAutoOn(enabled)
     return { enabled }
+  }
+
+  /** Claim one account's daily check-in reward, when the route supports it. */
+  async checkin(provider: string, account: string): Promise<{ credit: number, streakDays: number, already: boolean }> {
+    const route = this.route(provider)
+    if (route.checkin === undefined) throw new ProviderError(`${provider} has no check-in`, BAD_REQUEST)
+    return route.checkin(account)
   }
 }

@@ -18,6 +18,7 @@ import {
   startWorkBuddySignIn,
   workbuddyRefreshable,
   workbuddyStale,
+  claimWorkBuddyCheckin,
   WORKBUDDY_EARLY_MS,
   type WorkBuddySession,
   type WorkBuddyTokenSet,
@@ -211,7 +212,7 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
       const held = await store.get(account)
       if (held === undefined) return undefined
       const read = await readWorkBuddyUsage(tokenOf(held), held.accountId, fetchFn)
-      return { plan: read.plan, windows: read.windows }
+      return { plan: read.plan, windows: read.windows, ...read.checkin === undefined ? {} : { checkin: read.checkin } }
     },
     details: () => [
       { key: 'provider', value: WORKBUDDY_PROVIDER_NAME },
@@ -249,5 +250,18 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
     removeModel: (id: string) => controller.removeModel(id),
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
+    checkin: async (account: string) => {
+      const held = await store.get(account)
+      if (held === undefined) throw new ProviderError('WorkBuddy account not signed in', REAUTH_REQUIRED)
+      try {
+        const claim = await claimWorkBuddyCheckin(tokenOf(held), fetchFn)
+        return { credit: claim.credit, streakDays: claim.streakDays, already: claim.credit === 0 }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // An already-claimed check-in is a normal answer, not a failure.
+        if (/already|已签到/i.test(message)) return { credit: 0, streakDays: 0, already: true }
+        throw new ProviderError(`WorkBuddy check-in failed: ${message}`, REAUTH_REQUIRED)
+      }
+    },
   }
 }
