@@ -424,6 +424,19 @@ export const fastModeCss = `
 .dsh-subscription-fast-mode:hover {
   background: var(--dsw-alias-interactive-bg-hover, #ffffff14);
 }
+/* A click has to look like one, even before the selection lands. */
+.dsh-subscription-fast-mode:active {
+  background: var(--dsw-alias-interactive-bg-pressed, #ffffff2e);
+}
+.dsh-subscription-fast-mode[data-pending="true"] {
+  opacity: 0.7;
+  cursor: progress;
+}
+/* A switch the host refused is marked rather than left looking merely off, so a failure
+   is visible where it happened; the reason rides the title and the console. */
+.dsh-subscription-fast-mode[data-failed="true"] {
+  color: var(--dsw-alias-state-error-primary, #b42318);
+}
 .dsh-subscription-fast-mode:focus-visible {
   outline: 2px solid var(--dsw-alias-border-focus, #4d6bfe);
   outline-offset: 1px;
