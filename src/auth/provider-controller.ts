@@ -334,6 +334,8 @@ export class ProviderController<S extends SessionBase> {
       await this.options.store.save(account ?? accountKeyOf(settled), settled)
       this.lastError = undefined
       // A fresh login can reveal models this build has not seen yet.
+      // Discovery uses the stored token directly (no resolve), so it never opens
+      // the browser from here.
       await this.discover(true)
     } catch (error: unknown) {
       if (isCancellation(error)) return
