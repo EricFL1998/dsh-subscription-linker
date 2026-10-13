@@ -64,6 +64,19 @@ function modelInfo(raw: unknown): ModelInfo {
   }
 }
 
+/** A model id whose suffix fixes its reasoning tier, not a ladder the picker offers. */
+const TIER_SUFFIXED = /-(?:low|medium|high|extra-low|max)$/i
+
+/** True when a model id names a specific tier of a family, not a model with a ladder. */
+export function isTierSuffixed(id: string): boolean {
+  return TIER_SUFFIXED.test(id)
+}
+
+/** The base family a tier-suffixed id belongs to (`gemini-3.5-flash-low` → `gemini-3.5-flash`). */
+export function baseFamilyOf(id: string): string {
+  return id.replace(/-(?:extra-low|low|medium|high|max)$/i, '')
+}
+
 /** Antigravity's own reasoning ladder, per model family. */
 export function antigravityEffortsFor(model: string): readonly string[] {
   if (/^claude-/.test(model)) return ['low', 'medium', 'high', 'max']
@@ -171,8 +184,27 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
     )
   } catch { /* diagnostics never break parsing */ }
   const entries: CatalogEntry[] = []
+  const seenBase = new Set<string>()
   for (const wireId of agentIds(payload)) {
     const info = modelInfo(models[wireId])
+    // Tier-suffixed ids (gemini-3.5-flash-low, …-high) are the family's fixed tiers;
+    // they fold into the base family row so the picker shows one entry with a ladder,
+    // not one row per tier. The base row is inserted the first time a tier of it is seen.
+    if (isTierSuffixed(wireId)) {
+      const base = baseFamilyOf(wireId)
+      if (seenBase.has(base)) continue
+      seenBase.add(base)
+      const baseInfo = modelInfo(models[base]) ?? info
+      entries.push({
+        id: base,
+        name: displayNameOf(base, models[base] as Record<string, unknown> ?? {}),
+        contextWindow: baseInfo.maxTokens ?? baseInfo.maxInputTokens ?? baseInfo.inputTokenLimit ?? 1_048_576,
+        inputModalities: baseInfo.supportsImages === true ? ['text', 'image'] : ['text'],
+        reasoningEfforts: antigravityEffortsFor(base),
+      })
+      continue
+    }
+    seenBase.add(wireId)
     const tiers = /-(?:low|medium|high)$/.test(wireId)
     const efforts = tiers ? [] : antigravityEffortsFor(wireId)
     const contextWindow = info.maxTokens ?? info.maxInputTokens ?? info.inputTokenLimit ?? 1_048_576
