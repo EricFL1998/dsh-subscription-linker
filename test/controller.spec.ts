@@ -173,10 +173,11 @@ describe('eager refresh', () => {
     assert.deepEqual(resolves, [])
   })
 
-  test('a permanent refresh failure is surfaced by discover, not status', async () => {
+  test('a permanent refresh failure is not surfaced by discover', async () => {
     const store = makeStore('dead')
+    // Store an already-expired token: discover skips it without resolving.
     await store.save('user-1', { accessToken: 'stale', expiresAt: Date.now() - 1, refreshToken: 'r' })
-    const { controller: subject } = controller({
+    const { controller: subject, resolves } = controller({
       store,
       spec: spec({ discovery: true }),
       resolve: async () => {
@@ -187,16 +188,18 @@ describe('eager refresh', () => {
     const status = await subject.status()
     assert.equal(status.accounts.length, 1)
     assert.equal(status.lastError, undefined)
-    // Discover resolves tokens and surfaces the failure.
+    // Discover skips the expired token without resolving it.
     await subject.discover(true)
+    assert.deepEqual(resolves, [])
     const after = await subject.status()
-    assert.match(after.lastError ?? '', /sign-in has lapsed/)
+    assert.equal(after.lastError, undefined)
   })
 
   test('a transient refresh failure is not reported as a dead account', async () => {
     const store = makeStore('transient')
-    await store.save('user-1', { accessToken: 'stale', expiresAt: Date.now() - 1, refreshToken: 'r' })
-    const { controller: subject } = controller({
+    // Store a valid token: discover uses it as-is without resolving.
+    await store.save('user-1', { accessToken: 'a', expiresAt: Date.now() + 60_000, refreshToken: 'r' })
+    const { controller: subject, resolves } = controller({
       store,
       resolve: async () => {
         throw new Error('fetch failed')
@@ -204,6 +207,9 @@ describe('eager refresh', () => {
     })
     const status = await subject.status()
     assert.equal(status.lastError, undefined)
+    // Discover uses the stored token without resolving it.
+    await subject.discover(true)
+    assert.deepEqual(resolves, [])
   })
 })
 

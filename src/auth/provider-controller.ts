@@ -405,23 +405,21 @@ export class ProviderController<S extends SessionBase> {
     // A logged-out install has nothing to discover, and warning about it on
     // every startup would be noise.
     if (!await this.options.store.hasAny()) return this.status()
-    // The catalog is the union of every signed-in account's live list, because one
-    // model id draws on the whole pool: a model any account can serve must appear, and
-    // which account answers at call time is the scheduler's choice. A model only the
-    // non-default account has is offered, then may fall through to it on dispatch.
+    // Discovery resolves tokens to read the model list, but a resolve must never
+    // open the browser: a transient network failure, or a token the endpoint refuses
+    // while still being within its stored expiry, is not a signal to start a login.
+    // Only an explicit user action (the connect button) opens the consent page.
     const discovered: string[] = []
     for (const account of Object.keys(await this.options.store.list())) {
-      let accessToken: string
-      try {
-        accessToken = (await this.options.tokens.resolve(account)).accessToken
-      } catch (error: unknown) {
-        if (isReauthRequired(error) || isDeadGrant(messageOf(error))) {
-          this.lastError = `${spec.displayName} sign-in has lapsed; connect again`
-        }
-        this.options.onWarn?.(`${spec.id} model discovery for ${account} skipped: ${messageOf(error)}`)
+      let session = await this.options.store.get(account)
+      if (session === undefined) continue
+      // A token that is still within its stored expiry is used as-is; a lapsed one
+      // is a silent skip (the route works, the catalog is just not refreshed).
+      if (session.expiresAt <= Date.now()) {
+        this.options.onWarn?.(`${spec.id} model discovery for ${account} skipped: token expired`)
         continue
       }
-      const ids = await spec.discover(accessToken)
+      const ids = await spec.discover(session.accessToken)
       if (ids !== undefined) {
         for (const id of ids) if (!discovered.includes(id)) discovered.push(id)
       }
