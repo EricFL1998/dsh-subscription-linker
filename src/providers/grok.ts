@@ -437,7 +437,9 @@ export class GrokAdapter extends LlmAdapter {
     if (await this.options.tokens.session() === undefined) return []
     await this.syncUserModels()
     const hidden = await this.hidden()
-    return resolveCatalog(this.catalog(), [], hidden).entries.map((entry) => ({
+    // Image models are never picker rows: they are agent-called, always on.
+    const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
+    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({
       provider: GROK_PROVIDER_ID,
       id: entry.id,
       name: entry.name,
