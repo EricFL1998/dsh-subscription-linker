@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
-import { parseAntigravitySession, fetchAntigravityModels, refreshAntigravityToken } from '../lib/providers/antigravity.js'
+import { parseAntigravitySession, fetchAntigravityModels } from '../lib/providers/antigravity.js'
 
 const storePath = path.join(homedir(), '.dsh', 'plugins', 'kimi-oauth', 'auth.json')
 const raw = await readFile(storePath, 'utf8')
@@ -22,6 +22,7 @@ for (const key of Object.keys(accounts)) {
   let accessToken = parsed.accessToken
   if (parsed.expiresAt <= Date.now()) {
     try {
+      const { refreshAntigravityToken } = await import('../lib/providers/antigravity.js')
       const refreshed = await refreshAntigravityToken({ fetchFn: fetch, refreshToken: accounts[key].refreshToken })
       accessToken = refreshed.accessToken
       console.log('token refreshed')
@@ -39,20 +40,18 @@ for (const key of Object.keys(accounts)) {
   const rawIds = Object.keys(rawModels)
   const ids = result.entries.map((entry) => entry.id)
   console.log('RAW:', rawIds.length, 'KEPT:', ids.length)
-  console.log('RAW ids:', rawIds.join(', '))
   console.log('KEPT ids:', ids.join(', '))
   console.log('DROPPED:', rawIds.filter((id) => !ids.includes(id)).join(', ') || '(none)')
-  // Dump every model's provider + apiProvider + displayName so the callable grouping is visible.
-  console.log('\nper-model provider/apiProvider:')
-  for (const id of rawIds) {
-    const m = rawModels[id]
-    if (m && typeof m === 'object') {
-      console.log(`  ${id}: provider=${m.modelProvider} api=${m.apiProvider} name=${m.displayName}`)
-    }
-  }
+  // Flag which dropped ids are image / fast variants.
+  const IMAGEish = /(?:^|[-_])(?:image|imagine|flash-image|draw|pic|photo)/i
+  const FASTish = /(?:^|[-_])(?:fast|lightspeed|turbo|quick)/i
+  const imageDropped = rawIds.filter((id) => !ids.includes(id) && IMAGEish.test(id))
+  const fastDropped = rawIds.filter((id) => !ids.includes(id) && FASTish.test(id))
+  console.log('image-like dropped:', imageDropped.join(', ') || '(none)')
+  console.log('fast-like dropped:', fastDropped.join(', ') || '(none)')
   await writeFile(
     path.join(homedir(), '.dsh', `antigravity-live-models-${key.replace(/[^a-z0-9]/gi, '_')}.json`),
-    JSON.stringify({ account: key, projectId: parsed.projectId, raw: rawIds, kept: ids, models: rawModels }, null, 2),
+    JSON.stringify({ account: key, projectId: parsed.projectId, raw: rawIds, kept: ids, imageDropped, fastDropped }, null, 2),
     'utf8',
   )
 }

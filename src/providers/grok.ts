@@ -355,6 +355,19 @@ interface GrokCliMetadata {
 /** Model ids that are clearly not chat models. */
 const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
 
+/** Model ids that are the fast/lightspeed variant of a base model, matched per base. */
+const FAST_VARIANT = /(?:^|[-_])(?:fast|lightspeed|turbo|quick)$/i
+
+/** True when a model id names a fast/lightspeed variant of a base model. */
+export function isFastVariant(id: string): boolean {
+  return FAST_VARIANT.test(id)
+}
+
+/** The base model id a fast variant belongs to (`grok-4.7-fast` → `grok-4.7`). */
+export function baseModelOf(id: string): string {
+  return id.replace(FAST_VARIANT, '')
+}
+
 /** Constructor dependencies for {@link GrokAdapter}. */
 export interface GrokAdapterOptions {
   /** API base; `<base>/responses` and `<base>/models`. */
@@ -650,13 +663,18 @@ export class GrokAdapter extends LlmAdapter {
         return undefined
       }
       const payload = await response.json() as { data?: { id?: unknown }[] }
+      // Fast/lightspeed variants ride with their base model: they share the base's
+      // visibility switch and are reached by a picker button, not a separate row.
       const ids = (payload.data ?? [])
         .map((entry) => entry.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0 && !NON_CHAT_ID.test(id))
+        .map((id) => (isFastVariant(id) ? baseModelOf(id) : id))
+        .filter((id, index, list) => list.indexOf(id) === index)
       if (ids.length === 0) {
         this.options.onWarn?.('xAI model discovery returned an empty catalog; using the built-in catalog')
         return undefined
       }
+      // Keep the fast-variant ids discoverable for the picker button, keyed by their base.
       const metadata = await this.fetchCliMetadata(fetchFn, signal)
       for (const [id, meta] of metadata) this.metadata.set(id, meta)
       return ids
