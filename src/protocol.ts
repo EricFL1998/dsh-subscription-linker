@@ -318,7 +318,7 @@ export interface RpcMap {
   reload: { payload: undefined, value: SubscriptionStatus }
   'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
-  'model-variants': { payload: DiscoverRequest, value: ModelVariantsResult }
+  'model-variants': { payload: ModelVariantsRequest, value: ModelVariantsResult }
 }
 
 /** One currency's wallet balance, as the platform reports it. */
@@ -354,6 +354,12 @@ export interface ModelVariants {
 
 /** Result of `model-variants`: the variants for one model id. */
 export type ModelVariantsResult = ModelVariants | undefined
+
+/** Payload of `model-variants`. */
+export interface ModelVariantsRequest {
+  provider: string
+  id: string
+}
 
 /** Payload of `deepseek-balance`. */
 export interface DeepSeekBalanceRequest {

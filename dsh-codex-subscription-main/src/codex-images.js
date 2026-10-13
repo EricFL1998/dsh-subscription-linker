@@ -1,0 +1,530 @@
+import { readSubscriptionCredentials } from './subscription-credentials.js'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { ORIGINAL_IMAGE_SCHEMA_VERSION } from './image-original-contract.js'
+import { USER_AGENT } from './version.js'
+import { IMAGE_MODELS, resolveImageModel, validateImageQuality } from './image-models.js'
+import { assertImageOperation, readImageDefaults } from './image-features.js'
+
+export const CODEX_IMAGE_TOOL_NAME = 'codex_image_generate'
+export const CODEX_IMAGE_GENERATION_URL = 'https://chatgpt.com/backend-api/codex/images/generations'
+export const CODEX_IMAGE_EDIT_URL = 'https://chatgpt.com/backend-api/codex/images/edits'
+
+const MAX_REFERENCE_IMAGES = 5
+const RESPONSE_ENVELOPE_BYTES = 1024 * 1024
+const IMAGE_BACKGROUNDS = new Set(['auto', 'transparent', 'opaque'])
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const FULL_ATTACHMENT_ID = /^sha256:[0-9a-f]{64}$/u
+const BARE_ATTACHMENT_DIGEST = /^[0-9a-f]{64}$/iu
+const PATH_LIKE_ATTACHMENT_ID = /[\\/]/u
+const FILE_NAME_ATTACHMENT_ID = /\.[A-Za-z0-9]{1,16}$/u
+
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const nonEmpty = value => typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+
+const NETWORK_REASONS = {
+  UND_ERR_HEADERS_TIMEOUT: 'the image service sent no response within 5 minutes',
+  UND_ERR_BODY_TIMEOUT: 'the image response stalled',
+  UND_ERR_CONNECT_TIMEOUT: 'the connection to the image service timed out',
+  UND_ERR_SOCKET: 'the connection closed unexpectedly',
+  ECONNRESET: 'the connection was reset',
+  ETIMEDOUT: 'the connection timed out',
+  ENOTFOUND: 'DNS lookup failed',
+  ECONNREFUSED: 'the connection was refused',
+  EAI_AGAIN: 'DNS lookup failed',
+}
+
+// A network-level failure carries no HTTP status, so say what the transport reported.
+// Only a bounded error code is shown; no URL, header, or body can leak through it.
+export function requestFailureReason(error) {
+  const source = error?.cause ?? error
+  const code = [source?.code, error?.code].find(value => typeof value === 'string' && /^[A-Z][A-Z0-9_]{2,39}$/u.test(value))
+  if (code !== undefined) return `: ${NETWORK_REASONS[code] ?? 'network error'} (${code})`
+  if (error?.name === 'TimeoutError') return ': the image request timed out'
+  return ''
+}
+
+export function normalizeImageOptions(args) {
+  const quality = nonEmpty(args?.quality) ?? 'auto'
+  const background = nonEmpty(args?.background) ?? 'auto'
+  const size = nonEmpty(args?.size) ?? 'auto'
+  validateImageQuality(resolveImageModel(args?.model), quality)
+  if (!IMAGE_BACKGROUNDS.has(background)) throw new Error('background must be auto, transparent, or opaque')
+  if (size !== 'auto') {
+    const match = /^(\d+)x(\d+)$/u.exec(size)
+    const width = Number(match?.[1])
+    const height = Number(match?.[2])
+    const short = Math.min(width, height)
+    const long = Math.max(width, height)
+    const pixels = width * height
+    if (match === null || width % 16 !== 0 || height % 16 !== 0 || long > 3840 || long > short * 3
+      || pixels < 655_360 || pixels > 8_294_400) {
+      throw new Error('size must be auto or a valid GPT Image 2 widthxheight resolution')
+    }
+  }
+  return { quality, background, size }
+}
+
+function encodedLimit(decodedBytes) {
+  return Math.ceil(decodedBytes / 3) * 4
+}
+
+function validBase64Body(value, end) {
+  for (let index = 0; index < end; index += 1) {
+    const code = value.charCodeAt(index)
+    if (!((code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || (code >= 48 && code <= 57)
+      || code === 43
+      || code === 47)) return false
+  }
+  return true
+}
+
+async function readJsonWithin(response, maximumBytes) {
+  const contentLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+    throw new Error('Codex image response exceeds the image size limit')
+  }
+  if (response.body === null) throw new Error('Codex returned an unreadable image response')
+  const reader = response.body.getReader()
+  const chunks = []
+  let bytes = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value.byteLength
+    if (bytes > maximumBytes) {
+      await reader.cancel()
+      throw new Error('Codex image response exceeds the image size limit')
+    }
+    chunks.push(value)
+  }
+  const body = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)), bytes).toString('utf8')
+  try {
+    return JSON.parse(body)
+  } catch {
+    throw new Error('Codex returned an unreadable image response')
+  }
+}
+
+/** Strictly decode one PNG returned by the subscription backend. */
+export function decodeCodexPng(value, maximumBytes) {
+  const encoded = nonEmpty(value)
+  const padding = encoded?.endsWith('==') ? 2 : encoded?.endsWith('=') ? 1 : 0
+  if (encoded === undefined || encoded.length % 4 !== 0
+    || !validBase64Body(encoded, encoded.length - padding)) {
+    throw new Error('Codex returned an invalid base64 PNG')
+  }
+  const decodedBytes = (encoded.length / 4) * 3 - padding
+  if (decodedBytes > maximumBytes) throw new Error('Codex image exceeds the image size limit')
+  const data = Buffer.from(encoded, 'base64')
+  if (data.length !== decodedBytes || data.length < PNG_SIGNATURE.length
+    || !data.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+    throw new Error('Codex returned an invalid PNG')
+  }
+  return new Uint8Array(data)
+}
+
+function imageReference(value) {
+  const originalDimensions = record(value.originalDimensions)
+    ? { width: value.originalDimensions.width, height: value.originalDimensions.height }
+    : undefined
+  return {
+    attachmentId: value.attachmentId,
+    mediaType: value.mediaType,
+    bytes: value.bytes,
+    width: value.width,
+    height: value.height,
+    ...(value.name === undefined ? {} : { name: value.name }),
+    ...(originalDimensions === undefined ? {} : { originalDimensions }),
+  }
+}
+
+function normalizeAttachmentId(value) {
+  if (typeof value !== 'string') return undefined
+  if (FULL_ATTACHMENT_ID.test(value)) return value
+  const bare = BARE_ATTACHMENT_DIGEST.exec(value)
+  return bare === null ? undefined : `sha256:${bare[0].toLowerCase()}`
+}
+
+function invalidAttachmentId(value) {
+  const attachmentId = value?.attachmentId
+  if (typeof attachmentId === 'string'
+    && (PATH_LIKE_ATTACHMENT_ID.test(attachmentId) || FILE_NAME_ATTACHMENT_ID.test(attachmentId))) {
+    throw new Error('referenceImages attachmentId is a file path or filename; call read_image on that file and retry with its complete sha256:<64 lowercase hex> attachment reference. Do not omit referenceImages or fall back to new image generation.')
+  }
+  throw new Error('referenceImages attachmentId must be sha256:<64 lowercase hex> copied from an image block or read_image result. Do not omit referenceImages or fall back to new image generation.')
+}
+
+function referenceOf(value, attachments) {
+  const attachmentId = normalizeAttachmentId(value?.attachmentId)
+  if (attachmentId === undefined) invalidAttachmentId(value)
+  if (!record(value)
+    || !attachments.imageLimits.mediaTypes.includes(value.mediaType)
+    || !Number.isSafeInteger(value.bytes) || value.bytes <= 0
+    || !Number.isSafeInteger(value.width) || value.width <= 0
+    || !Number.isSafeInteger(value.height) || value.height <= 0
+    || (value.name !== undefined && (typeof value.name !== 'string' || value.name.length > 256))
+    || (value.originalDimensions !== undefined && (!record(value.originalDimensions)
+      || !Number.isSafeInteger(value.originalDimensions.width) || value.originalDimensions.width <= 0
+      || !Number.isSafeInteger(value.originalDimensions.height) || value.originalDimensions.height <= 0))) {
+    throw new Error('referenceImages contains an invalid image reference')
+  }
+  return imageReference({ ...value, attachmentId })
+}
+
+function sessionImageReferences(messages) {
+  const references = new Map()
+  const visit = content => {
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (block?.type === 'image' && record(block.attachment)) {
+        const id = normalizeAttachmentId(block.attachment.attachmentId)
+        if (id !== undefined) references.set(id, block.attachment)
+      } else if (block?.type === 'tool-result') visit(block.content)
+    }
+  }
+  for (const message of messages ?? []) visit(message?.content)
+  return references
+}
+
+// One image the user attached to this session, resolved from its attachmentId like an edit reference.
+export async function readSessionImage(attachmentId, attachments, signal, messages) {
+  const id = normalizeAttachmentId(attachmentId)
+  if (id === undefined) invalidAttachmentId({ attachmentId })
+  const selected = sessionImageReferences(messages).get(id)
+  if (selected === undefined) throw new Error('The selected image attachment cannot be found in the current session. Copy attachmentId from the image block of the user message; never pass a path or filename.')
+  const stored = await attachments.readImage(referenceOf(selected, attachments), signal)
+  return { data: stored.data, mediaType: stored.ref.mediaType, name: stored.ref.name }
+}
+
+async function editImages(values, attachments, signal, messages) {
+  if (!Array.isArray(values) || values.length === 0 || values.length > MAX_REFERENCE_IMAGES) {
+    throw new Error(`referenceImages must contain between 1 and ${MAX_REFERENCE_IMAGES} images; omit it to generate a new image`)
+  }
+  const available = messages === undefined ? undefined : sessionImageReferences(messages)
+  const references = values.map(value => {
+    const id = normalizeAttachmentId(value?.attachmentId)
+    if (id === undefined) invalidAttachmentId(value)
+    if (available === undefined) return referenceOf(value, attachments)
+    const selected = available.get(id)
+    if (selected === undefined) {
+      throw new Error('The selected image attachment cannot be found in the current session. Call read_image on the intended image and retry with its returned reference. Do not omit referenceImages or substitute another image.')
+    }
+    return referenceOf(selected, attachments)
+  })
+  if (new Set(references.map(value => value.attachmentId)).size !== references.length) {
+    throw new Error('referenceImages must not contain duplicates')
+  }
+  const images = []
+  let totalBytes = 0
+  for (const reference of references) {
+    const stored = await attachments.readImage(reference, signal)
+    totalBytes += stored.data.byteLength
+    if (totalBytes > attachments.imageLimits.maxMessageImageBytes) {
+      throw new Error('referenceImages exceed the DSH message image limit')
+    }
+    images.push({
+      image_url: `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`,
+    })
+  }
+  return images
+}
+
+function imageContent(value) {
+  const label = typeof value.size === 'string' && value.size.length > 0
+    ? `Generated a ${value.size} image.`
+    : 'Generated an image.'
+  return [
+    { type: 'text', text: value.localPath === undefined ? label : `${label}\nOriginal PNG saved on the DSH host at: ${JSON.stringify(value.localPath)}. Read this file or copy it to the workspace with a .png extension; this host path is not a browser URL. The image is already shown to the user, so do not embed it again; copy it rather than move it, and leave the original in place unless the user asks you to delete it.` },
+    { type: 'image', attachment: imageReference(value.image) },
+  ]
+}
+
+function imageOutputSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      image: {
+        type: 'object',
+        required: true,
+        additionalProperties: false,
+        properties: {
+          attachmentId: { type: 'string', required: true },
+          mediaType: { type: 'string', enum: ['image/png'], required: true },
+          bytes: { type: 'integer', required: true },
+          width: { type: 'integer', required: true },
+          height: { type: 'integer', required: true },
+          name: { type: 'string' },
+          originalDimensions: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              width: { type: 'integer', required: true },
+              height: { type: 'integer', required: true },
+            },
+          },
+        },
+      },
+      original: {
+        type: 'object',
+        required: true,
+        additionalProperties: false,
+        properties: {
+          assetId: { type: 'string', required: true },
+          mediaType: { type: 'string', enum: ['image/png'], required: true },
+          bytes: { type: 'integer', required: true },
+          width: { type: 'integer', required: true },
+          height: { type: 'integer', required: true },
+          name: { type: 'string', required: true },
+          sha256: { type: 'string', required: true },
+        },
+      },
+      background: { type: 'string' },
+      requestedModel: { type: 'string' },
+      reportedModel: { type: 'string' },
+      requestedSize: { type: 'string' },
+      localPath: { type: 'string', required: true, description: 'Absolute path to the original PNG on the DSH host.' },
+      quality: { type: 'string' },
+      size: { type: 'string' },
+    },
+  }
+}
+
+const SUPPORT_ID = /^[A-Za-z0-9._-]{1,80}$/u
+
+/** The request id Codex returns for an image call, kept on failures so a report can be traced. */
+function supportId(response) {
+  const id = response.headers?.get?.('x-codex-imagegen-request-id')
+  return typeof id === 'string' && SUPPORT_ID.test(id) ? ` (request ${id})` : ''
+}
+
+/** What a 429 from the image endpoint says: when the limit resets, when the response tells us. */
+async function limitMessage(response, now = Date.now()) {
+  const fallback = 'Codex image generation quota is unavailable'
+  let error
+  try { error = JSON.parse(await readTextWithin(response, 16 * 1024))?.error } catch { return fallback }
+  if (!record(error)) return fallback
+  const at = Number.isSafeInteger(error.resets_at) && error.resets_at > 0 ? error.resets_at * 1000
+    : Number.isSafeInteger(error.resets_in_seconds) && error.resets_in_seconds > 0 ? now + error.resets_in_seconds * 1000 : undefined
+  if (at === undefined) return fallback
+  const minutes = Math.max(1, Math.ceil((at - now) / 60_000))
+  return `Codex image generation limit reached; it resets in about ${minutes >= 120 ? `${Math.round(minutes / 60)} hours` : `${minutes} minutes`}`
+}
+
+async function readTextWithin(response, maximumBytes) {
+  if (response.body === null || response.body === undefined) return ''
+  const reader = response.body.getReader()
+  const chunks = []
+  let bytes = 0
+  while (bytes < maximumBytes) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value.byteLength
+    chunks.push(value)
+  }
+  await reader.cancel().catch(() => {})
+  return Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8').slice(0, maximumBytes)
+}
+
+function responseMetadata(value) {
+  const data = Array.isArray(value?.data) ? value.data[0] : undefined
+  const encoded = record(data) ? data.b64_json : undefined
+  if (typeof encoded !== 'string') throw new Error('Codex returned no image data')
+  return {
+    encoded,
+    background: nonEmpty(value.background),
+    quality: nonEmpty(value.quality),
+    size: nonEmpty(value.size),
+    reportedModel: nonEmpty(value.model),
+  }
+}
+
+/** Create the DSH-native image-generation tool backed only by the ChatGPT subscription. */
+export function createCodexImageTool(options) {
+  const fetchImage = options.fetch ?? fetch
+  const attachments = options.attachments
+  return defineTool({
+    name: CODEX_IMAGE_TOOL_NAME,
+    description: 'Generate or edit images only when the user asks for image output, not when merely discussing images. Uses the signed-in Codex subscription. For a new image, omit referenceImages. For edits, copy attachmentId only from the selected session image block; the host supplies its metadata. Never call read_image for an attachmentId or attachment filename. Use read_image only for an actual local file whose reference is not already in the conversation. Never substitute paths, unrelated images, or text-only generation for an edit. For numbered annotations, include the clean source and location-reference image, preserve the requested changes and coordinates in the prompt, and remove guidance markers from the result. If the intended references cannot be identified, ask rather than guessing.',
+    parameters: {
+      model: {
+        type: 'string',
+        enum: Object.keys(IMAGE_MODELS),
+        description: 'Optional image engine, independent of the conversation model. When omitted, uses the user image setting (initially gpt-image-2). The 2.5 identifiers are experimental subscription candidates; override only when explicitly requested. Never silently retry with another model.',
+      },
+      prompt: {
+        type: 'string',
+        required: true,
+        description: 'A complete, production-ready description of the image to generate.',
+      },
+      size: {
+        type: 'string',
+        description: 'Optional GPT Image 2 output size. Use auto unless the user requests an exact valid widthxheight resolution.',
+      },
+      quality: {
+        type: 'string',
+        enum: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'],
+        description: 'Optional rendering quality. Use auto unless the user requests draft speed or final quality.',
+      },
+      background: {
+        type: 'string',
+        enum: ['auto', 'transparent', 'opaque'],
+        description: 'Optional background mode. Request transparent only when the user needs transparency.',
+      },
+      referenceImages: {
+        type: 'array',
+        description: 'Optional references to 1-5 selected images. For session images provide only attachmentId; the host resolves trusted metadata. Omit only for a new image; never drop an invalid reference to bypass editing.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            attachmentId: {
+              type: 'string',
+              required: true,
+              description: 'Copy the complete attachmentId from the image block or read_image result: sha256:<64 lowercase hex>. Never pass a workspace path, absolute path, or filename. A bare 64-character hex digest is accepted and normalized to sha256:<64 lowercase hex>.',
+            },
+            mediaType: { type: 'string', ...(typeof options.getSessionMessages !== 'function' ? {required:true} : {}) },
+            bytes: { type: 'integer', ...(typeof options.getSessionMessages !== 'function' ? {required:true} : {}) },
+            width: { type: 'integer', ...(typeof options.getSessionMessages !== 'function' ? {required:true} : {}) },
+            height: { type: 'integer', ...(typeof options.getSessionMessages !== 'function' ? {required:true} : {}) },
+            name: { type: 'string' },
+            originalDimensions: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                width: { type: 'integer', ...(typeof options.getSessionMessages !== 'function' ? {required:true} : {}) },
+                height: { type: 'integer', ...(typeof options.getSessionMessages !== 'function' ? {required:true} : {}) },
+              },
+            },
+          },
+        },
+      },
+    },
+    output: {
+      schema: imageOutputSchema(),
+      render: (_args, value) => imageContent(value),
+      presentationMeta: (_args, value) => ({
+        kind: 'codex-subscription-image',
+        schemaVersion: ORIGINAL_IMAGE_SCHEMA_VERSION,
+        original: value.original,
+        ...(value.requestedModel === undefined ? {} : { requestedModel: value.requestedModel }),
+        ...(value.reportedModel === undefined ? {} : { reportedModel: value.reportedModel }),
+        ...(value.requestedSize === undefined ? {} : { requestedSize: value.requestedSize }),
+      }),
+    },
+    timeoutMs: 5 * 60 * 1000,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      if (Array.isArray(args.referenceImages) && args.referenceImages.length === 0) {
+        const { referenceImages: _empty, ...rest } = args
+        args = rest
+      }
+      assertImageOperation(options.getFeatures?.(), args.referenceImages !== undefined)
+      const defaults = readImageDefaults(options.getFeatures?.())
+      args = { ...args, model: args.model ?? defaults.imageModel, quality: args.quality ?? defaults.imageQuality }
+      const prompt = nonEmpty(args.prompt)
+      if (prompt === undefined) throw new Error('prompt must be a non-empty string')
+      const imageOptions = normalizeImageOptions(args)
+      const { access, accountId } = await readSubscriptionCredentials(options.getAuth, options.readCredential, exec.signal)
+      if (typeof access !== 'string' || access.length === 0
+        || typeof accountId !== 'string' || accountId.length === 0) {
+        throw new Error('ChatGPT subscription is not signed in')
+      }
+      if (!attachments.imageLimits.mediaTypes.includes('image/png')) {
+        throw new Error('This DSH installation does not accept PNG image attachments')
+      }
+      const maximumBytes = Math.min(
+        attachments.imageLimits.maxImageBytes,
+        attachments.imageLimits.maxMessageImageBytes,
+      )
+      const editing = args.referenceImages !== undefined
+      const sessionMessages = editing && typeof options.getSessionMessages === 'function'
+        ? await options.getSessionMessages(exec.agent?.id)
+        : undefined
+      const images = editing
+        ? await editImages(args.referenceImages, attachments, exec.signal, sessionMessages ?? (options.getSessionMessages ? [] : undefined))
+        : undefined
+      let response
+      assertImageOperation(options.getFeatures?.(), editing)
+      try {
+        response = await fetchImage(editing ? CODEX_IMAGE_EDIT_URL : CODEX_IMAGE_GENERATION_URL, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            authorization: `Bearer ${access}`,
+            'chatgpt-account-id': accountId,
+            accept: 'application/json',
+            'content-type': 'application/json',
+            originator: 'pi',
+            'x-codex-image-turn-id': String(exec.callId),
+            'user-agent': USER_AGENT,
+          },
+          body: JSON.stringify({
+            ...(images === undefined ? {} : { images }),
+            prompt,
+            background: imageOptions.background,
+            model: resolveImageModel(args.model),
+            quality: imageOptions.quality,
+            size: imageOptions.size,
+          }),
+          signal: exec.signal,
+        })
+      } catch (error) {
+        if (exec.signal.aborted) throw exec.signal.reason
+        throw new Error(`Codex image ${editing ? 'edit' : 'generation'} request failed${requestFailureReason(error)}`, { cause: error })
+      }
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new Error('ChatGPT sign-in needs to be renewed')
+        }
+        const requestId = supportId(response)
+        if (response.status === 429) throw new Error(`${await limitMessage(response)}${requestId}`)
+        throw new Error(`Codex image ${editing ? 'edit' : 'generation'} failed (HTTP ${response.status})${requestId}`)
+      }
+      const value = await readJsonWithin(
+        response,
+        encodedLimit(maximumBytes) + RESPONSE_ENVELOPE_BYTES,
+      )
+      const metadata = responseMetadata(value)
+      const data = decodeCodexPng(metadata.encoded, maximumBytes)
+      const sessionId = exec.agent?.id
+      if (sessionId === undefined) throw new Error('Codex image generation requires a session-owned tool call')
+      const original = await options.originalImages.save(String(sessionId), data)
+      let ref
+      try {
+        ref = await attachments.saveImage({
+          data,
+          mediaType: 'image/png',
+          name: 'codex-generated.png',
+        })
+      } catch (error) {
+        await options.originalImages.remove(original)
+        throw error
+      }
+      const result = {
+        requestedModel: resolveImageModel(args.model),
+        requestedSize: imageOptions.size,
+        ...(metadata.reportedModel === undefined ? {} : { reportedModel: metadata.reportedModel }),
+        image: imageReference(ref),
+        original,
+        localPath: options.originalImages.originalPath(original.assetId),
+        ...(metadata.background === undefined ? {} : { background: metadata.background }),
+        ...(metadata.quality === undefined ? {} : { quality: metadata.quality }),
+        // The service can return different dimensions from the requested size
+        // or its response metadata. Report the persisted original's dimensions.
+        size: `${original.width}x${original.height}`,
+      }
+      if (exec.parent !== undefined) {
+        exec.deferContext(createUserMessage({
+          content: imageContent(result),
+          // The host has no shared catch-all kind: a producer declares its own.
+          source: { kind: 'codex-subscription-image' },
+        }))
+      }
+      return result
+    },
+  })
+}

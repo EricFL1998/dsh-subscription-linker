@@ -1,0 +1,1182 @@
+import { SketchLayerPanel } from './sketch-layer-panel.jsx'
+import { SketchPicturePanel } from './sketch-picture-panel.jsx'
+import { SketchControls } from './sketch-controls.jsx'
+import { newTextBounds } from './sketch-text.js'
+import { updateSketchGesture } from './sketch-gesture.js'
+import { createSketchDocumentLifecycle } from './sketch-document-lifecycle.js'
+import { createSketchOperationGate } from './sketch-operation-gate.js'
+import { exportSketchAgentFile } from './sketch-agent-export.js'
+import { SketchRunStatus } from './sketch-run-status.jsx'
+import { switchSketchToolWidth, stepSketchWidth } from './sketch-tool-widths.js'
+import { sketchShortcutAction } from './sketch-shortcuts.js'
+import { createSketchSessionState } from './sketch-session-state.js'
+import { useEffect, useRef, useState } from 'react'
+import {
+  SKETCH_SIZE,
+  MAX_SKETCH_STROKES,
+  sketchPoint
+} from './sketch-document.js'
+import {
+  changeSketchLayer,
+  strokeCount,
+  strokeHit,
+  SKETCH_RATIOS,
+  resizeSketch
+} from './sketch-layers.js'
+import { paintSketchLayers } from './sketch-layer-renderer.js'
+import { composeSketchPreview } from './sketch-preview.js'
+import { smoothStrokePoints } from './sketch-input.js'
+import { sketchDrafts } from './sketch-drafts.js'
+import { useSketchView } from './sketch-view.jsx'
+import { SketchFiles } from './sketch-files.jsx'
+import { useSketchDismiss, useSketchCursor } from './sketch-interactions.js'
+import { WorkspaceIcon } from './workspace-icons.jsx'
+import { SketchSizeControl } from './sketch-size-control.jsx'
+import {
+  identifyObjects,
+  objectId,
+  objectBounds,
+  sketchObjectSummary
+} from './sketch-objects.js'
+import {
+  applySketchCommands,
+  createSketchCommandSession,
+  MAX_SKETCH_POINTS
+} from './sketch-commands.js'
+import { createSketchAgentRun } from './sketch-agent-run.js'
+import { connectSketchAgent } from './sketch-agent-client.js'
+import { encodeSketchDocument } from './sketch-formats.js'
+export function SketchStudio({
+  open,
+  agentEnabled,
+  onOpen,
+  onClose,
+  attachSketch,
+  enabled,
+  t,
+  incoming,
+  sessionId,
+  rpc,
+  sessionState
+}) {
+  const localSession = useRef(null)
+  localSession.current ??= sessionState ?? createSketchSessionState()
+  const {
+    doc,
+    undo,
+    redo,
+    images,
+    saved,
+    dirty,
+    documentId,
+    documentRevision,
+    agentAdapter,
+    agentSession,
+    agentRun
+  } = localSession.current
+  const dialog = useRef(null),
+    canvas = useRef(null),
+    cache = useRef(new Map())
+  const active = useRef(null),
+    frame = useRef(null),
+    updateUi = useRef(false)
+  const [agentState, setAgentState] = useState(
+    agentRun.current?.state ?? 'idle'
+  )
+  const agentLocked = agentState === 'drawing'
+  const [noticeHidden, setNoticeHidden] = useState(false)
+  const [stability, setStability] = useState(0),
+    [flow, setFlow] = useState(100),
+    [picturesOpen, setPicturesOpen] = useState(false)
+  const pictureInput = useRef(null),
+    received = useRef(null)
+  const navigation = useSketchView(canvas, open)
+  const toolWidths = useRef({})
+  const [revision, redraw] = useState(0),
+    [tool, setTool] = useState('pen'),
+    [brush, setBrush] = useState('pen')
+  const [eraser, setEraser] = useState('pixel'),
+    [color, setColor] = useState('#0088ff'),
+    [width, setWidth] = useState(12)
+  const [selection, setSelection] = useState(null),
+    [textEdit, setTextEdit] = useState(null),
+    [shapesOpen, setShapesOpen] = useState(false)
+  const sizeGesture = useRef(false)
+  const [sizeMode, setSizeMode] = useState('size')
+  const showOpacity = tool !== 'eraser'
+  const opacityMode = showOpacity && sizeMode === 'opacity'
+  const selectedLayer = doc.current.layers.find(
+      (l) => l.id === selection?.layer
+    ),
+    selected = selectedLayer?.strokes.find(
+      (s, i) => objectId(s, i) === selection?.id
+    )
+  const editObject = (patch, action = 'update') => {
+    if (agentRun.current?.locked || busy || !selected) return
+    try {
+      const next = applySketchCommands(doc.current, [
+        { op: 'object', ...selection, action, patch }
+      ])
+      if (!sizeGesture.current) checkpoint()
+      doc.current = next
+      schedule()
+      if (action === 'delete') setSelection(null)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+  const pickColor = (value) => {
+    setColor(value)
+    if (selected) editObject({ color: value })
+  }
+  const chooseTool = (name, nextBrush = brush) => {
+    setWidth(
+      switchSketchToolWidth(
+        toolWidths.current,
+        { tool, brush, width },
+        { tool: name, brush: nextBrush }
+      )
+    )
+    setBrush(nextBrush)
+    setTool(name)
+    if (name !== 'select') setSelection(null)
+  }
+  const chooseBrush = (name) => chooseTool('pen', name)
+  const [fillShape, setFillShape] = useState(false)
+  const [hydrated, setHydrated] = useState(false),
+    [recovered, setRecovered] = useState(false)
+  const [restoreAttempt, retryRestore] = useState(0)
+  const [layersOpen, setLayersOpen] = useState(false),
+    [busy, setBusy] = useState(true),
+    [error, setError] = useState('')
+  const cursorRing = useRef(null)
+  const cursor = useSketchCursor(
+    canvas,
+    cursorRing,
+    width,
+    tool === 'pen' ? brush : 'pen',
+    navigation.view.scale,
+    !open ||
+      navigation.space ||
+      busy ||
+      agentLocked ||
+      tool === 'select' ||
+      tool === 'text'
+  )
+  useSketchDismiss(shapesOpen, setShapesOpen, dialog, [
+    '.codexSketchShapeMenu',
+    '.codexSketchShapeToggle'
+  ])
+  useSketchDismiss(layersOpen, setLayersOpen, dialog, [
+    '.codexSketchLayers',
+    '.codexSketchLayersToggle'
+  ])
+  useSketchDismiss(picturesOpen, setPicturesOpen, dialog, [
+    '.codexSketchPictures',
+    '.codexSketchPicturesToggle'
+  ])
+  const paint = () => {
+    if (!canvas.current) return
+    const w = doc.current.width ?? SKETCH_SIZE,
+      h = doc.current.height ?? SKETCH_SIZE
+    if (canvas.current.width !== w) canvas.current.width = w
+    if (canvas.current.height !== h) canvas.current.height = h
+    paintSketchLayers(
+      canvas.current.getContext('2d'),
+      doc.current,
+      cache.current,
+      w,
+      h,
+      active.current?.eraseStroke ? undefined : active.current?.layer,
+      images.current
+    )
+  }
+  const schedule = (ui = true) => {
+    updateUi.current ||= ui
+    if (frame.current !== null) return
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null
+      paint()
+      if (updateUi.current) {
+        updateUi.current = false
+        redraw((value) => value + 1)
+      }
+    })
+  }
+  const checkpoint = () => {
+    documentRevision.current++
+    dirty.current = true
+    undo.current.push(doc.current)
+    if (undo.current.length > 30) undo.current.shift()
+    redo.current = []
+  }
+  const change = (action, id, value) => {
+    if (busy || agentRun.current?.locked || active.current) return
+    const next = changeSketchLayer(doc.current, action, id, value)
+    if (next === doc.current) return
+    if (action !== 'select') checkpoint()
+    else documentRevision.current++
+    doc.current = next
+    setError('')
+    schedule()
+  }
+  useEffect(() => {
+    if (open) {
+      dialog.current.showModal()
+      canvas.current.width = doc.current.width ?? SKETCH_SIZE
+      paint()
+    } else dialog.current?.close()
+  }, [open])
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(frame.current)
+      cache.current.clear()
+    },
+    []
+  )
+  const { save, saveChanges, fresh, load, importImage, restore } =
+    createSketchDocumentLifecycle(localSession.current, {
+      sessionId,
+      t,
+      schedule,
+      checkpoint,
+      cache,
+      setSelection,
+      setTextEdit,
+      setRecovered
+    })
+  useEffect(() => localSession.current.retain?.(), [])
+  useEffect(() => {
+    let live = true
+    setHydrated(false)
+    setBusy(true)
+    setError('')
+    void (enabled ? restore(() => live) : Promise.resolve())
+      .then(() => {
+        if (live) {
+          setHydrated(true)
+          setBusy(false)
+        }
+      })
+      .catch((error) => {
+        if (live)
+          setError(
+            t(
+              error.code === 'SKETCH_STORAGE_BLOCKED'
+                ? 'sketchStorageBlocked'
+                : 'sketchStorageFailed'
+            )
+          )
+      })
+    return () => {
+      live = false
+    }
+  }, [enabled, sessionId, restoreAttempt])
+  useEffect(() => {
+    if (!hydrated || !enabled || !dirty.current || busy || agentLocked) return
+    const timer = setTimeout(() => {
+      if (active.current || sizeGesture.current || !dirty.current) return
+      const row = {
+        id: sessionId,
+        updated: Date.now(),
+        doc: structuredClone(doc.current)
+      }
+      void sketchDrafts('checkpoint', row).catch(() =>
+        setError(t('sketchRecoveryFailed'))
+      )
+    }, 1500)
+    return () => clearTimeout(timer)
+  }, [revision, hydrated, enabled, busy, agentLocked, sessionId])
+  const close = () => {
+    if (!hydrated || agentRun.current?.locked) {
+      onClose()
+      return
+    }
+    return runFile(async () => {
+      await saveChanges()
+      onClose()
+    })
+  }
+  const operationGate = useRef(null)
+  operationGate.current ??= createSketchOperationGate()
+  const runFile = (operation) =>
+    operationGate.current.run(operation, {
+      blocked: busy || agentRun.current?.locked || Boolean(active.current),
+      working: setBusy,
+      report: (error) =>
+        setError(error ? error?.message || t('sketchStorageFailed') : '')
+    })
+  useEffect(() => {
+    if (
+      open &&
+      hydrated &&
+      !busy &&
+      !agentLocked &&
+      incoming &&
+      incoming !== received.current
+    ) {
+      received.current = incoming
+      void runFile(() => importImage(incoming.file))
+    }
+  }, [open, incoming, agentLocked, hydrated, busy])
+  const keyDown = (event) => {
+    if (
+      event.target.closest('input,textarea,select,[contenteditable=true]') ||
+      event.isComposing ||
+      busy ||
+      active.current
+    )
+      return
+    if (!navigation.shortcuts) return
+    if (navigation.keyDown(event)) return
+    if (agentRun.current?.locked) return
+    if (selection && ['Delete', 'Backspace'].includes(event.key)) {
+      event.preventDefault()
+      editObject({}, 'delete')
+      return
+    }
+    const key = event.key.toLowerCase(),
+      command = event.ctrlKey || event.metaKey
+    if (command && ['z', 'y', 's'].includes(key)) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (key === 's') void runFile(() => save())
+      else history(key === 'y' || event.shiftKey ? 'redo' : 'undo')
+      return
+    }
+    if (command || event.altKey) return
+    const action = sketchShortcutAction(navigation.keys, key)
+    if (
+      [
+        'pen',
+        'eraser',
+        'line',
+        'rectangle',
+        'circle',
+        'select',
+        'text'
+      ].includes(action)
+    ) {
+      event.preventDefault()
+      chooseTool(action)
+    }
+    if (key === '[' || key === ']') {
+      event.preventDefault()
+      const value = stepSketchWidth(
+        selected?.width ?? width,
+        key === ']' ? 1 : -1
+      )
+      if (selected) editObject({ width: value })
+      else setWidth(value)
+    }
+  }
+  const current = doc.current.layers.find(
+    (layer) => layer.id === doc.current.active
+  )
+  const move = (event, bounds) => {
+    if (navigation.move(event)) return
+    const gesture = active.current
+    if (!gesture || gesture.id !== event.pointerId || busy) return
+    const rect = bounds ?? canvas.current.getBoundingClientRect()
+    const native = event.nativeEvent ?? event
+    const samples = native.getCoalescedEvents?.() ?? []
+    try {
+      doc.current = updateSketchGesture(
+        doc.current,
+        gesture,
+        samples.length ? [...samples, native] : [native],
+        rect,
+        width,
+        event.shiftKey
+      )
+      schedule(Boolean(gesture.object))
+    } catch (error) {
+      setError(error?.message || t('sketchFailed'))
+    }
+  }
+  const end = (event, cancel = false) => {
+    if (navigation.end(event)) return
+    if (active.current?.id !== event.pointerId) return
+    if (!cancel) {
+      move(event)
+      const gesture = active.current,
+        stroke = doc.current.layers
+          .find((layer) => layer.id === gesture.layer)
+          ?.strokes.at(-1)
+      if (gesture.smoothing && stroke)
+        stroke.points = smoothStrokePoints(stroke.points, gesture.smoothing)
+    }
+    const drawn = active.current
+    if (
+      !cancel &&
+      !drawn.object &&
+      ['line', 'arrow', 'rectangle', 'circle'].includes(tool)
+    ) {
+      const stroke = doc.current.layers
+        .find((l) => l.id === drawn.layer)
+        ?.strokes.at(-1)
+      if (stroke) {
+        setSelection({ layer: drawn.layer, id: stroke.id })
+        chooseTool('select')
+      }
+    }
+    active.current = null
+    if (canvas.current.hasPointerCapture(event.pointerId))
+      canvas.current.releasePointerCapture(event.pointerId)
+    if (cancel) {
+      doc.current = undo.current.pop() ?? doc.current
+    }
+    schedule()
+  }
+  const history = (direction) => {
+    if (busy || agentRun.current?.locked || active.current) return
+    const source = direction === 'undo' ? undo : redo,
+      target = direction === 'undo' ? redo : undo
+    if (!source.current.length) return
+    documentRevision.current++
+    dirty.current = true
+    target.current.push(doc.current)
+    doc.current = source.current.pop()
+    schedule()
+  }
+  Object.assign(agentAdapter.current, {
+    changed: (state) => {
+      setAgentState(state)
+      setNoticeHidden(false)
+    },
+    available: () => enabled && agentEnabled,
+    open: () => onOpen(),
+    busy: () =>
+      operationGate.current.running ||
+      busy ||
+      Boolean(active.current) ||
+      Boolean(textEdit) ||
+      sizeGesture.current,
+    document: () => doc.current,
+    snapshot: () => ({
+      documentId: documentId.current,
+      revision: documentRevision.current,
+      width: doc.current.width ?? SKETCH_SIZE,
+      height: doc.current.height ?? SKETCH_SIZE,
+      active: doc.current.active,
+      layers: doc.current.layers.map((layer) => ({
+        id: layer.id,
+        name: layer.name,
+        visible: layer.visible,
+        strokes: layer.strokes.length,
+        image: Boolean(layer.image)
+      })),
+      strokeCount: strokeCount(doc.current)
+    }),
+    objects: () => sketchObjectSummary(doc.current),
+    object: (id, layer = doc.current.active) => {
+      const target = doc.current.layers
+        .find((l) => l.id === layer)
+        ?.strokes.find((s, i) => objectId(s, i) === id)
+      if (!target) throw Error('Object not found')
+      return { ...target, id }
+    },
+    commit: (next) => {
+      checkpoint()
+      doc.current = next
+      setError('')
+      schedule()
+    },
+    preview: async (options) => {
+      const w = doc.current.width ?? SKETCH_SIZE,
+        h = doc.current.height ?? SKETCH_SIZE
+      return composeSketchPreview({
+        doc: doc.current,
+        images: images.current,
+        width: w,
+        height: h,
+        options,
+        paintLayers: paintSketchLayers,
+        makeSurface: (width, height) =>
+          Object.assign(document.createElement('canvas'), { width, height })
+      })
+    },
+    addReference: async (dataUrl, name) => {
+      const blob = await (await fetch(dataUrl)).blob()
+      await importImage(new File([blob], name, { type: blob.type }), { visible: false })
+    },
+    save: save
+  })
+  agentSession.current ??= createSketchCommandSession(agentAdapter.current)
+  agentRun.current ??= createSketchAgentRun({
+    execute: (request) => agentSession.current(request),
+    open: () => agentAdapter.current.open(),
+    changed: (state) => agentAdapter.current.changed?.(state),
+    busy: () => agentAdapter.current.busy()
+  })
+  useEffect(() => {
+    if (!enabled || !agentEnabled || !hydrated) return
+    const api = Object.freeze({
+      version: 2,
+      sessionId,
+      execute: (request) => agentRun.current.execute(request),
+      export: (format) => exportSketchAgentFile(format, {
+        gate: operationGate.current,
+        blocked: agentAdapter.current.busy() || agentRun.current.locked,
+        working: setBusy,
+        report: (error) => setError(error ? error.message || t('sketchFailed') : ''),
+        exportFile: (value) => agentAdapter.current.export(value)
+      })
+    })
+    window.dshSketchAgent = api
+    return () => {
+      if (window.dshSketchAgent === api) delete window.dshSketchAgent
+    }
+  }, [enabled, agentEnabled, rpc, sessionId, hydrated])
+  useEffect(() => {
+    if (!enabled || !agentEnabled) {
+      if (agentRun.current.locked) agentRun.current.stop()
+      return
+    }
+    if (!rpc || !sessionId || !hydrated) return
+    let live = true
+    const disconnect = connectSketchAgent(
+      rpc,
+      sessionId,
+      (request) => {
+        if (!live) throw Error('Sketch session disconnected')
+        return agentRun.current.execute(request)
+      },
+      (message) => {
+        agentRun.current.fail()
+        setError(message)
+      },
+      () => (agentRun.current.locked ? 350 : 2000)
+    )
+    return () => {
+      live = false
+      disconnect()
+    }
+  }, [enabled, agentEnabled, rpc, sessionId, hydrated])
+  const attach = () => {
+    if (!enabled) return
+    return runFile(async () => {
+      paint()
+      const blob = await new Promise((resolve, reject) =>
+        canvas.current.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(Error(t('sketchFailed')))),
+          'image/png'
+        )
+      )
+      await saveChanges()
+      await attachSketch(blob)
+      onClose()
+    })
+  }
+  const exportFile = async (format = 'png') => {
+    paint()
+    if (format === 'draft')
+      return {
+        blob: new Blob([encodeSketchDocument(doc.current)], {
+          type: 'application/json'
+        }),
+        extension: 'dsh-sketch.json'
+      }
+    if (format !== 'png') throw Error('Unsupported format')
+    return {
+      blob: await new Promise((resolve, reject) =>
+        canvas.current.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(Error('PNG'))),
+          'image/png'
+        )
+      ),
+      extension: 'png'
+    }
+  }
+  agentAdapter.current.export = exportFile
+  const download = async (format) => {
+    setError('')
+    const { blob, extension } = await exportFile(format)
+    const url = URL.createObjectURL(blob),
+      link = document.createElement('a')
+    link.href = url
+    link.download = `${(saved.current?.name || 'sketch').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').slice(0, 80)}.${extension}`
+    document.body.append(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+  return (
+    <>
+      {enabled && agentEnabled && !open && !noticeHidden ? (
+        <SketchRunStatus
+          state={agentState}
+          floating
+          t={t}
+          onOpen={onOpen}
+          onStop={() => agentRun.current.stop()}
+          onResume={() => {
+            setError('')
+            agentRun.current.resume()
+          }}
+          onDismiss={() => setNoticeHidden(true)}
+        />
+      ) : null}
+      <dialog
+        ref={dialog}
+        className="codexSketchDialog codexSketchStudio codexLayerStudio"
+        aria-label={t('sketchTitle')}
+        onKeyDown={keyDown}
+        onKeyUp={navigation.keyUp}
+        onPaste={(event) => {
+          if (agentRun.current?.locked) {
+            event.preventDefault()
+            event.stopPropagation()
+            return
+          }
+          if (event.target.closest('input,textarea')) return
+          const file = Array.from(event.clipboardData.items)
+            .find((item) => item.type.startsWith('image/'))
+            ?.getAsFile()
+          if (file) {
+            event.preventDefault()
+            event.stopPropagation()
+            void runFile(() => importImage(file))
+          }
+        }}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          const file = event.dataTransfer.files[0]
+          if (file) void runFile(() => importImage(file))
+        }}
+        onCancel={(event) => {
+          event.preventDefault()
+          close()
+        }}
+      >
+        <div
+          ref={cursorRing}
+          hidden
+          className="codexSketchCursor"
+          aria-hidden="true"
+        />
+        <header className="codexSketchTop">
+          <button
+            className="codexSketchRound"
+            type="button"
+            aria-label={t('sketchCancel')}
+            title={t('sketchCancel')}
+            disabled={busy && hydrated && !agentLocked}
+            onClick={close}
+          >
+            <WorkspaceIcon name="close" />
+          </button>
+          <SketchFiles
+            save={save}
+            load={load}
+            fresh={fresh}
+            importImage={importImage}
+            download={download}
+            hasContent={doc.current.layers.some(
+              (l) => l.visible && (l.image || l.strokes.length)
+            )}
+            disabled={agentLocked || busy}
+            t={t}
+            runOperation={runFile}
+          />
+          <div className="codexSketchHeading">
+            <strong>{t('sketchTitle')}</strong>
+            <span>Beta</span>
+          </div>
+          <div className="codexSketchUtility">
+            <div className="codexSketchHistory">
+              {['undo', 'redo'].map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  className="codexSketchRound"
+                  aria-label={t(name === 'undo' ? 'sketchUndo' : 'sketchRedo')}
+                  title={t(name === 'undo' ? 'sketchUndo' : 'sketchRedo')}
+                  disabled={
+                    agentLocked ||
+                    busy ||
+                    !(name === 'undo' ? undo : redo).current.length
+                  }
+                  onClick={() => history(name)}
+                >
+                  <WorkspaceIcon name={name} size={20} />
+                </button>
+              ))}
+            </div>
+            <select
+              className="codexSketchRatio"
+              aria-label={t('sketchRatio')}
+              title={t('sketchRatioHint')}
+              value={doc.current.ratio ?? '1:1'}
+              disabled={agentLocked || busy}
+              onChange={(event) => {
+                if (active.current || agentRun.current?.locked) return
+                const next = resizeSketch(doc.current, event.target.value)
+                if (next === doc.current) return
+                checkpoint()
+                doc.current = next
+                schedule()
+              }}
+            >
+              {doc.current.ratio === 'custom' ? (
+                <option value="custom" disabled>
+                  {doc.current.width}×{doc.current.height}
+                </option>
+              ) : null}
+              {Object.keys(SKETCH_RATIOS).map((ratio) => (
+                <option key={ratio} value={ratio}>
+                  {ratio}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="codexSketchLayersToggle"
+              aria-label={t('sketchLayers')}
+              aria-expanded={layersOpen}
+              onClick={() => setLayersOpen((v) => !v)}
+            >
+              <WorkspaceIcon name="layers" size={18} />
+              {t('sketchLayers')}
+              <span>{doc.current.layers.length}</span>
+            </button>
+          </div>
+          <button
+            type="button"
+            className="codexSketchConfirm"
+            aria-label={t('sketchAttach')}
+            disabled={
+              agentLocked ||
+              busy ||
+              !enabled ||
+              !doc.current.layers.some(
+                (l) => l.visible && (l.strokes.length || l.image)
+              )
+            }
+            onClick={() => void attach()}
+          >
+            <WorkspaceIcon name="check" size={18} />
+            <span>{t('sketchAttachShort')}</span>
+          </button>
+        </header>
+        {enabled && agentEnabled && !noticeHidden ? (
+          <SketchRunStatus
+            state={agentState}
+            t={t}
+            onStop={() => agentRun.current.stop()}
+            onResume={() => {
+              setError('')
+              agentRun.current.resume()
+            }}
+            onDismiss={() => setNoticeHidden(true)}
+          />
+        ) : null}
+        {recovered ? (
+          <div className="codexSketchAgentStatus" role="status">
+            {t('sketchRecovered')}
+            <button
+              type="button"
+              onClick={() => setRecovered(false)}
+              aria-label={t('sketchDismissStatus')}
+            >
+              <WorkspaceIcon name="close" size={14} />
+            </button>
+          </div>
+        ) : null}
+        <div className={`codexLayerBody ${layersOpen ? 'withLayers' : ''}`}>
+          <canvas
+            tabIndex={0}
+            style={{
+              transform: `translate(${navigation.view.x}px,${navigation.view.y}px) scale(${navigation.view.scale})`,
+              cursor: navigation.space
+                ? 'grab'
+                : agentLocked
+                  ? 'default'
+                  : tool === 'select'
+                    ? 'default'
+                    : tool === 'text'
+                      ? 'text'
+                      : 'none',
+              '--sketch-ratio':
+                (doc.current.width ?? SKETCH_SIZE) /
+                (doc.current.height ?? SKETCH_SIZE)
+            }}
+            ref={canvas}
+            width={SKETCH_SIZE}
+            height={SKETCH_SIZE}
+            aria-label={t('sketchTitle')}
+            onDoubleClick={() => {
+              if (!busy && !agentRun.current?.locked && tool === 'select' && selected?.shape === 'text') setTextEdit({ selection, value: selected.text })
+            }}
+            onPointerDown={(event) => {
+              if (busy || !enabled || active.current) return
+              if (navigation.down(event)) return
+              if (agentRun.current?.locked) return
+              if (event.button !== 0) return
+              const point = sketchPoint(
+                event.clientX,
+                event.clientY,
+                canvas.current.getBoundingClientRect()
+              )
+              if (!point) return
+              if (tool === 'text') {
+                setTextEdit({ point, value: '' })
+                return
+              }
+              if (tool === 'select') {
+                doc.current = identifyObjects(doc.current)
+                if (selected) {
+                  const b = objectBounds(selected),
+                    end = ['line', 'arrow'].includes(selected.shape)
+                      ? selected.points.at(-1)
+                      : { x: b.x + b.width, y: b.y + b.height },
+                    rect = canvas.current.getBoundingClientRect()
+                  if (
+                    Math.hypot(
+                      (end.x - point.x) * rect.width,
+                      (end.y - point.y) * rect.height
+                    ) < 12
+                  ) {
+                    checkpoint()
+                    active.current = {
+                      id: event.pointerId,
+                      layer: selection.layer,
+                      object: { ...selected, id: selection.id },
+                      start: point,
+                      handle: ['line', 'arrow'].includes(selected.shape)
+                        ? 'end'
+                        : 'size'
+                    }
+                    canvas.current.setPointerCapture(event.pointerId)
+                    return
+                  }
+                }
+                let hit
+                for (const l of doc.current.layers.slice().reverse()) {
+                  if (!l.visible) continue
+                  const stroke = l.strokes
+                    .slice()
+                    .reverse()
+                    .find(
+                      (s) =>
+                        s.shape !== 'eraser' &&
+                        strokeHit(
+                          s,
+                          point,
+                          6,
+                          doc.current.width,
+                          doc.current.height
+                        )
+                    )
+                  if (stroke) {
+                    hit = { layer: l.id, stroke }
+                    break
+                  }
+                }
+                setSelection(
+                  hit ? { layer: hit.layer, id: hit.stroke.id } : null
+                )
+                if (hit) {
+                  checkpoint()
+                  active.current = {
+                    id: event.pointerId,
+                    layer: hit.layer,
+                    object: hit.stroke,
+                    start: point
+                  }
+                  canvas.current.setPointerCapture(event.pointerId)
+                }
+                return
+              }
+              setSelection(null)
+              cursor.down(event)
+              if (!current.visible) {
+                setError(t('sketchHiddenLayer'))
+                return
+              }
+              if (
+                !(tool === 'eraser' && eraser === 'stroke') &&
+                strokeCount(doc.current) >= MAX_SKETCH_STROKES
+              ) {
+                setError(t('sketchLimit'))
+                return
+              }
+              if (
+                tool !== 'eraser' &&
+                doc.current.layers.reduce(
+                  (n, l) =>
+                    n + l.strokes.reduce((m, s) => m + s.points.length, 0),
+                  0
+                ) >= MAX_SKETCH_POINTS
+              ) {
+                setError(t('sketchLimit'))
+                return
+              }
+              const start = sketchPoint(
+                event.clientX,
+                event.clientY,
+                canvas.current.getBoundingClientRect()
+              )
+              if (!start) return
+              checkpoint()
+              const layers = doc.current.layers.map((layer) =>
+                layer.id === doc.current.active
+                  ? { ...layer, strokes: layer.strokes.slice() }
+                  : layer
+              )
+              doc.current = { ...doc.current, layers }
+              const layer = layers.find(
+                (layer) => layer.id === doc.current.active
+              )
+              const eraseStroke = tool === 'eraser' && eraser === 'stroke'
+              if (!eraseStroke)
+                layer.strokes.push({
+                  id: crypto.randomUUID(),
+                  color,
+                  opacity: flow / 100,
+                  shape: tool,
+                  width,
+                  fill: fillShape && ['rectangle', 'circle'].includes(tool),
+                  brush: tool === 'pen' ? brush : 'pen',
+                  ...(tool === 'pen' ? { brushVersion: 2 } : {}),
+                  pressure:
+                    event.pointerType === 'pen'
+                      ? Math.max(0.2, event.pressure)
+                      : 1,
+                  points: [start]
+                })
+              active.current = {
+                id: event.pointerId,
+                layer: layer.id,
+                eraseStroke,
+                last: start,
+                smoothing: tool === 'pen' ? stability : 0
+              }
+              canvas.current.setPointerCapture(event.pointerId)
+              setError('')
+              move(event)
+              schedule()
+            }}
+            onPointerMove={(event) => {
+              const rect = canvas.current.getBoundingClientRect()
+              move(event, rect)
+              cursor.move(event, rect)
+            }}
+            onPointerEnter={cursor.move}
+            onPointerLeave={cursor.leave}
+            onPointerUp={(event) => end(event)}
+            onPointerCancel={(event) => end(event, true)}
+          />
+          {selected && tool === 'select' && !agentLocked ? (
+            <svg
+              className="codexSketchSelection"
+              viewBox="0 0 1 1"
+              preserveAspectRatio="none"
+              style={{
+                '--sketch-ratio':
+                  (doc.current.width ?? 1024) / (doc.current.height ?? 1024),
+                transform: `translate(${navigation.view.x}px,${navigation.view.y}px) scale(${navigation.view.scale})`
+              }}
+              aria-hidden="true"
+            >
+              <rect
+                {...objectBounds(selected)}
+                fill="none"
+                stroke="#0088ff"
+                strokeWidth=".002"
+                strokeDasharray=".008 .005"
+              />
+              <circle
+                cx={
+                  ['line', 'arrow'].includes(selected.shape)
+                    ? selected.points.at(-1).x
+                    : objectBounds(selected).x + objectBounds(selected).width
+                }
+                cy={
+                  ['line', 'arrow'].includes(selected.shape)
+                    ? selected.points.at(-1).y
+                    : objectBounds(selected).y + objectBounds(selected).height
+                }
+                r=".007"
+                fill="white"
+                stroke="#0088ff"
+                strokeWidth=".002"
+              />
+            </svg>
+          ) : null}
+          <SketchSizeControl
+            label={t(
+              opacityMode
+                ? 'sketchFlow'
+                : selected?.shape === 'text' || tool === 'text'
+                  ? 'sketchTextSize'
+                  : 'sketchWidth'
+            )}
+            mode={opacityMode ? 'opacity' : 'size'}
+            modes={
+              showOpacity
+                ? [
+                    {
+                      value: 'size',
+                      label: t(
+                        selected?.shape === 'text' || tool === 'text'
+                          ? 'sketchTextSize'
+                          : 'sketchSizeShort'
+                      )
+                    },
+                    { value: 'opacity', label: t('sketchFlow') }
+                  ]
+                : undefined
+            }
+            onModeChange={setSizeMode}
+            min={opacityMode ? 5 : 1}
+            max={opacityMode ? 100 : 256}
+            suffix={opacityMode ? '%' : ''}
+            value={
+              opacityMode
+                ? (selected?.opacity ?? flow / 100) * 100
+                : (selected?.width ?? width)
+            }
+            disabled={agentLocked || busy}
+            onStart={() => {
+              if (selected) {
+                checkpoint()
+                sizeGesture.current = true
+              }
+            }}
+            onEnd={() => {
+              sizeGesture.current = false
+            }}
+            onChange={(value) => {
+              if (opacityMode) {
+                if (selected) editObject({ opacity: value / 100 })
+                else setFlow(value)
+              } else {
+                if (selected) editObject({ width: value })
+                else setWidth(value)
+              }
+            }}
+          />
+
+          {textEdit ? (
+            <form
+              className="codexSketchTextEditor"
+              onSubmit={(event) => {
+                event.preventDefault()
+                if (!textEdit.value.trim()) {
+                  setTextEdit(null)
+                  return
+                }
+                try {
+                  if (textEdit.selection) {
+                    editObject({ text: textEdit.value })
+                  } else {
+                    const [a, b] = newTextBounds(textEdit.point),
+                      id = crypto.randomUUID()
+                    const next = applySketchCommands(doc.current, [
+                      {
+                        op: 'stroke',
+                        id,
+                        shape: 'text',
+                        text: textEdit.value,
+                        color,
+                        width: Math.max(24, width),
+                        points: [a, b]
+                      }
+                    ])
+                    checkpoint()
+                    doc.current = next
+                    setSelection({ layer: doc.current.active, id })
+                    schedule()
+                  }
+                  setTextEdit(null)
+                  chooseTool('select')
+                } catch (e) {
+                  setError(e.message)
+                }
+              }}
+            >
+              <textarea
+                autoFocus
+                aria-label={t('sketchText')}
+                maxLength={500}
+                onKeyDown={event => {
+                  if (event.nativeEvent.isComposing) return
+                  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setTextEdit(null) }
+                  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form.requestSubmit() }
+                }}
+                value={textEdit.value}
+                onChange={(e) =>
+                  setTextEdit({ ...textEdit, value: e.target.value })
+                }
+              />
+              <button type="submit">{t('sketchTextDone')}</button>
+              <button type="button" onClick={() => setTextEdit(null)}>
+                {t('sketchCancel')}
+              </button>
+            </form>
+          ) : null}
+          {picturesOpen ? (
+            <SketchPicturePanel
+              document={doc.current}
+              disabled={agentLocked || busy}
+              pictureInput={pictureInput}
+              importImage={importImage}
+              runFile={runFile}
+              change={change}
+              t={t}
+            />
+          ) : null}
+          {layersOpen ? (
+            <SketchLayerPanel
+              document={doc.current}
+              disabled={agentLocked || busy}
+              change={change}
+              t={t}
+            />
+          ) : null}
+        </div>
+        <SketchControls
+          t={t}
+          navigation={navigation}
+          picturesOpen={picturesOpen}
+          setPicturesOpen={setPicturesOpen}
+          disabled={agentLocked || busy}
+          tool={tool}
+          brush={brush}
+          chooseBrush={chooseBrush}
+          chooseTool={chooseTool}
+          shapesOpen={shapesOpen}
+          setShapesOpen={setShapesOpen}
+          fillShape={fillShape}
+          setFillShape={setFillShape}
+          selected={selected}
+          editObject={editObject}
+          selection={selection}
+          setTextEdit={setTextEdit}
+          stability={stability}
+          setStability={setStability}
+          eraser={eraser}
+          setEraser={setEraser}
+          color={color}
+          pickColor={pickColor}
+        />
+        {error ? (
+          <p className="codexSketchHint" role="alert">
+            {error}
+            {!hydrated ? (
+              <button
+                type="button"
+                onClick={() => retryRestore((value) => value + 1)}
+              >
+                {t('accountRetry')}
+              </button>
+            ) : null}
+          </p>
+        ) : null}
+      </dialog>
+    </>
+  )
+}

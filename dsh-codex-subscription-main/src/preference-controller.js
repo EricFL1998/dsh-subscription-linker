@@ -1,0 +1,253 @@
+import { CHANNEL, unwrap } from './rpc-contract.js'
+import {
+  AUTO_QUOTA_RETRY_FIELD,
+  clampModelContext,
+  CONTEXT_MODE_FIELD,
+  DISABLED_MODELS_FIELD,
+  CUSTOM_CONTEXT_MODEL_CAPS,
+  CUSTOM_CONTEXT_MODEL_DEFAULTS,
+  CUSTOM_CONTEXT_MODEL_FIELDS,
+  CUSTOM_CONTEXT_WINDOW_FIELD,
+  INPUT_IMAGE_DETAIL_FIELD,
+  REASONING_SUMMARY_FIELD,
+  RETRY_POLICY_FIELD,
+  normalizeRetryPolicy,
+  normalizeReasoningSummary,
+  STREAM_IDLE_TIMEOUT_MINUTES_FIELD,
+  LEGACY_QUICK_QUOTA_FIELD,
+  normalizeAutoQuotaRetry,
+  normalizeContextMode,
+  normalizeCustomContextWindow,
+  normalizeDisabledModels,
+  normalizeInputImageDetail,
+  normalizeStreamIdleTimeoutMinutes,
+  normalizeOutputVerbosity,
+  normalizeQuickQuotaMode,
+  normalizeSearchProvider,
+  normalizeSpeedMode,
+  OUTPUT_VERBOSITY_FIELD,
+  QUICK_QUOTA_MODE_FIELD,
+  SEARCH_PROVIDER_FIELD,
+  SPEED_MODE_FIELD,
+} from './settings-contract.js'
+import { readCapabilitySettings, CUSTOM_CONTEXT_OVERRIDES_FIELD } from './capability-settings.js'
+
+
+
+export function createPreferenceController(rpc) {
+  let updating = false
+  let error = false
+  let fallback
+  let pendingPatch
+  let failedPatch
+  let generation = 0
+  let contextModels = []
+  let availableModels = []
+  let verbosityModels = []
+  let fastModels
+  let ultrafastModels = []
+  let catalogStatus
+  let modelsLoading = false
+  let modelError = false
+  let modelRefreshGeneration = 0
+  let modelRefreshStarted = false
+  let disposed = false
+  let subagentBackendAvailable = false
+  let subagentRuntimeInstalled = false
+
+  const sameModels = (left, right) => left.length === right.length
+    && left.every((model, index) => JSON.stringify(model) === JSON.stringify(right[index]))
+  const read = () => {
+    const current = fallback ?? { status: 'unavailable' }
+    const value = pendingPatch === undefined ? current.value : { ...current.value, ...pendingPatch }
+    const capabilities = readCapabilitySettings(value)
+    return Object.freeze({
+      // Keep accepted ready surfaces mounted while a Host write is pending.
+      status: current.status,
+      ...capabilities,
+      autoQuotaRetry: normalizeAutoQuotaRetry(value?.[AUTO_QUOTA_RETRY_FIELD]),
+      connectionMode: value?.connectionMode === 'websocket' ? 'websocket' : 'sse',
+      reviewModel: value?.reviewModel === 'official' ? 'official' : 'session',
+      remoteControl: value?.remoteControl === 'on' ? 'on' : 'off',
+      compactionMode: value?.compactionMode === 'cloud' ? 'cloud' : 'dsh',
+      subagentBackend: value?.subagentBackend === 'codex' ? 'codex' : 'dsh',
+      subagentBackendAvailable,
+      subagentRuntimeInstalled,
+      quickQuotaMode: normalizeQuickQuotaMode(
+        value?.[QUICK_QUOTA_MODE_FIELD],
+        value?.[LEGACY_QUICK_QUOTA_FIELD],
+      ),
+      searchProvider: normalizeSearchProvider(value?.[SEARCH_PROVIDER_FIELD]),
+      speedMode: normalizeSpeedMode(value?.[SPEED_MODE_FIELD]),
+      outputVerbosity: normalizeOutputVerbosity(value?.[OUTPUT_VERBOSITY_FIELD]),
+      inputImageDetail: normalizeInputImageDetail(value?.[INPUT_IMAGE_DETAIL_FIELD]),
+      reasoningSummary: normalizeReasoningSummary(value?.[REASONING_SUMMARY_FIELD]),
+      retryPolicy: normalizeRetryPolicy(value?.[RETRY_POLICY_FIELD]),
+      streamIdleTimeoutMinutes: normalizeStreamIdleTimeoutMinutes(value?.[STREAM_IDLE_TIMEOUT_MINUTES_FIELD]),
+      contextMode: normalizeContextMode(value?.[CONTEXT_MODE_FIELD]),
+      customContextWindow: normalizeCustomContextWindow(value?.[CUSTOM_CONTEXT_WINDOW_FIELD]),
+      customContextWindows: {
+        ...Object.fromEntries(Object.entries(CUSTOM_CONTEXT_MODEL_FIELDS).map(([modelKey, field]) => [modelKey, normalizeCustomContextWindow(value?.[field] ?? CUSTOM_CONTEXT_MODEL_DEFAULTS[modelKey], CUSTOM_CONTEXT_MODEL_CAPS[modelKey])])),
+        ...Object.fromEntries(contextModels.map(model => [model.key, clampModelContext(capabilities[CUSTOM_CONTEXT_OVERRIDES_FIELD][model.key] ?? value?.[CUSTOM_CONTEXT_MODEL_FIELDS[model.key]], model.maximum, model.default ?? CUSTOM_CONTEXT_MODEL_DEFAULTS[model.key])])),
+      },
+      contextModels,
+      availableModels,
+      disabledModels: normalizeDisabledModels(value?.[DISABLED_MODELS_FIELD]),
+      verbosityModels,
+      fastModels,
+      ultrafastModels,
+      catalogStatus,
+      modelsLoading,
+      modelError,
+      writable: !updating && current.status === 'ready' && current.writable === true,
+      saving: updating,
+      error,
+    })
+  }
+  let snapshot = read()
+  const listeners = new Set()
+  const publish = () => {
+    snapshot = read()
+    for (const listener of listeners) listener()
+  }
+  const acceptFallback = value => {
+    subagentBackendAvailable = value?.subagentBackendAvailable === true
+    subagentRuntimeInstalled = value?.subagentRuntimeInstalled === true
+    if (!modelRefreshStarted) {
+      contextModels = Array.isArray(value?.contextModels) ? value.contextModels : []
+      availableModels = Array.isArray(value?.availableModels) ? value.availableModels : []
+      verbosityModels = Array.isArray(value?.verbosityModels) ? value.verbosityModels : []
+      fastModels = Array.isArray(value?.fastModels) ? value.fastModels : undefined
+      ultrafastModels = Array.isArray(value?.ultrafastModels) ? value.ultrafastModels : []
+      catalogStatus = value?.catalogStatus
+    }
+    fallback = {
+      status: 'ready',
+      value: {
+        [DISABLED_MODELS_FIELD]: normalizeDisabledModels(value?.[DISABLED_MODELS_FIELD]),
+        [AUTO_QUOTA_RETRY_FIELD]: normalizeAutoQuotaRetry(value?.[AUTO_QUOTA_RETRY_FIELD]),
+        connectionMode: value?.connectionMode === 'websocket' ? 'websocket' : 'sse',
+        reviewModel: value?.reviewModel === 'official' ? 'official' : 'session',
+        remoteControl: value?.remoteControl === 'on' ? 'on' : 'off',
+        compactionMode: value?.compactionMode === 'cloud' ? 'cloud' : 'dsh',
+        subagentBackend: value?.subagentBackend === 'codex' ? 'codex' : 'dsh',
+        ...readCapabilitySettings(value),
+        [QUICK_QUOTA_MODE_FIELD]: normalizeQuickQuotaMode(
+          value?.[QUICK_QUOTA_MODE_FIELD],
+          value?.[LEGACY_QUICK_QUOTA_FIELD],
+        ),
+        [SEARCH_PROVIDER_FIELD]: normalizeSearchProvider(value?.[SEARCH_PROVIDER_FIELD]),
+        [SPEED_MODE_FIELD]: normalizeSpeedMode(value?.[SPEED_MODE_FIELD]),
+        [OUTPUT_VERBOSITY_FIELD]: normalizeOutputVerbosity(value?.[OUTPUT_VERBOSITY_FIELD]),
+        [INPUT_IMAGE_DETAIL_FIELD]: normalizeInputImageDetail(value?.[INPUT_IMAGE_DETAIL_FIELD]),
+        [REASONING_SUMMARY_FIELD]: normalizeReasoningSummary(value?.[REASONING_SUMMARY_FIELD]),
+        [RETRY_POLICY_FIELD]: normalizeRetryPolicy(value?.[RETRY_POLICY_FIELD]),
+        [STREAM_IDLE_TIMEOUT_MINUTES_FIELD]: normalizeStreamIdleTimeoutMinutes(value?.[STREAM_IDLE_TIMEOUT_MINUTES_FIELD]),
+        [CONTEXT_MODE_FIELD]: normalizeContextMode(value?.[CONTEXT_MODE_FIELD]),
+        [CUSTOM_CONTEXT_WINDOW_FIELD]: normalizeCustomContextWindow(value?.[CUSTOM_CONTEXT_WINDOW_FIELD]),
+        ...Object.fromEntries(Object.entries(CUSTOM_CONTEXT_MODEL_FIELDS).map(([modelKey, field]) => [field, normalizeCustomContextWindow(value?.[field] ?? CUSTOM_CONTEXT_MODEL_DEFAULTS[modelKey], CUSTOM_CONTEXT_MODEL_CAPS[modelKey])])),
+      },
+      writable: value?.writable === true,
+    }
+  }
+  const load = async () => {
+    const current = ++generation
+    updating = false
+    pendingPatch = undefined
+    fallback = undefined
+    error = false
+    publish()
+    try {
+      const value = unwrap(await rpc.call(CHANNEL, 'preferences/status', {}))
+      if (current !== generation || disposed) return
+      acceptFallback(value)
+      publish()
+    } catch {
+      if (current !== generation || disposed) return
+      publish()
+    }
+  }
+  const refreshModels = async () => {
+    const current = ++modelRefreshGeneration
+    modelRefreshStarted = true
+    modelError = false
+    modelsLoading = true
+    publish()
+    try {
+      const value = unwrap(await rpc.call(CHANNEL, 'preferences/models', {}))
+      if (disposed || current !== modelRefreshGeneration) return false
+      const nextContextModels = Array.isArray(value?.contextModels) ? value.contextModels : []
+      const nextAvailableModels = Array.isArray(value?.availableModels) ? value.availableModels : []
+      const nextVerbosityModels = Array.isArray(value?.verbosityModels) ? value.verbosityModels : []
+      const nextFastModels = Array.isArray(value?.fastModels) ? value.fastModels : undefined
+      const nextUltrafastModels = Array.isArray(value?.ultrafastModels) ? value.ultrafastModels : []
+      catalogStatus = value?.catalogStatus
+      const changed = !sameModels(contextModels, nextContextModels)
+        || !sameModels(availableModels, nextAvailableModels)
+        || !sameModels(verbosityModels, nextVerbosityModels)
+        || JSON.stringify(fastModels) !== JSON.stringify(nextFastModels)
+        || JSON.stringify(ultrafastModels) !== JSON.stringify(nextUltrafastModels)
+      if (changed) {
+        contextModels = nextContextModels
+        availableModels = nextAvailableModels
+        verbosityModels = nextVerbosityModels
+        fastModels = nextFastModels
+        ultrafastModels = nextUltrafastModels
+        publish()
+      }
+      return changed
+    } catch {
+      if (disposed || current !== modelRefreshGeneration) return false
+      if (!modelError) {
+        modelError = true
+        publish()
+      }
+      return false
+    } finally {
+      if (!disposed && current === modelRefreshGeneration) { modelsLoading = false; publish() }
+    }
+  }
+  const set = async patch => {
+    if (disposed || snapshot.status !== 'ready' || snapshot.writable !== true) return
+    const current = ++generation
+    updating = true
+    pendingPatch = patch
+    error = false
+    failedPatch = undefined
+    publish()
+    try {
+      const value = unwrap(await rpc.call(CHANNEL, 'preferences/update', patch))
+      if (current !== generation) return
+      acceptFallback(value)
+      // The Host may normalize or reject a requested value; its response wins.
+      pendingPatch = undefined
+    } catch {
+      if (current === generation) {
+        pendingPatch = undefined
+        error = true
+        failedPatch = patch
+      }
+    } finally {
+      if (current === generation) {
+        updating = false
+        publish()
+      }
+    }
+  }
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: listener => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    load,
+    set,
+    retry: () => failedPatch === undefined ? load() : set(failedPatch),
+    refreshModels,
+    dispose: () => {
+      disposed = true
+      generation += 1
+      modelRefreshGeneration += 1
+    },
+  }
+}

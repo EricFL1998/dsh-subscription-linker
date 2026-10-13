@@ -1,0 +1,66 @@
+import { useEffect, useRef, useState } from 'react'
+import { Button } from './client-primitives.js'
+import { CHANNEL } from './rpc-contract.js'
+
+export function RuntimeManagement({ rpc, preference, t }) {
+  const [state, setState] = useState()
+  const [error, setError] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+  const alive = useRef(false)
+  const busy = ['installing', 'removing', 'applying'].includes(state?.phase)
+  const read = async () => {
+    try {
+      const result = await rpc.call(CHANNEL, 'runtime/status', {})
+      if (!alive.current) return
+      if (!result.ok) { setError(true); return }
+      setState(result.value); setError(false)
+    } catch { if (alive.current) setError(true) }
+  }
+  useEffect(() => { alive.current = true; void read(); return () => { alive.current = false } }, [rpc])
+  useEffect(() => {
+    if (!busy) return
+    let stopped = false, timer
+    const poll = async () => { await read(); if (!stopped) timer = setTimeout(poll, 1500) }
+    timer = setTimeout(poll, 1500)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [busy, rpc])
+  const act = async action => {
+    if (sending) return
+    setSending(true); setError(false); setConfirm(false)
+    try {
+      const result = await rpc.call(CHANNEL, `runtime/${action}`, {})
+      if (!alive.current) return
+      if (!result.ok) { await read(); if (alive.current) setError(true); return }
+      setState(result.value)
+      if (action === 'remove') void preference.load()
+    } catch { if (alive.current) setError(true) }
+    finally { if (alive.current) setSending(false) }
+  }
+  useEffect(() => {
+    if (state?.phase === 'done') void preference.load()
+  }, [state?.phase])
+  const locked = sending || busy || state?.restartRequired || state?.active > 0
+  return <div className="codexSubscriptionRuntime">
+    <div className="codexSubscriptionPreference">
+      <span role="status">{t(!state ? 'runtimeLoading' : state.restartRequired ? 'runtimeRestart' : busy ? `runtime_${state.phase}` : state.installed ? 'subagentRuntimeInstalled' : !state.componentVersion ? 'runtimeHostUnsupported' : state.present ? (state.removable ? 'runtimeIncompatible' : 'runtimeManagedElsewhere') : 'subagentRuntimeMissing')}</span>
+      {state?.available && (state.present ? state.removable : state.installable) ? <Button type="button" variant="outline" disabled={locked} onClick={() => state.present ? setConfirm(true) : void act('install')}>{t(state.present ? 'runtimeRemove' : 'runtimeInstall')}</Button> : null}
+    </div>
+    {state?.active > 0 ? <p>{t('runtimeActive')}</p> : null}
+    {busy && state.phase === 'installing' ? <Button type="button" variant="outline" disabled={sending} onClick={() => { void act('cancel') }}>{t('runtimeCancel')}</Button> : null}
+    {confirm ? <div role="group" aria-label={t('runtimeRemove')}><p>{t('runtimeConfirm')}</p><Button type="button" variant="outline" onClick={() => setConfirm(false)}>{t('runtimeKeep')}</Button> <Button type="button" variant="outline" disabled={locked} onClick={() => { void act('remove') }}>{t('runtimeConfirmRemove')}</Button></div> : null}
+    {error || state?.phase === 'failed' ? <p role="alert">{t(state?.error === 'build-blocked' ? 'runtimeBuildBlocked' : 'runtimeFailed')}</p> : null}
+    {state?.phase === 'cancelled' ? <p role="status">{t('runtimeCancelled')}</p> : null}
+    <details>
+      <summary>{t('subagentRuntimeManage')}</summary>
+      {state?.present && state.available && !state.removable ? <p>{t('runtimeManagedElsewhere')}</p> : null}
+      {!busy ? <Button type="button" variant="outline" disabled={sending} onClick={() => { void read(); void preference.load() }}>{t('runtimeRefresh')}</Button> : null}
+      {state && !state.available ? <p>{t('runtimeUnavailable')}</p> : null}
+      {state?.available && !state.installable && !state.present ? <p>{t('runtimeHostUnsupported')}</p> : null}
+      {state?.installable ? <p>{t('runtimeInstallHint')}</p> : null}
+      {state?.componentVersion ? <code>@deepseek-ai/dsh-subagent-codex@{state.componentVersion}</code> : null}
+      <p>{t('subagentRuntimeCacheHint')}</p>
+      <a href="https://github.com/WSL043/dsh-codex-subscription/blob/main/README.md#codex-subtask-runtime" target="_blank" rel="noreferrer">{t('subagentRuntimePrepare')}</a>
+    </details>
+  </div>
+}

@@ -1,0 +1,552 @@
+import { createSettingsAdapter } from './settings-adapter.js'
+import { createDefaultModelController } from './default-model.js'
+import { PREFERENCE_FIELDS } from './preference-fields.js'
+import { createSubscriptionConnection } from './subscription-connection.js'
+import { createCompactionBridge } from './subscription-compaction.js'
+import { registerSubscriptionTransport } from './subscription-transport.js'
+import { createSubagentBackendSwitcher, createSubscriptionSubagent, loadSubagentRuntime, presetEntries } from './subagent-backend.js'
+import { inspectSubagentRuntime } from './subagent-runtime.js'
+import { createRuntimeManagement } from './runtime-management.js'
+import { createSketchAgentBridge } from './sketch-agent-bridge.js'
+import { createSketchAgentTool } from './sketch-agent-tool.js'
+import * as dshCredentials from '@deepseek-ai/dsh-credentials'
+import WebSocket from 'ws'
+import { hostname } from 'node:os'
+import { readSubscriptionCredentials } from './subscription-credentials.js'
+import { USER_AGENT } from './version.js'
+import { createRemoteControl } from './remote-control.js'
+import { createDshRemoteControl } from './remote-control-dsh.js'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import * as dshLlm from '@deepseek-ai/dsh-llm'
+import { retryPolicyFor } from './retry-policy.js'
+import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
+import z from '@deepseek-ai/schemastery'
+
+import { createCodexAuthService, DshOAuthCredentialStore } from './credential-store.js'
+import { DshOAuthAccountVault } from './account-vault.js'
+import { openCodexAuthUrl } from './external-url.js'
+import { CodexLoginCoordinator, createCodexRpcHandler } from './login-coordinator.js'
+import { createCodexNetworkTransport } from './oauth-network.js'
+import { createModels, openaiCodexProvider, openaiCodexSubscriptionProvider } from './pi-ai-runtime.js'
+import { createOfficialModelCatalog } from './model-catalog.js'
+import { readCapabilitySettings, normalizeSearchDomains, CUSTOM_CONTEXT_OVERRIDES_FIELD, SEARCH_MODE_FIELD, SEARCH_MODES, SEARCH_DOMAINS_FIELD, QUOTA_ALERTS_FIELD, QUOTA_ALERT_MODES, QUOTA_THRESHOLD_FIELDS, MAX_CONTEXT_BUDGET } from './capability-settings.js'
+import { CODEX_AUTO_SEARCH_PROVIDER_ID, CODEX_SEARCH_PROVIDER_ID, createCodexAutoSearchProvider, createCodexSearchProvider } from './codex-search.js'
+import { createCodexImageTool } from './codex-images.js'
+import { IMAGE_FEATURE_DEFAULTS } from './image-features.js'
+import { watchImageTool } from './image-tool-registration.js'
+import { IMAGE_MODELS, DEFAULT_IMAGE_MODEL } from './image-models.js'
+import { OriginalImageStore } from './image-original-store.js'
+import { inheritedOriginalImageRef } from './image-original-contract.js'
+import { createSubscriptionDiagnostics } from './diagnostics.js'
+import { createDiagnosticOperations } from './diagnostic-operations.js'
+import { AUTO_QUOTA_RETRY_FIELD, CONTEXT_MODE_FIELD, contextModelGroups, CUSTOM_CONTEXT_MODEL_CAPS, CUSTOM_CONTEXT_MODEL_DEFAULTS, CUSTOM_CONTEXT_MODEL_FIELDS, CUSTOM_CONTEXT_WINDOW_FIELD, DEFAULT_AUTO_QUOTA_RETRY, DEFAULT_CUSTOM_CONTEXT_WINDOW, DISABLED_MODELS_FIELD, INPUT_IMAGE_DETAIL_FIELD, REASONING_SUMMARY_FIELD, normalizeReasoningSummary, RETRY_POLICY_FIELD, normalizeRetryPolicy, STREAM_IDLE_TIMEOUT_MINUTES_FIELD, LEGACY_QUICK_QUOTA_FIELD, normalizeAutoQuotaRetry, normalizeDisabledModels, normalizeInputImageDetail, normalizeQuickQuotaMode, normalizeOutputVerbosity, normalizeStreamIdleTimeoutMinutes, QUICK_QUOTA_MODE_FORECAST, QUICK_QUOTA_MODE_FIELD, OUTPUT_VERBOSITY_FIELD, SEARCH_PROVIDER_AUTO, SEARCH_PROVIDER_CODEX, SEARCH_PROVIDER_FIELD, SPEED_MODE_FIELD, normalizeContextMode, normalizeCustomContextWindow, supportsCodexFastMode } from './settings-contract.js'
+import { createCodexUsageReader } from './usage.js'
+import { catalogModelsReady, createCodexQuotaRetryHandler } from './quota-retry.js'
+import { createQuotaForecastReader } from './quota-forecast.js'
+import { QuotaForecastStateStore } from './quota-forecast-store.js'
+import { createCodexResetCreditService } from './reset-credits.js'
+
+export const name = 'codex-subscription'
+export const inject = ['llm', 'credentials', 'settings', 'web', 'loader', 'tools', 'attachments']
+
+const PROVIDER = 'openai-codex'
+const OAUTH_EXPIRY_SKEW_MS = 60_000
+const CREDENTIAL_REF = dshCredentials.credentialRef('OPENAI_CODEX_SUBSCRIPTION_OAUTH')
+const LEGACY_CREDENTIAL_REF = dshCredentials.credentialRef('WSL043_OPENAI_CODEX_OAUTH')
+const ACCOUNT_VAULT_KEY = dshCredentials.credentialKey('codex-subscription', 'accounts')
+const WEB_ENTRY_ID = 'web'
+const DSH_SEARCH_PROVIDER_FALLBACK = 'deepseek-official'
+const MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+const REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
+const REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
+
+import { createSubscriptionRpcHandler } from './subscription-rpc.js'
+export { createSubscriptionRpcHandler } from './subscription-rpc.js'
+
+export function createSearchProviderSwitcher(loader) {
+  const webEntry = () => [...loader.entries()].find(entry => entry.options?.id === WEB_ENTRY_ID)
+  const dshProviderId = () => {
+    const baseConfig = webEntry()?.options?.config ?? {}
+    return typeof baseConfig.searchProvider === 'string' && baseConfig.searchProvider.length > 0
+      ? baseConfig.searchProvider
+      : DSH_SEARCH_PROVIDER_FALLBACK
+  }
+  return Object.freeze({
+    dshProviderId,
+    async select(selection) {
+      const entry = webEntry()
+      const fiber = entry?.fiber
+      if (entry === undefined || fiber === undefined || typeof fiber.update !== 'function') {
+        throw new Error('DSH web runtime is unavailable')
+      }
+      const baseConfig = entry.options?.config ?? {}
+      const currentConfig = fiber.config ?? baseConfig
+      const dshProvider = dshProviderId()
+      const provider = selection === SEARCH_PROVIDER_CODEX
+        ? CODEX_SEARCH_PROVIDER_ID
+        : selection === SEARCH_PROVIDER_AUTO
+          ? CODEX_AUTO_SEARCH_PROVIDER_ID
+          : dshProvider
+      if (currentConfig.searchProvider === provider) return
+      await fiber.update({ ...currentConfig, searchProvider: provider }, true)
+    },
+  })
+}
+
+const settingsFields = {
+  [DISABLED_MODELS_FIELD]: z.transform(z.array(z.string()).max(100), normalizeDisabledModels).default([]),
+  [AUTO_QUOTA_RETRY_FIELD]: z.boolean().default(DEFAULT_AUTO_QUOTA_RETRY),
+  ...Object.fromEntries(Object.entries(PREFERENCE_FIELDS).map(([field, rule]) => [field, rule.default === undefined ? z.union(rule.choices) : z.union(rule.choices).default(rule.default)])),
+  imageModel: z.union(Object.keys(IMAGE_MODELS)).default(DEFAULT_IMAGE_MODEL),
+  imageQuality: z.union(['auto','low','medium','high','xhigh','max']).default('auto'),
+  ...Object.fromEntries(Object.entries(IMAGE_FEATURE_DEFAULTS).map(([key, value]) => [key, z.boolean().default(value)])),
+  [CUSTOM_CONTEXT_OVERRIDES_FIELD]: z.dict(z.number().step(1).min(1).max(MAX_CONTEXT_BUDGET)).default({}),
+  [SEARCH_MODE_FIELD]: z.union(SEARCH_MODES).default('live'),
+  [SEARCH_DOMAINS_FIELD]: z.transform(z.array(z.string()).max(20), normalizeSearchDomains).default([]),
+  ...Object.fromEntries(QUOTA_THRESHOLD_FIELDS.map(key => [key, z.number().step(1).min(1).max(100).default(20)])),
+  [QUOTA_ALERTS_FIELD]: z.union(QUOTA_ALERT_MODES).default('important'),
+  [LEGACY_QUICK_QUOTA_FIELD]: z.boolean(),
+  [CUSTOM_CONTEXT_WINDOW_FIELD]: z.number().step(1).min(128_000).max(1_000_000).default(DEFAULT_CUSTOM_CONTEXT_WINDOW),
+  ...Object.fromEntries(Object.entries(CUSTOM_CONTEXT_MODEL_FIELDS).map(([modelKey, field]) => [field, z.number().step(1).min(128_000).max(CUSTOM_CONTEXT_MODEL_CAPS[modelKey]).default(CUSTOM_CONTEXT_MODEL_DEFAULTS[modelKey])])),
+}
+// Schemastery before 3.18.4 has no .volatile() helper. The Host still reads
+// the same volatile metadata, so use the older public .extra() API for every
+// supported DSH cohort instead of silently exposing read-only settings.
+export const Config = z.object(Object.fromEntries(Object.entries(settingsFields).map(([key, field]) => [key, field.extra('volatile', true)])))
+
+export function apply(ctx, config = {}) {
+  const settings = createSettingsAdapter(ctx, config)
+  const searchProvider = createSearchProviderSwitcher(ctx.loader)
+  const network = createCodexNetworkTransport()
+  const diagnosticOperations = createDiagnosticOperations()
+  ctx.effect(() => ctx.on?.('tools/result', (exec, result) => diagnosticOperations.tool(exec, result)), 'codex-subscription: operation evidence')
+  const originalImages = new OriginalImageStore()
+  const accountVault = new DshOAuthAccountVault(ctx.credentials, {
+    key: ACCOUNT_VAULT_KEY,
+    legacyRef: CREDENTIAL_REF,
+    legacyRefs: [LEGACY_CREDENTIAL_REF],
+  })
+  const store = new DshOAuthCredentialStore(ctx.credentials, CREDENTIAL_REF, [LEGACY_CREDENTIAL_REF], {
+    expirySkewMs: OAUTH_EXPIRY_SKEW_MS,
+    vault: accountVault,
+  })
+  const baseProvider = openaiCodexProvider()
+  let resolveAuth = async () => undefined
+  let subagentBackend
+  const runtimeManagement = createRuntimeManagement({
+    manager: () => ctx.get?.('pluginManager'), inspect: inspectSubagentRuntime,
+    active: () => subagentBackend?.activeCount() ?? 0,
+    selectDsh: async () => { if (subagentBackend) await subagentBackend.select('dsh'); else await settings.update({ subagentBackend: 'dsh' }) },
+  })
+  ctx.effect(() => ctx.on?.('plugin-manager/install-state', value => runtimeManagement.progress(value)))
+  const modelCatalog = createOfficialModelCatalog({
+    onUpdated: () => ctx.llm.emitAdaptersUpdated?.(),
+    getAuth: options => resolveAuth(options),
+    readCredential: options => store.read(PROVIDER, options),
+    baseModels: () => baseProvider.getModels(),
+    fetch: (input, init) => network.fetch('catalog', input, init),
+  })
+  const connection = createSubscriptionConnection({ resolveMode: () => settings.get().connectionMode })
+  // The settings surface edits DSH's own default model instead of keeping a
+  // second copy, so every new conversation opens on what the user selected.
+  const defaultModel = createDefaultModelController({
+    resolveService: () => ctx.get?.('agentDefaultModel'),
+    listModels: () => modelCatalog.getModels().map(model => model.id),
+  })
+  const compaction = createCompactionBridge({
+    enabled: () => settings.get().compactionMode === 'cloud',
+    accountScope: async () => {
+      await resolveAuth()
+      const credential = await store.read(PROVIDER)
+      return credential?.type === 'oauth' ? credential.accountId : undefined
+    },
+  })
+  ctx.effect(() => () => connection.dispose())
+  const provider = openaiCodexSubscriptionProvider({
+    connection,
+    compaction,
+    resolveSpeedMode: () => settings.get()[SPEED_MODE_FIELD],
+    resolveOutputVerbosity: () => normalizeOutputVerbosity(settings.get()[OUTPUT_VERBOSITY_FIELD]),
+    resolveInputImageDetail: () => settings.get()[INPUT_IMAGE_DETAIL_FIELD],
+    resolveReasoningSummary: () => settings.get()[REASONING_SUMMARY_FIELD],
+    resolveContextMode: () => normalizeContextMode(settings.get()[CONTEXT_MODE_FIELD]),
+    resolveCustomContextWindow: modelKey => {
+      const overrides = readCapabilitySettings(settings.get())[CUSTOM_CONTEXT_OVERRIDES_FIELD]
+      if (Object.hasOwn(overrides, modelKey)) return overrides[modelKey]
+      const field = CUSTOM_CONTEXT_MODEL_FIELDS[modelKey]
+      if (field === undefined) return undefined
+      return normalizeCustomContextWindow(settings.get()[field] ?? CUSTOM_CONTEXT_MODEL_DEFAULTS[modelKey], CUSTOM_CONTEXT_MODEL_CAPS[modelKey])
+    },
+    resolveReviewModel: () => settings.get().reviewModel,
+    catalog: modelCatalog,
+    runNetwork: network.run,
+  })
+  const preferences = {
+    status: () => {
+      const models = modelCatalog.getModels()
+      return {
+        [DISABLED_MODELS_FIELD]: normalizeDisabledModels(settings.get()[DISABLED_MODELS_FIELD]),
+        [AUTO_QUOTA_RETRY_FIELD]: normalizeAutoQuotaRetry(settings.get()[AUTO_QUOTA_RETRY_FIELD]),
+        compactionMode: settings.get().compactionMode ?? 'dsh',
+        connectionMode: settings.get().connectionMode ?? 'sse',
+        reviewModel: settings.get().reviewModel ?? 'session',
+        remoteControl: settings.get().remoteControl ?? 'off',
+        subagentBackend: settings.get().subagentBackend ?? 'dsh',
+        subagentBackendAvailable: subagentBackend !== undefined,
+        subagentRuntimeInstalled: inspectSubagentRuntime().installed,
+        ...readCapabilitySettings(settings.get()),
+        [QUICK_QUOTA_MODE_FIELD]: normalizeQuickQuotaMode(
+          settings.get()[QUICK_QUOTA_MODE_FIELD],
+          settings.get()[LEGACY_QUICK_QUOTA_FIELD],
+        ),
+        [SEARCH_PROVIDER_FIELD]: settings.get()[SEARCH_PROVIDER_FIELD],
+        [SPEED_MODE_FIELD]: settings.get()[SPEED_MODE_FIELD],
+        [OUTPUT_VERBOSITY_FIELD]: normalizeOutputVerbosity(settings.get()[OUTPUT_VERBOSITY_FIELD]),
+        [INPUT_IMAGE_DETAIL_FIELD]: normalizeInputImageDetail(settings.get()[INPUT_IMAGE_DETAIL_FIELD]),
+        [REASONING_SUMMARY_FIELD]: normalizeReasoningSummary(settings.get()[REASONING_SUMMARY_FIELD]),
+        [RETRY_POLICY_FIELD]: normalizeRetryPolicy(settings.get()[RETRY_POLICY_FIELD]),
+        [STREAM_IDLE_TIMEOUT_MINUTES_FIELD]: normalizeStreamIdleTimeoutMinutes(settings.get()[STREAM_IDLE_TIMEOUT_MINUTES_FIELD]),
+        [CONTEXT_MODE_FIELD]: normalizeContextMode(settings.get()[CONTEXT_MODE_FIELD]),
+        [CUSTOM_CONTEXT_WINDOW_FIELD]: normalizeCustomContextWindow(settings.get()[CUSTOM_CONTEXT_WINDOW_FIELD]),
+        ...Object.fromEntries(Object.entries(CUSTOM_CONTEXT_MODEL_FIELDS).map(([modelKey, field]) => [field, normalizeCustomContextWindow(settings.get()[field] ?? CUSTOM_CONTEXT_MODEL_DEFAULTS[modelKey], CUSTOM_CONTEXT_MODEL_CAPS[modelKey])])),
+        contextModels: contextModelGroups(models),
+        availableModels: models.map(({ id, name }) => ({ id, name })),
+        catalogStatus: modelCatalog.status(),
+        verbosityModels: provider.getModels().filter(model => modelCatalog.metadata(model.id)?.supportVerbosity ?? model.id !== 'gpt-5.3-codex-spark').map(model => model.id),
+        ultrafastModels: provider.getModels().filter(model => modelCatalog.metadata(model.id)?.supportsUltrafast === true).map(model => model.id),
+        fastModels: provider.getModels().filter(model => modelCatalog.metadata(model.id)?.supportsFast ?? supportsCodexFastMode(model.id)).map(model => model.id),
+        writable: ctx.settings.writable,
+      }
+    },
+    update: async patch => {
+      if (Object.hasOwn(patch, 'subagentBackend')) {
+        if (!subagentBackend) throw new Error('DSH subagent services are unavailable')
+        await subagentBackend.select(patch.subagentBackend)
+      }
+      const rest = { ...patch }
+      delete rest.subagentBackend
+      if (Object.keys(rest).length) await settings.update(rest)
+    },
+  }
+  const authModels = createModels({ credentials: store })
+  authModels.setProvider(provider)
+  const profile = Object.freeze({
+    provider: PROVIDER,
+    displayName: 'ChatGPT subscription',
+    piProvider: provider,
+    configuredMaxTokens: new Map(),
+    // Custom PiAiAdapter profiles bypass the settings-backed profile resolver,
+    // so the model diagnostics the host adapter reads on resolution must be
+    // present here rather than left undefined.
+    modelErrors: new Map(),
+    // Custom PiAiAdapter profiles bypass the settings-backed profile resolver,
+    // so request-image limits must be complete here rather than left undefined.
+    maxRequestImageBytes: MAX_REQUEST_IMAGE_BYTES,
+    requestImagePixelBudget: REQUEST_IMAGE_PIXEL_BUDGET,
+    requestImageMaxBytes: REQUEST_IMAGE_MAX_BYTES,
+    // pi-ai owns prompt_cache_key and encrypted reasoning replay. The explicit
+    // profile values make the subscription cache contract auditable.
+    cacheRetention: 'short',
+    // The request-local connection policy upgrades this only when opted in.
+    transport: 'sse',
+  })
+  // Retries are DSH's own: this only hands its retry layer the policy the person chose.
+  const retryProfile = choice => {
+    const retryPolicy = retryPolicyFor(choice, dshLlm.resolveRetryPolicy)
+    return retryPolicy === undefined ? {} : { retryPolicy }
+  }
+  let profileKey
+  let profileSnapshot
+  const profiles = () => {
+    const preferences = settings.get()
+    const streamIdleTimeoutMinutes = normalizeStreamIdleTimeoutMinutes(preferences[STREAM_IDLE_TIMEOUT_MINUTES_FIELD])
+    const retryChoice = normalizeRetryPolicy(preferences[RETRY_POLICY_FIELD])
+    const key = JSON.stringify([modelCatalog.revision(), streamIdleTimeoutMinutes, retryChoice, normalizeContextMode(preferences[CONTEXT_MODE_FIELD]), preferences[CUSTOM_CONTEXT_OVERRIDES_FIELD], ...Object.values(CUSTOM_CONTEXT_MODEL_FIELDS).map(field => preferences[field])])
+    if (key !== profileKey) {
+      profileKey = key
+      profileSnapshot = new Map([[PROVIDER, Object.freeze({ ...profile, streamIdleTimeoutMs: streamIdleTimeoutMinutes * 60 * 1000, ...retryProfile(retryChoice) })]])
+    }
+    return profileSnapshot
+  }
+  resolveAuth = () => authModels.getAuth(PROVIDER)
+  ctx.inject(['subagents', 'subprocess', 'sandboxPolicy'], scoped => {
+    const instance = createSubscriptionSubagent({
+      ctx: scoped, nativeHome: dshHomePath('state', 'codex-subscription', 'native-subagent'),
+      resolveAuth, store,
+      refresh: credential => network.run('oauth', () => baseProvider.auth.oauth.refresh(credential)),
+      loadRuntime: loadSubagentRuntime,
+      maintenance: runtimeManagement.blocked,
+    })
+    scoped.subagents.registerProvider(instance.provider)
+    const switcher = createSubagentBackendSwitcher({
+      entries: () => [...scoped.loader.entries(), ...presetEntries(scoped)], prepare: instance.prepare,
+      persist: mode => settings.update({ subagentBackend: mode }),
+    })
+    // Web presets mount their scoped tool rows lazily, after the settings page.
+    const unconfigure = scoped.on('internal/config', function(_config, next) {
+      return switcher.configure(this, next())
+    }, { global: true })
+    let requested = 'dsh'
+    const select = async mode => {
+      requested = mode
+      try { await switcher.select(mode) } catch (error) { requested = settings.get().subagentBackend ?? 'dsh'; throw error }
+    }
+    subagentBackend = { select, activeCount: instance.activeCount }
+    const sync = value => {
+      const mode = value.subagentBackend ?? 'dsh'
+      if (mode !== requested) void select(mode).catch(() => scoped.logger.warn('Could not switch the subscription subagent backend'))
+    }
+    void scoped.loader.await().then(() => sync(settings.get())).catch(() => scoped.logger.warn('Could not initialize the subscription subagent backend'))
+    const unwatch = settings.watch(sync)
+    scoped.effect(() => async () => {
+      unwatch()
+      unconfigure()
+      subagentBackend = undefined
+      instance.dispose()
+      await switcher.dispose()
+    }, 'codex-subscription: subagent backend')
+  })
+  const adapterAuth = Object.freeze({
+    credentials: store,
+    authContext: Object.freeze({
+      env: async () => undefined,
+      fileExists: async () => false,
+    }),
+  })
+  ctx.effect(() => watchImageTool(settings, () => ctx.tools.register(createCodexImageTool({
+    getFeatures: () => settings.get(),
+    getAuth: resolveAuth,
+    readCredential: options => store.read(PROVIDER, options),
+    attachments: ctx.attachments,
+    getSessionMessages: sessionId => ctx.get?.('sessions')?.get?.(sessionId)?.deriveMessages?.() ?? [],
+    originalImages,
+    fetch: (input, init) => network.fetch('image', input, init),
+  }))), 'codex-subscription: image tool availability')
+  const adapter = new PiAiAdapter({
+    profiles,
+    resolveApiKey: async () => {
+      let resolved
+      try {
+        resolved = await resolveAuth()
+      } catch {
+        throw new dshLlm.LlmError('ChatGPT subscription authorization failed', 'AUTH_FAILED')
+      }
+      if (typeof resolved?.auth.apiKey !== 'string' || resolved.auth.apiKey.length === 0) {
+        throw new dshLlm.LlmError('ChatGPT subscription is not signed in', 'MISSING_CREDENTIAL')
+      }
+      return resolved.auth.apiKey
+    },
+    auth: adapterAuth,
+    resolveAttachments: () => ctx.get?.('attachments'),
+  })
+  ctx.llm.registerAdapter([PROVIDER], compaction.wrapAdapter(adapter))
+  const currentAgent = () => ctx.get?.('agents')?.currentInitiator?.()
+  const codexSearch = createCodexSearchProvider({
+    resolvePreferences: () => readCapabilitySettings(settings.get()),
+    getAuth: resolveAuth,
+    readCredential: options => store.read(PROVIDER, options),
+    resolveModel: () => {
+      const request = currentAgent()?.session.requestContext?.()
+      return request?.provider === PROVIDER ? request.model : undefined
+    },
+    resolveSessionId: () => currentAgent()?.session.id,
+    fetch: (input, init) => network.fetch('search', input, init),
+  })
+  ctx.web.registerSearchProvider(codexSearch)
+  ctx.web.registerSearchProvider(createCodexAutoSearchProvider({
+    codex: codexSearch,
+    resolveModelProvider: () => currentAgent()?.session.requestContext?.()?.provider,
+    resolveDshProvider: () => ctx.web.searchProviders?.get(searchProvider.dshProviderId()),
+  }))
+  ctx.effect(() => {
+    const select = async value => {
+      try {
+        await searchProvider.select(value[SEARCH_PROVIDER_FIELD])
+      } catch (error) {
+        ctx.logger?.warn?.('could not select the configured web search provider: %s', error.message)
+      }
+    }
+    void select(settings.get())
+    return settings.watch(select)
+  }, 'codex-subscription: search provider selection')
+
+  const auth = createCodexAuthService(authModels, store, {
+    runLogin: operation => network.run('login', operation),
+    accountVault,
+    createLoginModels: credentials => {
+      const loginModels = createModels({ credentials })
+      loginModels.setProvider(provider)
+      return loginModels
+    },
+  })
+  const coordinator = new CodexLoginCoordinator(auth)
+  const remoteBridge = createDshRemoteControl({
+    controller: () => ctx.get?.('sessionController'),
+    agents: () => ctx.get?.('agents'),
+    permissions: () => ctx.get?.('permissionPresets'),
+    workspaces: () => ctx.get?.('workspaceRegistry'),
+    attachments: () => ctx.attachments,
+    usage: () => usageReader,
+    projections: () => ctx.get?.('sessionProjections'),
+    skills: () => ctx.get?.('skills'),
+    llm: () => ctx.llm,
+    trace: entry => { try { remoteControl.host.note(entry) } catch { /* diagnostics only */ } },
+    userAgent: USER_AGENT,
+  })
+  const remoteControl = createRemoteControl({
+    credentials: signal => readSubscriptionCredentials(resolveAuth, options => store.read(PROVIDER, { ...options, signal }), signal),
+    WebSocket,
+    fetch: (input, init) => network.fetch('remote', input, init),
+    stateFile: dshHomePath('state', 'codex-subscription', 'remote-control.json'),
+    hostName: `DSH (${hostname()})`,
+    userAgent: USER_AGENT,
+    // Only for acceptance runs against a local stand-in relay; anything but chatgpt.com or a loopback address is refused.
+    base: process.env.DSH_CODEX_REMOTE_BASE || undefined,
+    methods: remoteBridge.methods,
+    onActive: (_client, notify) => remoteBridge.adopt(notify),
+    onClose: (_client, notify) => remoteBridge.forget(notify),
+  })
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => { try { remoteBridge.onStream(agent?.session, frame) } catch { /* the phone view must never disturb the session */ } })
+  ctx.on('session/event', (session, event) => { try { remoteBridge.onSessionEvent(session, event) } catch { /* the phone view must never disturb the session */ } })
+  // Prepended: the DSH window answers these too and would otherwise claim them before the phone sees them.
+  ctx.on('approval/request', (request, next) => { try { return remoteBridge.onApproval(request, next) } catch { return next() } }, true)
+  ctx.on('user-questions/request', (request, next) => { try { return remoteBridge.onQuestion(request, next) } catch { return next() } }, true)
+  ctx.effect(() => {
+    // Remote Control stays off until the user switches it on; then it follows the setting.
+    let wanted = false
+    const follow = value => {
+      const next = value.remoteControl === 'on'
+      if (next === wanted) return
+      wanted = next
+      void (next ? remoteControl.enable() : remoteControl.disable()).catch(error => ctx.logger?.debug?.('Remote Control: %s', error?.code ?? error?.message))
+    }
+    follow(settings.get())
+    const unwatch = settings.watch(follow)
+    return () => { unwatch(); void remoteControl.disable().catch(() => {}) }
+  }, 'codex-subscription: Remote Control host')
+  const baseUsageReader = createCodexUsageReader({
+    getAuth: resolveAuth,
+    readCredential: options => store.read(PROVIDER, options),
+    fetch: (input, init) => network.fetch('quota', input, init),
+  })
+  const usageReader = createQuotaForecastReader({
+    reader: baseUsageReader,
+    enabled: () => normalizeQuickQuotaMode(settings.get()[QUICK_QUOTA_MODE_FIELD], settings.get()[LEGACY_QUICK_QUOTA_FIELD]) === QUICK_QUOTA_MODE_FORECAST,
+    scope: async () => await accountVault?.activeId() ?? 'legacy',
+    stateStore: new QuotaForecastStateStore({
+      filename: dshHomePath('state', 'codex-subscription', 'quota-forecast.json'),
+    }),
+  })
+  ctx.effect(() => {
+    let forecasting = false
+    const warmForecast = value => {
+      const next = normalizeQuickQuotaMode(value[QUICK_QUOTA_MODE_FIELD], value[LEGACY_QUICK_QUOTA_FIELD]) === QUICK_QUOTA_MODE_FORECAST
+      if (!next) {
+        if (forecasting) void usageReader.clear().catch(error => ctx.logger?.debug?.('could not clear Codex quota forecast: %s', error.message))
+        forecasting = false
+        return
+      }
+      forecasting = true
+      void usageReader.read().catch(error => ctx.logger?.debug?.('could not warm Codex quota forecast: %s', error.message))
+    }
+    warmForecast(settings.get())
+    const unwatch = settings.watch(warmForecast)
+    return () => {
+      unwatch()
+      usageReader.clearCache()
+    }
+  }, 'codex-subscription: quota forecast warm-up')
+  const quotaRetryLifetime = new AbortController()
+  const activeQuotaRetries = new Set()
+  const quotaRetryHandler = createCodexQuotaRetryHandler({
+    usageReader,
+    enabled: () => normalizeAutoQuotaRetry(settings.get()[AUTO_QUOTA_RETRY_FIELD]),
+    modelsReady: catalogModelsReady(modelCatalog),
+  })
+  const disposeQuotaRetry = ctx.on('agent/request-error', (payload, next) => {
+    if (quotaRetryLifetime.signal.aborted) return Promise.resolve(undefined)
+    const signal = payload.signal === undefined
+      ? quotaRetryLifetime.signal
+      : AbortSignal.any([payload.signal, quotaRetryLifetime.signal])
+    const operation = quotaRetryHandler({ ...payload, signal }, next)
+    const tracked = operation.finally(() => activeQuotaRetries.delete(tracked))
+    activeQuotaRetries.add(tracked)
+    return tracked
+  })
+  ctx.effect(() => async () => {
+    disposeQuotaRetry()
+    quotaRetryLifetime.abort(new Error('codex-subscription quota retry disposed'))
+    await Promise.allSettled([...activeQuotaRetries])
+  }, 'codex-subscription: abort and drain quota recovery')
+  ctx.effect(() => settings.watch((value, previous) => {
+    if (normalizeAutoQuotaRetry(value[AUTO_QUOTA_RETRY_FIELD])
+      !== normalizeAutoQuotaRetry(previous?.[AUTO_QUOTA_RETRY_FIELD])) {
+      quotaRetryHandler.notifyConfigurationChanged()
+    }
+  }), 'codex-subscription: update quota recovery preference')
+  const resetCreditService = createCodexResetCreditService({
+    getAuth: resolveAuth,
+    readCredential: options => store.read(PROVIDER, options),
+    usageReader,
+    fetch: (input, init) => network.fetch('quota-reset', input, init),
+  })
+  const sketchBridge = createSketchAgentBridge({enabled:()=>settings.get().imageSketchAgent && settings.get().imageSketch && settings.get().imageEditing})
+  ctx.effect(()=>{
+    let dispose
+    const sync=()=>{
+      const value=settings.get()
+      if(value.imageSketchAgent && value.imageSketch && value.imageEditing){dispose??=ctx.tools.register(createSketchAgentTool(sketchBridge,ctx.attachments,sessionId=>ctx.get?.('sessions')?.get?.(sessionId)?.deriveMessages?.()??[]))}
+      else {dispose?.();dispose=undefined;sketchBridge.dispose()}
+    }
+    sync();const unwatch=settings.watch(sync)
+    return ()=>{unwatch();dispose?.();sketchBridge.dispose()}
+  },'codex-subscription: native sketch tool')
+  const subscriptionHandler = createSubscriptionRpcHandler({
+    authHandler: createCodexRpcHandler(coordinator, { openExternal: openCodexAuthUrl }),
+    usageReader,
+    resetCreditService,
+    preferences,
+    defaultModel,
+    runtimeManagement,
+    remoteControl,
+    onAccountChanged: quotaRetryHandler.notifyAccountChanged,
+    diagnosticsReader: () => createSubscriptionDiagnostics({ auth, preferences, login: coordinator.supportState(), network, modelCatalog, connection, compaction, review: provider, operations: diagnosticOperations, runtimeManagement, storage: () => usageReader.storage(), tools: ctx.tools }),
+    onCleanupFailure: () => diagnosticOperations.record('account/cleanup', 'failed'),
+    modelCatalog,
+    closeConnections: () => connection.dispose(),
+    originalImages,
+    resolveInheritedOriginal: (sessionId, assetId) => inheritedOriginalImageRef(
+      ctx.get?.('sessions')?.get?.(sessionId),
+      assetId,
+    ),
+  })
+
+  const handler=diagnosticOperations.wrap((endpoint,payload,signal)=>endpoint.startsWith('sketch/')?sketchBridge.rpc(endpoint,payload):subscriptionHandler(endpoint,payload,signal))
+  ctx.effect(() => {
+    void modelCatalog.refresh().catch(error => ctx.logger?.debug?.('could not refresh Codex model catalog: %s', error.message))
+  }, 'codex-subscription: official model catalog')
+
+  ctx.inject(['connection'], connectionContext => connectionContext.effect(
+    () => registerSubscriptionTransport(connectionContext.connection, handler),
+    'codex-subscription: DSH-trusted account RPC',
+  ))
+}
+
+export { createCodexAuthService, DshOAuthCredentialStore } from './credential-store.js'
+export { createSubscriptionDiagnostics } from './diagnostics.js'
+export { normalizeContextMode, normalizeCustomContextWindow } from './settings-contract.js'
+export { createDefaultModelController, DEFAULT_MODEL_PROVIDER } from './default-model.js'
+export { assertCodexAuthUrl, commandForCodexAuthUrl, openCodexAuthUrl } from './external-url.js'
+export { CodexLoginCoordinator, createCodexRpcHandler } from './login-coordinator.js'
+export { CODEX_USAGE_URL, createCodexUsageReader, parseCodexUsage } from './usage.js'
+export {
+  CODEX_RESET_CONSUME_URL,
+  CODEX_RESET_CREDITS_URL,
+  createCodexResetCreditService,
+} from './reset-credits.js'
+export {
+  CODEX_IMAGE_GENERATION_URL,
+  CODEX_IMAGE_TOOL_NAME,
+  createCodexImageTool,
+  decodeCodexPng,
+} from './codex-images.js'

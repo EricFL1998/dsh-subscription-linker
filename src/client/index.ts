@@ -87,9 +87,11 @@ const CHIP_ORDER = 10
 
 /**
  * Required services: `slots` carries the registration seat, `connection` the
- * RPC caller, and `locale` the copy dictionaries.
+ * RPC caller, `locale` the copy dictionaries, and `modelDirectories` the picker's
+ * per-session model directory (read for the current selection, written when the
+ * chip's quick-mode button routes to a fast variant).
  */
-export const inject = ['slots', 'connection', 'locale']
+export const inject = ['slots', 'connection', 'locale', 'modelDirectories']
 
 /**
  * Register the Subscriptions settings section.
@@ -123,12 +125,32 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.composer.dock',
     id: 'subscription-usage',
     order: CHIP_ORDER,
-    inject: (): UsageChipInjected => ({
+    inject: (sessionId?: string): UsageChipInjected => ({
       call,
       t: t as unknown as UsageChipInjected['t'],
       isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
       accountBalance: createAccountBalanceCall(connection.rpc),
       ccSwitchBalance: createCcSwitchBalanceCall(connection.rpc),
+      // The session's model directory: read for the current selection, written when the
+      // quick-mode button routes to a fast variant. Absent on a host without it.
+      modelDirectory: sessionId === undefined ? undefined : modelDirectoryFor(ctx, sessionId) as UsageChipInjected['modelDirectory'],
     }),
   }, UsageChip))
+}
+
+/** One session's model directory, when the host exposes the service. */
+function modelDirectoryFor(ctx: ClientContext, sessionId: string): unknown {
+  try {
+    const directories = (ctx as unknown as { get: (key: string) => unknown }).get('modelDirectories') as
+      | { directoryFor?: (id: string) => { store?: unknown, select?: (selection: unknown) => Promise<unknown> } | undefined }
+      | undefined
+    const directory = directories?.directoryFor?.(sessionId)
+    if (directory === undefined) return undefined
+    return {
+      store: directory.store,
+      select: (selection: unknown) => directory.select?.(selection),
+    }
+  } catch {
+    return undefined
+  }
 }

@@ -1,0 +1,36 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+.canvas { position: relative; width: 1600px; height: 1050px; overflow: hidden; color: #f5f7fa; background: radial-gradient(ellipse at 80% 43%, #263640 0%, #111b23 38%, #10171e 66%); }
+header { position: absolute; left: 76px; right: 76px; top: 57px; display: flex; align-items: center; justify-content: space-between; }
+.brand { font-size: 23px; font-weight: 750; letter-spacing: -.3px; }
+.brand span { margin-left: 8px; font-weight: 450; color: #bec9d0; }
+.open-source { color: #95a6b1; letter-spacing: 2px; font-size: 12px; }
+.story { position: absolute; top: 238px; left: 76px; width: 555px; }
+.eyebrow { margin: 0 0 28px; color: #8caeb9; font-size: 13px; letter-spacing: 2.1px; font-weight: 600; }
+h1 { font-size: 58px; line-height: 1.3; letter-spacing: -2px; font-weight: 650; margin: 0; }
+h1 em { color: #a5dacc; font-style: normal; }
+.en h1 { font-size: 57px; line-height: 1.25; letter-spacing: -2.6px; }
+.intro { color: #aebbc4; font-size: 21px; line-height: 1.8; margin: 26px 0 0; }
+.features { margin: 41px 0 0; padding: 0; list-style: none; display: grid; gap: 25px; }
+.features li { display: flex; gap: 15px; align-items: flex-start; }
+.feature-marker { width: 5px; height: 5px; border-radius: 50%; background: #91b7ab; flex-shrink: 0; margin-top: 12px; }
+.features strong { font-size: 20px; line-height: 1.5; font-weight: 550; display: block; }
+.features div>span { font-size: 16px; color: #92a4af; line-height: 1.7; display: block; margin-top: 5px; }
+.install { margin-top: 46px; border-top: 1px solid #31404a; padding-top: 23px; display: flex; flex-direction: column; gap: 10px; }
+.install>span { font-size: 12px; color: #91a3ae; letter-spacing: 1px; }
+.install code { color: #d2dee5; font-size: 19px; font-family: "Cascadia Code", Consolas, monospace; letter-spacing: -.25px; }
+.product { position: absolute; left: 692px; top: 148px; width: 832px; margin: 0; }
+.product img { width: 832px; height: 832px; display: block; border-radius: 29px; box-shadow: 0 35px 65px #0007, 0 0 0 1px #ffffff10; }
+.product figcaption { margin-top: 17px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #91a3ae; font-size: 12px; }
+.live-dot { height: 5px; width: 5px; border-radius: 50%; background: #8bb7a8; }
+footer { position: absolute; left: 76px; bottom: 49px; width: 550px; display: flex; justify-content: space-between; color: #748692; font-size: 11px; }
+body { background:#10171e; }
+.product { top:135px; }
+.account-demo { width:832px; padding:28px; background:#252527; border:1px solid #ffffff15; border-radius:24px; box-shadow:0 30px 70px #0006; color:#eee; font-size:14px; --dsw-alias-border-l2:#ffffff15; --dsw-alias-border-l3:#ffffff30; --dsw-alias-bg-module:#303033; --dsw-alias-bg-module-platform:#353538; --dsw-alias-label-primary:#f4f4f5; --dsw-alias-label-secondary:#c1c1c7; --dsw-alias-label-tertiary:#a3a3ac; --dsw-alias-label-dimmed:#888; --dsw-alias-state-success-primary:#36cb80; }
+.demo-top {display:flex;justify-content:space-between;color:#aaa;font-size:12px;margin-bottom:22px;letter-spacing:.3px}
+.account-demo button {font:inherit;color:inherit;cursor:pointer}
+.account-demo h2 {font-size:21px;margin:0 0 20px}
+.account-demo .codexSubscriptionCard {background:#202022}
+.account-demo .codexSubscriptionActions button,.account-demo .codexSubscriptionRefresh {background:transparent;border:1px solid #ffffff25;border-radius:999px;padding:8px 15px;font-size:12px}
+.demo-note {text-align:right;color:#93939c;font-size:11px;margin-top:18px}
+.account-demo { --dsw-alias-bg-layer-1:#222224; --dsw-alias-bg-base:#222224; }
