@@ -13,6 +13,7 @@ import { LOGIN_CANCELLED_MESSAGE } from '../auth/device-flow.js'
 import {
   finishWorkBuddySignIn,
   parseWorkBuddySession,
+  readWorkBuddyUsage,
   refreshWorkBuddyToken,
   startWorkBuddySignIn,
   workbuddyRefreshable,
@@ -175,6 +176,18 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
     fetchFn,
   })
 
+  /** The stored session's fields as the token a request or meter signs with. */
+  const tokenOf = (session: WorkBuddySession): WorkBuddyTokenSet => ({
+    accessToken: session.accessToken,
+    expiresAt: session.expiresAt,
+    ...session.refreshToken === undefined ? {} : { refreshToken: session.refreshToken },
+    ...session.uid === undefined ? {} : { uid: session.uid },
+    ...session.enterpriseId === undefined ? {} : { enterpriseId: session.enterpriseId },
+    ...session.domain === undefined ? {} : { domain: session.domain },
+    ...session.tokenType === undefined ? {} : { tokenType: session.tokenType },
+    ...session.refreshExpiresAt === undefined ? {} : { refreshExpiresAt: session.refreshExpiresAt },
+  })
+
   const spec: ProviderSpec<WorkBuddySession> = {
     id: WORKBUDDY_PROVIDER_ID,
     displayName: WORKBUDDY_PROVIDER_NAME,
@@ -187,7 +200,12 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
     catalogOwn: () => adapter.ownCatalogEntries(),
     fallbackContextWindow: WORKBUDDY_CATALOG[0]?.contextWindow ?? 0,
     discover: () => Promise.resolve(undefined),
-    usage: () => Promise.resolve({ windows: [] }),
+    usage: async (_accessToken, account) => {
+      const held = await store.get(account)
+      if (held === undefined) return undefined
+      const read = await readWorkBuddyUsage(tokenOf(held), held.accountId, fetchFn)
+      return { plan: read.plan, windows: read.windows }
+    },
     details: () => [
       { key: 'provider', value: WORKBUDDY_PROVIDER_NAME },
       { key: 'endpoint', value: 'https://copilot.tencent.com' },

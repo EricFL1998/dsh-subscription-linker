@@ -348,3 +348,127 @@ function workbuddyEnterpriseHeaders(token: WorkBuddyTokenSet): Record<string, st
   const enterprise = typeof token.enterpriseId === 'string' ? token.enterpriseId.trim() : ''
   return enterprise === '' ? {} : { 'X-Enterprise-Id': enterprise, 'X-Tenant-Id': enterprise }
 }
+
+// ---- the credits meter ------------------------------------------------------
+
+/** One metered window the Settings card reads. */
+export interface WorkBuddyUsageWindow {
+  label: string
+  usedPercent?: number
+  used?: number
+  limit?: number
+  resetsAt?: number
+}
+
+/** A capacity the billing API sends, as a string or number; empty is 0. */
+function capacity(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0
+  if (typeof value === 'number') return value
+  const text = String(value)
+  const number = Number(text)
+  return Number.isNaN(number) ? 0 : number
+}
+
+/** A count as the card says one: whole, else to two places. */
+function compact(number: number): string {
+  return Number.isInteger(number)
+    ? String(number)
+    : number.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/** Ask the billing API, saying its message, else its code, else the HTTP status. */
+async function workbuddyMeter(
+  token: WorkBuddyTokenSet,
+  path: string,
+  body: Record<string, unknown>,
+  fetchFn: typeof fetch,
+): Promise<Record<string, unknown> | null> {
+  const response = await fetchFn(WORKBUDDY_ENDPOINT + path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': `WorkBuddy/${WORKBUDDY_UA_VERSION}`,
+      ...workbuddyHeaders(token),
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  })
+  let env: Record<string, unknown> = {}
+  try {
+    env = JSON.parse(await response.text()) as Record<string, unknown>
+  } catch {
+    env = {}
+  }
+  const code = Number.parseInt(String(env.code ?? ''), 10) || 0
+  if (!response.ok) {
+    if (code) throw new Error(String(env.msg ?? `error ${code}`))
+    if (env.msg) throw new Error(String(env.msg))
+    throw new Error(`HTTP ${response.status}`)
+  }
+  if (code !== 0) throw new Error(String(env.msg ?? `error ${code}`))
+  return isRecord(env.data) ? env.data : null
+}
+
+/** The account's credits from its resource summary: the plan's used against granted. */
+function usageOfSummary(summary: Record<string, unknown> | null, plan: string | undefined): {
+  plan: string
+  windows: WorkBuddyUsageWindow[]
+} {
+  const isPaid = summary?.IsPaidUser === true
+  const out: { plan: string, windows: WorkBuddyUsageWindow[] } = { plan: plan ?? (isPaid ? 'Pro' : 'Free'), windows: [] }
+  let total = 0
+  let used = 0
+  const packages = Array.isArray(summary?.Packages) ? summary.Packages.filter(isRecord) : []
+  for (const pkg of packages) {
+    total += capacity(pkg.CycleTotalCapacity)
+    used += capacity(pkg.CycleUsedCapacity)
+  }
+  if (total > 0) {
+    out.windows.push({
+      label: 'Credits',
+      usedPercent: (100 * used) / total,
+      used,
+      limit: total,
+    })
+  }
+  return out
+}
+
+/** An enterprise account's credits, from the enterprise meter; null when it grants none. */
+function enterpriseUsageOf(data: Record<string, unknown> | null): WorkBuddyUsageWindow | null {
+  const limit = capacity(data?.limitNum)
+  if (!(limit > 0)) return null
+  const used = capacity(data?.credit)
+  const window: WorkBuddyUsageWindow = { label: 'Credits', usedPercent: (100 * used) / limit, used, limit }
+  const at = (value: unknown): number =>
+    typeof value === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value.trim())
+      ? Date.parse(value.trim().replace(' ', 'T') + '+08:00')
+      : 0
+  const reset = at(data?.cycleResetTime)
+  const start = at(data?.cycleStartTime)
+  if (reset > 0) window.resetsAt = reset
+  return window
+}
+
+/** Read the account's plan and metered credits for the Settings card. */
+export async function readWorkBuddyUsage(
+  token: WorkBuddyTokenSet,
+  plan: string | undefined,
+  fetchFn: typeof fetch,
+): Promise<{ plan: string, windows: WorkBuddyUsageWindow[] }> {
+  const summary = await workbuddyMeter(token, '/billing/meter/get-user-resource-summary', {}, fetchFn)
+  const out = usageOfSummary(summary, plan)
+  // An enterprise account's summary has no packages: its credits are the enterprise meter's.
+  if (out.windows.length === 0) {
+    try {
+      const enterprise = enterpriseUsageOf(await workbuddyMeter(token, '/billing/meter/get-enterprise-user-usage', {}, fetchFn))
+      if (enterprise !== null) {
+        return { plan: plan ?? 'Enterprise', windows: [enterprise] }
+      }
+    } catch {
+      // The personal-account refusal (10001) leaves the card as the summary said.
+    }
+  }
+  return out
+}

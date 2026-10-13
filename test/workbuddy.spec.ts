@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import {
   parseWorkBuddySession,
   mergeWorkBuddyToken,
+  readWorkBuddyUsage,
   workbuddyDomain,
   workbuddyHeaders,
   workbuddyRefreshable,
@@ -175,4 +176,51 @@ test('a credits-exhausted 403 names the package fix, not a network fault', async
     () => collect(adapter.stream(request())),
     (error: unknown) => error instanceof Error && /active credit package/i.test(error.message),
   )
+})
+
+test('readWorkBuddyUsage reads the account credits from the resource summary', async () => {
+  const fetchFn: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('/billing/meter/get-user-resource-summary')) {
+      return new Response(
+        JSON.stringify({ code: 0, data: { IsPaidUser: true, Packages: [
+          { CycleTotalCapacity: '1000', CycleUsedCapacity: '250' },
+          { CycleTotalCapacity: '500', CycleUsedCapacity: '125' },
+        ] } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const token: WorkBuddyTokenSet = { accessToken: 'at', uid: 'u1', expiresAt: Date.now() + 60_000 }
+  const read = await readWorkBuddyUsage(token, 'Pro', fetchFn)
+  assert.equal(read.plan, 'Pro')
+  assert.equal(read.windows.length, 1)
+  const credits = read.windows[0]!
+  assert.equal(credits.label, 'Credits')
+  assert.equal(credits.used, 375)
+  assert.equal(credits.limit, 1500)
+  assert.ok(Math.abs(credits.usedPercent! - 25) < 0.001)
+})
+
+test('readWorkBuddyUsage falls back to the enterprise meter for an enterprise account', async () => {
+  const fetchFn: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('/billing/meter/get-user-resource-summary')) {
+      return new Response(JSON.stringify({ code: 0, data: { IsPaidUser: true, Packages: [] } }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    if (url.includes('/billing/meter/get-enterprise-user-usage')) {
+      return new Response(
+        JSON.stringify({ code: 0, data: { limitNum: '800', credit: '200', cycleResetTime: '2026-10-20 00:00:00' } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const token: WorkBuddyTokenSet = { accessToken: 'at', uid: 'u1', enterpriseId: 'ent1', expiresAt: Date.now() + 60_000 }
+  const read = await readWorkBuddyUsage(token, undefined, fetchFn)
+  assert.equal(read.plan, 'Enterprise')
+  assert.equal(read.windows[0]?.used, 200)
+  assert.equal(read.windows[0]?.limit, 800)
+  assert.ok(read.windows[0]?.resetsAt !== undefined)
 })
