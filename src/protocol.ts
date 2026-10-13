@@ -344,10 +344,12 @@ export type BalanceResult =
   /** The account is signed out, or the read failed. */
   | { ok: false }
 
-/** One model's fast variant, as discovery reported it. */
+/** One model's fast and image variants, as discovery reported them. */
 export interface ModelVariants {
   /** Fast/lightspeed variant wire id, when the provider reported one. */
   fast?: string
+  /** Image-generation model wire id, when the provider reported one. */
+  image?: string
 }
 
 /** Result of `model-variants`: the variants for one model id. */

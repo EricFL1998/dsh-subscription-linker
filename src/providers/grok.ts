@@ -355,6 +355,14 @@ interface GrokCliMetadata {
 /** Model ids that are clearly not chat models. */
 const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
 
+/** Model ids that are image-generation models, matched per provider's naming. */
+const IMAGE_MODEL = /(?:^|[-_/])(?:image|imagine|draw|pic|photo)(?:[-_/]|$)/i
+
+/** True when a model id names an image-generation model. */
+export function isImageModel(id: string): boolean {
+  return IMAGE_MODEL.test(id)
+}
+
 /** Model ids that are the fast/lightspeed variant of a base model, matched per base. */
 const FAST_VARIANT = /(?:^|[-_])(?:fast|lightspeed|turbo|quick)$/i
 
@@ -404,6 +412,8 @@ export class GrokAdapter extends LlmAdapter {
   private readonly metadata = new Map<string, GrokCliMetadata>()
   /** Fast-variant wire id per base model, for the picker's quick-mode button. */
   private readonly fastVariants = new Map<string, string>()
+  /** Image-generation model id, when discovery reported one. */
+  private imageModel: string | undefined
 
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
@@ -585,6 +595,11 @@ export class GrokAdapter extends LlmAdapter {
     return this.fastVariants.get(baseId)
   }
 
+  /** The image-generation model id, when discovery reported one. */
+  imageModelId(): string | undefined {
+    return this.imageModel
+  }
+
   /** The curated catalog, for the Settings page's model list. */
   catalogEntries(): readonly CatalogEntry[] {
     return this.catalog()
@@ -670,9 +685,12 @@ export class GrokAdapter extends LlmAdapter {
         return undefined
       }
       const payload = await response.json() as { data?: { id?: unknown }[] }
-      const rawIds = (payload.data ?? [])
+      const allIds = (payload.data ?? [])
         .map((entry) => entry.id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0 && !NON_CHAT_ID.test(id))
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      // Image models are not chat models; they are picked by an agent, not the picker.
+      this.imageModel = allIds.find((id) => isImageModel(id))
+      const rawIds = allIds.filter((id) => !NON_CHAT_ID.test(id))
       // Fast/lightspeed variants ride with their base model: they share the base's
       // visibility switch and are reached by a picker button, not a separate row.
       this.fastVariants.clear()
@@ -916,7 +934,11 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
     reload: () => controller.reload(),
     modelVariants: (id: string) => {
       const fast = adapter.fastVariant(id)
-      return fast === undefined ? undefined : { fast }
+      const image = adapter.imageModelId()
+      return {
+        ...fast === undefined ? {} : { fast },
+        ...image === undefined ? {} : { image },
+      }
     },
   }
 }
