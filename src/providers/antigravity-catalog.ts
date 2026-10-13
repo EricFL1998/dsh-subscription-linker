@@ -141,13 +141,20 @@ const NON_AGENT = /(?:^|[-_])(?:tab|tabs|commit|transcription|audio|embedding|co
 export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
   if (!isRecord(payload) || !isRecord(payload.models)) return []
   const models = payload.models as Record<string, unknown>
-  // TEMP diagnostics: surface the raw model-id list so an over-eager filter is visible
-  // from the browser, where the node half's stdout is unreachable.
+  // TEMP diagnostics: write the raw model-id list to a file so an over-eager filter is
+  // inspectable after a discovery run, since the node half's stdout is unreachable in
+  // the desktop shell.
   try {
     const all = Object.keys(models)
     const kept = agentIds(payload)
-    const dropped = all.filter((id) => !kept.includes(id))
-    console.warn(`[subscription-oauth] antigravity models: ${all.length} raw, ${kept.length} kept, dropped: ${dropped.join(', ')}`)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    const { homedir } = require('node:os') as typeof import('node:os')
+    const { join } = require('node:path') as typeof import('node:path')
+    writeFileSync(
+      join(homedir(), '.dsh', 'antigravity-models-debug.json'),
+      JSON.stringify({ all, kept, dropped: all.filter((id) => !kept.includes(id)) }, null, 2),
+      'utf8',
+    )
   } catch { /* diagnostics never break parsing */ }
   const entries: CatalogEntry[] = []
   for (const wireId of agentIds(payload)) {
