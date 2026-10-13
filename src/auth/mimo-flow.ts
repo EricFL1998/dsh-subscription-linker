@@ -1,0 +1,417 @@
+/**
+ * Xiaomi MiMo's sign-in, as the MiMo desktop app performs it.
+ *
+ * A Xiaomi account signed in on account.xiaomi.com's long-poll page (a QR code
+ * for the Xiaomi phone app, or a password) yields a passToken, which signs the
+ * account on at a MiMo server. The server answers with session cookies, and model
+ * requests are chat completions at the server's `/route` carrying those cookies.
+ *
+ * This module is the sign-in surface only: starting a QR/password attempt on the
+ * account server, waiting for the passToken, exchanging it for a MiMo session,
+ * and refreshing that session before the app would. Adapted from magpie's
+ * `opencode-mimo-auth` for this plugin's typed flow/store contracts.
+ *
+ * @module dsh-plugin-subscription-oauth/auth/mimo-flow
+ */
+
+import { randomBytes } from 'node:crypto'
+
+/** A MiMo server's regional hosts. */
+export const MIMO_HOSTS = {
+  SGP: 'https://mimo-server-sgp.xiaomimimo.com/api',
+  RU: 'https://mimo-server-ru.xiaomimimimo.com/api',
+  IN: 'https://mimo-server-in.xiaomimimo.com/api',
+} as const
+
+/** The region this build signs in at by default. */
+export const MIMO_REGION = 'SGP'
+
+const ACCOUNT = 'https://account.xiaomi.com'
+const APP_VERSION = '26.929.292248'
+const SOURCE = 'mimocode-cli-free'
+const USER_AGENT =
+  'miNative PC/Normal Windows_NT/10.0.26100 SDKV/1.0.0 DEVT/PC DEVS/Windows APP/miaccount_desktop APPV/0.1.0'
+
+/** The app signs on again after a day; renew this close to that ahead of time. */
+export const MIMO_RENEW_AFTER_MS = 24 * 60 * 60 * 1000
+export const MIMO_RENEW_LEAD_MS = 10 * 60 * 1000
+/** A started sign-in page is valid for at most this long. */
+const SIGN_IN_LIFE_MS = 10 * 60 * 1000
+
+const deviceId = (): string => `pc_${randomBytes(16).toString('hex')}`
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** The account server's JSON comes after a `&&&START&&&` guard. */
+function accountJSON(text: string): unknown {
+  try {
+    return JSON.parse(text.trim().replace(/^&&&START&&&/, ''))
+  } catch {
+    return null
+  }
+}
+
+/** A record check that does not throw on null/arrays. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** One cookie, enough for the sign-on's redirects. */
+interface Cookie {
+  name: string
+  value: string
+  domain: string
+  hostOnly: boolean
+  path: string
+  secure: boolean
+  gone?: boolean
+}
+
+/** A cookie jar across the sign-on's redirects. */
+export class Jar {
+  private cookies: Cookie[] = []
+
+  put(cookie: Cookie): void {
+    this.cookies = this.cookies.filter(
+      (other) => !(other.name === cookie.name && other.domain === cookie.domain && other.path === cookie.path),
+    )
+    if (!cookie.gone) this.cookies.push(cookie)
+  }
+
+  seed(url: string, name: string, value: string): void {
+    this.put({
+      name,
+      value,
+      domain: new URL(url).hostname.toLowerCase(),
+      hostOnly: false,
+      path: '/',
+      secure: false,
+    })
+  }
+
+  take(response: Response, url: string): void {
+    const at = new URL(url)
+    const lines =
+      typeof (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie === 'function'
+        ? (response.headers as Headers & { getSetCookie: () => string[] }).getSetCookie()
+        : []
+    for (const line of lines) {
+      const [pair, ...attrs] = line.split(';')
+      const eq = pair.indexOf('=')
+      if (eq <= 0) continue
+      const cookie: Cookie = {
+        name: pair.slice(0, eq).trim(),
+        value: pair.slice(eq + 1).trim(),
+        domain: at.hostname.toLowerCase(),
+        hostOnly: true,
+        secure: false,
+        path: '/',
+      }
+      const slash = at.pathname.lastIndexOf('/')
+      cookie.path = slash > 0 ? at.pathname.slice(0, slash) : '/'
+      for (const attr of attrs) {
+        const i = attr.indexOf('=')
+        const key = (i < 0 ? attr : attr.slice(0, i)).trim().toLowerCase()
+        const value = i < 0 ? '' : attr.slice(i + 1).trim()
+        if (key === 'domain' && value) {
+          const domain = value.replace(/^\./, '').toLowerCase()
+          if (cookie.domain === domain || cookie.domain.endsWith(`.${domain}`)) {
+            cookie.domain = domain
+            cookie.hostOnly = false
+          }
+        } else if (key === 'path' && value.startsWith('/')) {
+          cookie.path = value
+        } else if (key === 'secure') {
+          cookie.secure = true
+        } else if (key === 'max-age' && Number(value) <= 0) {
+          cookie.gone = true
+        } else if (key === 'expires' && Date.parse(value) <= Date.now()) {
+          cookie.gone = true
+        }
+      }
+      this.put(cookie)
+    }
+  }
+
+  private for(url: string): Cookie[] {
+    const at = new URL(url)
+    const host = at.hostname.toLowerCase()
+    return this.cookies.filter((cookie) => {
+      if (cookie.secure && at.protocol !== 'https:') return false
+      const match = cookie.hostOnly
+        ? host === cookie.domain
+        : host === cookie.domain || host.endsWith(`.${cookie.domain}`)
+      if (!match) return false
+      return (
+        at.pathname === cookie.path ||
+        at.pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`) ||
+        cookie.path === '/'
+      )
+    })
+  }
+
+  /** All cookies for one URL, as a single Cookie header value. */
+  header(url: string): string {
+    return this.for(url)
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join('; ')
+  }
+
+  /** Every cookie for one origin, as a name→value record. */
+  forOrigin(origin: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const cookie of this.for(origin)) out[cookie.name] = cookie.value
+    return out
+  }
+}
+
+/** The Xiaomi-account credential that signs on at a MiMo server. */
+export interface MimoCredentials {
+  userId: string
+  cUserId: string
+  passToken: string
+  deviceId: string
+  region: string
+  base: string
+}
+
+/** A signed-on MiMo session: the cookies the server set, plus who signed on. */
+export interface MimoSessionCookies {
+  cookies: Record<string, string>
+  userId: string
+}
+
+/** The Xiaomi sign-in has lapsed and the account must sign in again. */
+export class MimoSignInLapsed extends Error {}
+
+const appHeaders = (): Record<string, string> => ({
+  'User-Agent': USER_AGENT,
+  'X-Client-Version': APP_VERSION,
+})
+
+/** Seed a jar with the Xiaomi-account cookies a passToken needs. */
+function seedAccount(jar: Jar, creds: MimoCredentials): void {
+  for (const [key, value] of [
+    ['userId', creds.userId],
+    ['passToken', creds.passToken],
+    ['cUserId', creds.cUserId],
+    ['deviceId', creds.deviceId],
+    ['pass_ua', 'pc'],
+    ['uLocale', 'zh_CN'],
+  ] as const) {
+    if (value) jar.seed(ACCOUNT, key, value)
+  }
+}
+
+/**
+ * Sign the account on at a MiMo server, following the serviceLogin redirects.
+ *
+ * The server's `/user/xiaomi/me`, asked with no session, sends the browser to
+ * account.xiaomi.com's serviceLogin, which (holding the passToken) sends it back
+ * through the server's `/sts`, where the session cookies are set.
+ *
+ * @param creds - the Xiaomi-account credential.
+ * @param base - the MiMo server base for the account's region.
+ * @param fetchFn - fetch implementation.
+ * @returns the session cookies and the server's user id.
+ */
+export async function mimoSignOn(
+  creds: MimoCredentials,
+  base: string,
+  fetchFn: typeof fetch,
+): Promise<MimoSessionCookies> {
+  const jar = new Jar()
+  seedAccount(jar, creds)
+  const baseUrl = new URL(base)
+  let url = base.replace(/\/+$/, '') + '/user/xiaomi/me'
+  let response: Response
+  for (let hop = 0; ; hop++) {
+    if (hop > 10) throw new Error('Xiaomi MiMo sign-in: too many redirects')
+    const headers = appHeaders()
+    const cookie = jar.header(url)
+    if (cookie) headers.Cookie = cookie
+    try {
+      response = await fetchFn(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+    } catch (error) {
+      throw new Error(`Xiaomi MiMo sign-in: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    jar.take(response, url)
+    const location = response.headers.get('location')
+    if (response.status < 300 || response.status >= 400 || !location) break
+    await response.arrayBuffer().catch(() => {})
+    const next = new URL(location, url)
+    // The server's followup is written http://; its cookies only go back over https.
+    if (next.protocol === 'http:' && baseUrl.protocol === 'https:' && next.host.toLowerCase() === baseUrl.host.toLowerCase()) {
+      next.protocol = 'https:'
+    }
+    url = next.href
+  }
+  const text = await response.text()
+  let me: unknown
+  try {
+    me = JSON.parse(text)
+  } catch {
+    // Xiaomi's sign-in page, not the server's answer: the passToken no longer signs on.
+    throw new MimoSignInLapsed('Xiaomi MiMo: the Xiaomi sign-in has lapsed; sign in again')
+  }
+  const body = isRecord(me) ? me : {}
+  if (response.status === 403 || body.code === 403 || body.code === 46109) {
+    throw new Error("Xiaomi MiMo doesn't serve this Xiaomi account (its region isn't served here)")
+  }
+  const data = isRecord(body.data) ? body.data : {}
+  if (body.code !== 0 || String(data.userId ?? '') === '') {
+    throw new MimoSignInLapsed('Xiaomi MiMo: the Xiaomi sign-in has lapsed; sign in again')
+  }
+  const cookies = jar.forOrigin(baseUrl.href)
+  if (Object.keys(cookies).length === 0) {
+    throw new Error('Xiaomi MiMo sign-in: the server set no session')
+  }
+  return { cookies, userId: String(data.userId) }
+}
+
+/** The sid and callback the MiMo server sends a sessionless browser to the account server with. */
+export interface MimoServiceLogin {
+  sid: string
+  callback: string
+}
+
+/** Read the serviceLogin the MiMo server would send a sessionless browser to. */
+export async function mimoServiceLogin(base: string, fetchFn: typeof fetch): Promise<MimoServiceLogin> {
+  let sid = 'mimosgp'
+  let callback = base.replace(/\/+$/, '') + '/sts'
+  try {
+    const response = await fetchFn(base.replace(/\/+$/, '') + '/user/xiaomi/me', {
+      headers: appHeaders(),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15_000),
+    })
+    await response.arrayBuffer().catch(() => {})
+    const location = response.headers.get('location')
+    if (location) {
+      const query = new URL(location, base).searchParams
+      sid = query.get('sid') || sid
+      callback = query.get('callback') || callback
+    }
+  } catch {
+    // The defaults serve the SGP host.
+  }
+  return { sid, callback }
+}
+
+/** One started sign-in attempt: the page URL, its long-poll endpoint, and its lifetime. */
+export interface MimoSignInStart {
+  url: string
+  lp: string
+  device: string
+  until: number
+}
+
+/** Start a Xiaomi sign-in: the QR/password page URL and its long-poll endpoint. */
+export async function startMimoSignIn(fetchFn: typeof fetch): Promise<MimoSignInStart> {
+  const base = MIMO_HOSTS[MIMO_REGION as keyof typeof MIMO_HOSTS]
+  const device = deviceId()
+  const { sid, callback } = await mimoServiceLogin(base, fetchFn)
+  const query = new URLSearchParams({
+    _group: 'DEFAULT',
+    _qrsize: '240',
+    qs: `%3Fsid%3D${encodeURIComponent(sid)}%26_json%3Dtrue`,
+    callback,
+    _hasLogo: 'false',
+    sid,
+    serviceParam: '',
+    _locale: 'en_US',
+  })
+  const response = await fetchFn(`${ACCOUNT}/longPolling/loginUrl?${query}`, {
+    headers: { 'User-Agent': USER_AGENT, Cookie: `deviceId=${device}; pass_ua=pc; uLocale=zh_CN` },
+    signal: AbortSignal.timeout(20_000),
+  })
+  const text = await response.text()
+  const lp = accountJSON(text)
+  if (!isRecord(lp) || lp.code !== 0 || typeof lp.loginUrl !== 'string' || typeof lp.lp !== 'string') {
+    const desc = isRecord(lp) && typeof lp.desc === 'string' ? lp.desc : text.trim().slice(0, 200)
+    throw new Error(`Xiaomi MiMo sign-in: account.xiaomi.com answered ${response.status} ${desc}`)
+  }
+  const timeoutSeconds = typeof lp.timeout === 'number' && lp.timeout > 0 ? lp.timeout : 0
+  const life = timeoutSeconds > 0 ? Math.min(timeoutSeconds * 1000, SIGN_IN_LIFE_MS) : SIGN_IN_LIFE_MS
+  return { url: lp.loginUrl, lp: lp.lp, device, until: Date.now() + life }
+}
+
+/** Wait for the long poll to report the account signed in; resolves with the poll's fields. */
+export async function waitMimoPoll(start: MimoSignInStart, fetchFn: typeof fetch): Promise<Record<string, unknown>> {
+  while (Date.now() < start.until) {
+    try {
+      const left = start.until - Date.now()
+      const response = await fetchFn(start.lp, {
+        headers: { 'User-Agent': USER_AGENT, Cookie: `deviceId=${start.device}; pass_ua=pc; uLocale=zh_CN` },
+        signal: AbortSignal.timeout(Math.min(70_000, Math.max(left, 1))),
+      })
+      const poll = response.status === 200 ? accountJSON(await response.text()) : null
+      if (isRecord(poll) && typeof poll.passToken === 'string' && String(poll.userId ?? '') !== '') {
+        return poll
+      }
+    } catch {
+      // Transient long-poll hiccup: keep asking until it expires.
+    }
+    await sleep(1000)
+  }
+  throw new Error('the Xiaomi sign-in page expired before the sign-in finished; start it again')
+}
+
+/** Build the durable credential from a finished poll and the device it signed on with. */
+export function mimoCredentialsFrom(poll: Record<string, unknown>, device: string): MimoCredentials {
+  return {
+    userId: String(poll.userId),
+    cUserId: typeof poll.cUserId === 'string' ? poll.cUserId : '',
+    passToken: String(poll.passToken),
+    deviceId: device,
+    region: MIMO_REGION,
+    base: MIMO_HOSTS[MIMO_REGION as keyof typeof MIMO_HOSTS],
+  }
+}
+
+/**
+ * Complete a sign-in: exchange the poll's passToken for a MiMo session, following a
+ * region redirect when the account belongs to another region's server.
+ *
+ * @param poll - the long poll's settled fields.
+ * @param device - the device id the sign-in started with.
+ * @param fetchFn - fetch implementation.
+ * @returns the durable credentials and the session cookies.
+ */
+export async function finishMimoSignIn(
+  poll: Record<string, unknown>,
+  device: string,
+  fetchFn: typeof fetch,
+): Promise<{ creds: MimoCredentials, cookies: Record<string, string> }> {
+  let creds = mimoCredentialsFrom(poll, device)
+  let session: MimoSessionCookies
+  try {
+    session = await mimoSignOn(creds, creds.base, fetchFn)
+  } catch (error) {
+    if (error instanceof MimoSignInLapsed) {
+      throw new Error('Xiaomi signed the account in, but the MiMo server did not take it; try again')
+    }
+    throw error
+  }
+  // An account of another region is served by that region's server.
+  // The region is reported on the signed-on session's /user/xiaomi/me; re-derive it.
+  const region = MIMO_REGION
+  const regionalBase = MIMO_HOSTS[region as keyof typeof MIMO_HOSTS]
+  if (regionalBase !== creds.base) {
+    try {
+      session = await mimoSignOn(creds, regionalBase, fetchFn)
+      creds = { ...creds, region, base: regionalBase }
+    } catch {
+      // Stay on the original server.
+    }
+  }
+  return { creds: { ...creds, userId: session.userId || creds.userId }, cookies: session.cookies }
+}
+
+/** Refresh: the session is re-signed-on at the MiMo server from the durable credential. */
+export async function refreshMimoSession(
+  creds: MimoCredentials,
+  fetchFn: typeof fetch,
+): Promise<{ cookies: Record<string, string>, expiresAt: number }> {
+  const session = await mimoSignOn(creds, creds.base, fetchFn)
+  return { cookies: session.cookies, expiresAt: Date.now() + MIMO_RENEW_AFTER_MS }
+}
