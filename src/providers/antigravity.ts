@@ -607,7 +607,20 @@ export class AntigravityAdapter extends LlmAdapter {
         if (tried.has(accountKey)) continue
         tried.add(accountKey)
         token = await this.options.tokens.resolve(accountKey)
-        let response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
+        // A transport failure (DNS, connect timeout) on one account may be that account's
+        // path, not the provider's; try the next account before giving up, the same way a
+        // spent allowance does. A lone account still surfaces the real error.
+        let response: Response
+        try {
+          response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
+        } catch (error: unknown) {
+          const transport = error instanceof TypeError || (error as { name?: string }).name === 'AbortError'
+          if (transport && order.length > 1 && !watchdog.timedOut) {
+            diag.push(`transport on ${token.account}, moving to next`)
+            continue
+          }
+          throw error
+        }
         if (response.status === 401 || response.status === 403) {
           // The stored token was accepted locally but refused on the wire; force one
           // refresh. A 403 that survives the refresh is Google's "verify your account"
