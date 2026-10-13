@@ -163,6 +163,11 @@ test('the stream posts chat completions with the WorkBuddy headers', async () =>
   assert.equal(seenBody.model, 'hy4-preview-f')
   assert.equal(seenBody.stream, true)
   assert.ok(Array.isArray(seenBody.messages))
+  // WorkBuddy refuses a chat that doesn't open with a system message: the request gets
+  // WorkBuddy's default one, ahead of the conversation.
+  const messages = seenBody.messages as { role: string, content: string }[]
+  assert.equal(messages[0]?.role, 'system')
+  assert.equal(messages[0]?.content, 'You are a helpful assistant.')
   assert.equal(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === 'Hello'), true)
   assert.equal(chunks.some((chunk) => chunk.type === 'usage'), true)
   assert.equal(chunks.some((chunk) => chunk.type === 'finish'), true)

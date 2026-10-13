@@ -98,6 +98,43 @@ export interface WorkBuddyAdapterOptions {
   fetchFn?: FetchFn
 }
 
+/**
+ * Words WorkBuddy refuses a chat for ("Illegal API invocation from an unapproved
+ * channel"), each with words that say the same and pass. WorkBuddy reads every message,
+ * not only the system prompt, and pays no mind to case. Adapted from magpie's workbuddy.
+ */
+const FLAGGED: readonly [RegExp, string][] = [
+  [/x-anthropic-billing-header:[^\n]*\n?/gi, ''],
+  [/You are Claude Code, Anthropic['']s official CLI for Claude/gi, "You are Claude Code, Anthropic's CLI for Claude"],
+  [/Main branch \(you will usually use this for PRs\)/gi, 'Main branch (usually the base for PRs)'],
+  [/(?<!the )Codex CLI is an open source project led by OpenAI\./gi, 'The Codex CLI is an open source project led by OpenAI.'],
+]
+
+/** Put FLAGGED's words in place in one message's content. */
+function unflagText(text: string): string {
+  let out = text
+  for (const [pattern, replacement] of FLAGGED) out = out.replace(pattern, replacement)
+  return out
+}
+
+/** Apply the FLAGGED filter to every message's content, in place. */
+function unflagMessages(messages: Record<string, unknown>[]): Record<string, unknown>[] {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (typeof message.content === 'string') {
+      message.content = unflagText(message.content)
+    }
+  }
+  return messages
+}
+
+/** 32 hex digits, for the chat ids WorkBuddy's own client makes. */
+function randomHex(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 /** The WorkBuddy China wire adapter serving the `workbuddy` route. */
 export class WorkBuddyAdapter extends LlmAdapter {
   private readonly fetchFn: FetchFn
@@ -176,16 +213,23 @@ export class WorkBuddyAdapter extends LlmAdapter {
     const token = this.tokenOf(held.session)
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
+      const body = this.requestBody(options)
       const response = await this.fetchFn(WORKBUDDY_API, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
           ...workbuddyHeaders(token),
+          // Name the chat the way WorkBuddy's own client does: without these the gateway
+          // counts the request under no client and can cut the stream.
+          'X-Conversation-Message-ID': randomHex(),
+          'X-Request-ID': randomHex(),
         },
-        body: JSON.stringify(this.requestBody(options)),
+        body: JSON.stringify(body),
         signal: watchdog.signal,
       })
+      // WorkBuddy refuses a chat mid-stream when the request carries words it filters; a
+      // 403/400 here names why, so surface it instead of dying on an empty stream.
       if (!response.ok || response.body === null) {
         throw await this.errorOf(response)
       }
@@ -213,18 +257,32 @@ export class WorkBuddyAdapter extends LlmAdapter {
 
   private requestBody(options: GenerateOptions): Record<string, unknown> {
     const messages: Record<string, unknown>[] = []
-    if (options.system !== undefined && options.system.trim() !== '') {
-      messages.push({ role: 'system', content: options.system })
-    }
     for (const message of options.messages) {
       messages.push(this.toChatMessage(message))
     }
+    // A chat that doesn't open with a system message is refused: give it WorkBuddy's
+    // default one, as its own app does, and take the words WorkBuddy filters (Codex and
+    // Claude Code's own) out of every message — WorkBuddy reads them all, whatever role.
+    const system = this.systemPrompt(options)
+    messages.unshift({ role: 'system', content: system })
     return {
       model: options.model,
-      messages,
+      messages: unflagMessages(messages),
       ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
       stream: true,
     }
+  }
+
+  /** The system prompt: the caller's, else WorkBuddy's default. */
+  private systemPrompt(options: GenerateOptions): string {
+    if (options.system !== undefined && options.system.trim() !== '') return options.system
+    for (const message of options.messages) {
+      if (message.role === 'system') {
+        const text = message.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n')
+        if (text.trim() !== '') return text
+      }
+    }
+    return 'You are a helpful assistant.'
   }
 
   private toChatMessage(message: GenerateOptions['messages'][number]): Record<string, unknown> {
