@@ -65,7 +65,7 @@ function modelInfo(raw: unknown): ModelInfo {
 }
 
 /** A model id whose suffix or infix names a fixed reasoning tier, folded into its base family. */
-const TIER_MARKED = /(?:^|[-_])(?:extra-low|low|medium|high|max)(?:$|[-_])/i
+const TIER_MARKED = /(?:^|[-_])(?:extra-low|low|medium|high|max|agent)(?:$|[-_])/i
 
 /** True when a model id names a specific tier of a family, not a model with a ladder. */
 export function isTierMarked(id: string): boolean {
@@ -77,7 +77,7 @@ export function baseFamilyOf(id: string): string {
   // Remove the tier token wherever it sits (suffix or infix), then tidy any trailing
   // separator the removal left behind.
   return id
-    .replace(/[-_](?:extra-low|low|medium|high|max)(?=[-_]|$)/i, '')
+    .replace(/[-_](?:extra-low|low|medium|high|max|agent)(?=[-_]|$)/i, '')
     .replace(/[-_]$/, '')
 }
 

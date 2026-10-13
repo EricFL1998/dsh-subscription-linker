@@ -39,7 +39,7 @@ describe('parseAntigravityModels', () => {
     const entries = parseAntigravityModels(availableModels())
     assert.deepEqual(entries.map((entry) => entry.id), [
       'gemini-3.1-pro',
-      'gemini-pro-agent',
+      'gemini-pro',
       'gemini-3.8-flash',
       'claude-sonnet-4-6',
       'gpt-oss-120b',
