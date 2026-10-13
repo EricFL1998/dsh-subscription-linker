@@ -461,4 +461,16 @@ describe('GrokAdapter requests', () => {
     const models = await new GrokAdapter(adapterOptions()).listModels('grok')
     assert.deepEqual(models.map((model) => model.id), GROK_MODELS.map((entry) => entry.id))
   })
+
+  test('pairs a fast id with the longest listed prefix of its own name', async () => {
+    // No curated alias names this variant: the pair is derived purely from the id —
+    // a provider that names its variants after the base model needs no hardcoded map.
+    const fetchFn: typeof fetch = async () => jsonResponse({
+      data: [{ id: 'grok-9.9' }, { id: 'grok-9.9-build-fast' }],
+    })
+    const adapter = new GrokAdapter(adapterOptions({ discovery: true, fetchFn }))
+    await adapter.fetchCatalog('token', undefined)
+    assert.deepEqual(adapter.fastPairOf('grok-9.9'), { baseId: 'grok-9.9', wireId: 'grok-9.9-build-fast' })
+    assert.deepEqual(adapter.fastPairOf('grok-9.9-build-fast'), { baseId: 'grok-9.9', wireId: 'grok-9.9-build-fast' })
+  })
 })

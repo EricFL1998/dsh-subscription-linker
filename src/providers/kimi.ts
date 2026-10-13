@@ -615,16 +615,22 @@ export class KimiAdapter extends LlmAdapter {
       this.imageModel = allIds.find((id) => isImageModel(id))
       // Fast/lightspeed variants ride with their base row: they share the row's
       // visibility switch and are reached by the composer's quick-mode button, not a
-      // separate row. The live list is the authority on what this account serves, so it
-      // is recorded first and the curated aliases only fill the gaps it leaves.
+      // separate row. The live list is the authority on what this account serves, so
+      // it is recorded first, and each variant pairs with the longest listed prefix
+      // of its own name — a provider that names its variants after the base model
+      // pairs them with no curated map at all.
       this.fastVariants.clear()
       for (const id of allIds) {
-        this.fastVariants.note(id, (base) => this.entryFor(base)?.id ?? base)
+        this.fastVariants.noteListed(id)
+      }
+      for (const id of allIds) {
+        const base = this.fastVariants.pair(id)
+        this.fastVariants.note(id, () => base ?? this.entryFor(baseModelOf(id))?.id ?? baseModelOf(id))
       }
       this.seedCuratedFastVariants()
       const ids = allIds
         .filter((id) => !NON_CHAT_ID.test(id))
-        .map((id) => (isFastVariant(id) ? this.entryFor(baseModelOf(id))?.id ?? baseModelOf(id) : id))
+        .map((id) => (isFastVariant(id) ? this.fastVariants.pair(id) ?? baseModelOf(id) : id))
         .filter((id, index, list) => list.indexOf(id) === index)
       if (ids.length === 0) {
         this.options.onWarn?.('Kimi model discovery returned an empty catalog; using the built-in catalog')

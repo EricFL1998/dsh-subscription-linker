@@ -378,7 +378,37 @@ export function isFastVariant(id: string): boolean {
   return FAST_VARIANT.test(id)
 }
 
-/** The base model id a fast variant belongs to (`grok-4.7-build-fast@500k` → `grok-4.7`). */
+/**
+ * Every prefix of one model id, longest first, down to its first token.
+ *
+ * `grok-4.7-build-fast` → [`grok-4.7-build`, `grok-4.7`, `grok`]. A fast variant pairs
+ * with the longest prefix that is itself a listed model id, which is how
+ * `grok-4.7-build-fast` lands on `grok-4.7` (its own prefix `grok-4.7-build` is not a
+ * model) instead of inventing a base that no catalog row serves.
+ *
+ * @param id - model id.
+ * @returns the candidate bases, longest first.
+ */
+export function baseCandidatesOf(id: string): readonly string[] {
+  const out: string[] = []
+  let at = id.length
+  while (at > 0) {
+    at = id.lastIndexOf('-', at - 1)
+    if (at <= 0) break
+    out.push(id.slice(0, at))
+  }
+  return out
+}
+
+/**
+ * The base model id a fast variant belongs to, derived only from its own name.
+ *
+ * The fast token is removed, then any trailing generation qualifier (`build`, `beta`,
+ * `rc`, …) left behind by that removal, then any `@Nk` context suffix. What remains is
+ * the base (`grok-4.7-build-fast@500k` → `grok-4.7`, `kimi-for-coding-highspeed` →
+ * `kimi-for-coding`). Whether the base is a real catalog row is the index's job, not
+ * this function's.
+ */
 export function baseModelOf(id: string): string {
   return id
     .replace(FAST_VARIANT, '')
@@ -399,19 +429,51 @@ export function baseModelOf(id: string): string {
 export class FastVariantIndex {
   private readonly byBase = new Map<string, string>()
   private readonly rowOfVariant = new Map<string, string>()
+  private readonly knownIds = new Set<string>()
 
-  /** Forget every pair, before re-reading a catalog. */
+  /** Forget every pair and every known id, before re-reading a catalog. */
   clear(): void {
     this.byBase.clear()
     this.rowOfVariant.clear()
+    this.knownIds.clear()
+  }
+
+  /**
+   * Record one id the catalog listed.
+   *
+   * Listed ids are what a variant may pair with: the pair is the longest listed prefix
+   * of the variant's own name, so nothing is invented that no row actually serves.
+   *
+   * @param id - a wire id from a catalog.
+   */
+  noteListed(id: string): void {
+    this.knownIds.add(id)
+  }
+
+  /**
+   * Pair one fast id with its base, purely from its own name.
+   *
+   * Every listed prefix of the id is a candidate base, longest first; the first one
+   * that is itself a listed model wins. No curated alias or hardcoded map is needed:
+   * a provider that names its variants after the base model pairs them automatically.
+   *
+   * @param id - a wire id the catalog named.
+   * @returns the base id, or undefined when no listed prefix names one.
+   */
+  pair(id: string): string | undefined {
+    if (!isFastVariant(id)) return undefined
+    for (const base of baseCandidatesOf(id)) {
+      if (this.knownIds.has(base)) return base
+    }
+    return undefined
   }
 
   /**
    * Record one id, if it names a fast variant.
    *
    * The first variant named for a row wins: a catalog that lists two spellings of the
-   * same variant (`kimi-for-coding-highspeed` and `kimi-k2.7-code-highspeed`) offers one
-   * button, and the earlier entry is the more specific one.
+   * same variant (`kimi-for-coding-highspeed` and `kimi-k2.7-code-highspeed`) offers
+   * one button, and the earlier entry is the more specific one.
    *
    * @param id - a wire id from a catalog.
    * @param rowOf - maps a base id to the picker row that serves it, when the catalog
@@ -819,10 +881,13 @@ export class GrokAdapter extends LlmAdapter {
       // Context variants (@500k) also fold into the base; the largest context wins.
       this.fastVariants.clear()
       this.defaultContext.clear()
+      for (const id of rawIds) {
+        this.fastVariants.noteListed(id)
+      }
       this.noteWireVariants(rawIds)
       const ids = rawIds
         .map((id) => {
-          if (isFastVariant(id)) return baseModelOf(id)
+          if (isFastVariant(id)) return this.fastVariants.pair(id) ?? baseModelOf(id)
           const ctx = contextOf(id)
           if (ctx !== undefined) return stripContext(id)
           return id
@@ -837,6 +902,9 @@ export class GrokAdapter extends LlmAdapter {
       // The account's own CLI catalog is the only surface that names a fast variant:
       // the public `/models` list omits `grok-4.7-build-fast` entirely. Its ids fold
       // into the same base rows, and are never added as picker rows of their own.
+      for (const id of cli.ids) {
+        this.fastVariants.noteListed(id)
+      }
       this.noteWireVariants(cli.ids)
       return ids
     } catch (error: unknown) {
@@ -855,7 +923,10 @@ export class GrokAdapter extends LlmAdapter {
     for (const id of ids) {
       if (NON_CHAT_ID.test(id) || isImageModel(id)) continue
       if (isFastVariant(id)) {
-        this.fastVariants.note(id)
+        // Pair with the longest listed prefix, not a derived string: the prefix is a
+        // model the account actually serves, so the button always targets a real row.
+        const base = this.fastVariants.pair(id)
+        this.fastVariants.note(id, () => base)
         continue
       }
       const ctx = contextOf(id)
