@@ -631,10 +631,13 @@ export class GrokAdapter extends LlmAdapter {
       }
     }
     const reasoning = reasoningInfo(entry)
+    // The fast selection names itself "Fast" so the picker trigger reads the mode, not
+    // the base model it replaces; the id stays the fast wire id the request must send.
+    const fast = pair !== undefined && pair.wireId === model
     return {
       provider: GROK_PROVIDER_ID,
       id: model,
-      name: entry.name,
+      name: fast ? `${entry.name} Fast` : entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
       context: { contextWindow: entry.contextWindow },

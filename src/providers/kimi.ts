@@ -389,12 +389,14 @@ export class KimiAdapter extends LlmAdapter {
     const reasoning = reasoningInfo(entry)
     // A fast variant is a wire id of its own — the button switches to it and back, so the
     // selection must keep that id — while an ordinary alias is just another spelling of
-    // the row and resolves onto it.
+    // the row and resolves onto it. The fast selection names itself "Fast" so the picker
+    // trigger reads the mode, not the base model it replaces.
     const pair = this.fastVariants.pairOf(model)
+    const fast = pair !== undefined && pair.wireId === model
     return {
       provider: KIMI_PROVIDER_ID,
-      id: pair !== undefined && pair.wireId === model ? model : entry.id,
-      name: entry.name,
+      id: fast ? model : entry.id,
+      name: fast ? `${entry.name} Fast` : entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
       context: { contextWindow: entry.contextWindow },

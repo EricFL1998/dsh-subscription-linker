@@ -105,7 +105,7 @@ describe('KimiAdapter catalog', () => {
     assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), true)
     const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
     assert.equal(resolved.id, 'kimi-for-coding-highspeed')
-    assert.equal(resolved.name, 'Kimi for Coding')
+    assert.equal(resolved.name, 'Kimi for Coding Fast')
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
   })
 

@@ -343,7 +343,7 @@ describe('GrokAdapter catalog', () => {
     // The fast variant answers with its base model's metadata under its own wire id.
     const fast = await adapter.resolveModel('grok', 'grok-4.7-build-fast')
     assert.equal(fast.id, 'grok-4.7-build-fast')
-    assert.equal(fast.name, 'Grok 4.7')
+    assert.equal(fast.name, 'Grok 4.7 Fast')
     assert.equal(fast.context?.contextWindow, 500_000)
   })
 
