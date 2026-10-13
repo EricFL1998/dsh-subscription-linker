@@ -729,6 +729,8 @@ export class GrokAdapter extends LlmAdapter {
       const allIds = (payload.data ?? [])
         .map((entry) => entry.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      // TEMP diagnostics: log what discovery saw so a missed fast variant is visible.
+      console.warn(`[subscription-oauth] grok discovery: ${allIds.length} ids: ${allIds.join(', ')}`)
       // Image models are not chat models; they are picked by an agent, not the picker.
       this.imageModel = allIds.find((id) => isImageModel(id))
       const rawIds = allIds.filter((id) => !NON_CHAT_ID.test(id))
