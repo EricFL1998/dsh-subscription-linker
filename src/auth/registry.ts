@@ -10,6 +10,7 @@
  */
 
 import { BAD_REQUEST, ProviderError } from '../errors.js'
+import type { ModelPreferences } from '../settings.js'
 import type {
   LoginStart,
   ModelVariants,
@@ -68,7 +69,10 @@ export interface ProviderRoute {
 export class SubscriptionRegistry {
   private readonly byId: Map<string, ProviderRoute>
 
-  constructor(routes: readonly ProviderRoute[]) {
+  constructor(
+    routes: readonly ProviderRoute[],
+    private readonly preferences: ModelPreferences,
+  ) {
     this.byId = new Map(routes.map((route) => [route.id, route]))
   }
 
@@ -209,5 +213,15 @@ export class SubscriptionRegistry {
   async modelVariants(provider: string, id: string): Promise<ModelVariants | undefined> {
     const route = this.route(provider)
     return route.modelVariants?.(id)
+  }
+
+  /** Whether the `auto` provider is offered; flips it. */
+  async autoState(): Promise<{ enabled: boolean }> {
+    return { enabled: (await this.preferences.autoPreferences()).enabled }
+  }
+
+  async setAutoOn(enabled: boolean): Promise<{ enabled: boolean }> {
+    await this.preferences.setAutoOn(enabled)
+    return { enabled }
   }
 }

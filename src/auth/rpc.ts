@@ -245,6 +245,11 @@ async function runEndpoint(
     }
     case 'usage':
       return registry.usage(requiredProvider(payload, endpoint), booleanField(payload, 'force'))
+    case 'setAutoOn': {
+      const enabled = booleanField(payload, 'enabled')
+      if (enabled === undefined) throw new ProviderError('setAutoOn requires an enabled flag', BAD_REQUEST)
+      return registry.setAutoOn(enabled)
+    }
     case 'deepseek-balance': {
       // The DeepSeek account's balance, read on the node half through the host's own
       // account service. The browser cannot call that service directly (it sits behind

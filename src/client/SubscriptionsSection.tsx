@@ -175,13 +175,21 @@ const styles: Record<string, CSSProperties> = {
   cardBody: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 2 },
   /** The one-line state a folded card shows in place of its body. */
   cardSummary: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0, boxShadow: '0 0 0 3px var(--dsw-alias-state-success-primary, transparent)' },
-  name: { fontWeight: 600, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
-  providerId: {
-    fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-dimmed)',
-    padding: '1px 6px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1))',
-    fontFamily: 'monospace',
+  /** The status indicator: filled when live, a hollow ring when not. */
+  dot: {
+    width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+    border: '1.5px solid var(--dsw-alias-label-dimmed)',
+    background: 'transparent',
   },
+  dotLive: {
+    borderColor: 'var(--dsw-alias-state-success-primary, #067647)',
+    background: 'var(--dsw-alias-state-success-primary, #067647)',
+  },
+  dotBusy: {
+    borderColor: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+    background: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+  },
+  name: { fontWeight: 600, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
   statusLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
   errorLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' },
   successLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-success-primary)' },
@@ -275,6 +283,8 @@ const styles: Record<string, CSSProperties> = {
     padding: '8px 10px', borderRadius: 'var(--dsw-radius-md, 10px)',
     background: 'var(--dsw-alias-bg-layer-1)', border: '0.5px solid var(--dsw-alias-border-l2)',
   },
+  /** The metered windows under one account row: no border, just the meters. */
+  usageInline: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 },
   modelRow: {
     display: 'flex', alignItems: 'flex-start', gap: 8,
     cursor: 'pointer', fontSize: 13, lineHeight: '20px',
@@ -317,11 +327,11 @@ const styles: Record<string, CSSProperties> = {
   divider: { borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
 }
 
-/** Status dot color for one provider's connection state. */
-function dotColor(status: ProviderStatus): string {
-  if (status.busy) return 'var(--dsw-alias-state-warn-label)'
-  if (status.loggedIn) return 'var(--dsw-alias-state-success-primary)'
-  return 'var(--dsw-alias-label-dimmed)'
+/** Status dot style for one provider's connection state. */
+function dotStyle(status: ProviderStatus): CSSProperties {
+  if (status.busy) return styles.dotBusy
+  if (status.loggedIn) return styles.dotLive
+  return {}
 }
 
 /** Localized label for one provider-owned detail row. */
@@ -343,7 +353,45 @@ function windowAmount(window: UsageWindow): string {
   return '—'
 }
 
-/** One account's plan and metered allowances. */
+/** One account's metered windows, rendered under its account row. */
+function AccountUsage(props: {
+  entry: ProviderUsage | undefined
+  t: SubscriptionsSectionInjected['t']
+}) {
+  const { entry, t } = props
+  if (entry === undefined) return null
+  return (
+    <div style={styles.usageInline}>
+      {entry.windows.map((window) => (
+        <div key={`${entry.account}-${window.label}`} style={styles.usageRow}>
+          <div style={styles.usageLine}>
+            <span style={styles.modelName}>
+              {windowLabel(t, window)}
+              {' · '}
+              {windowAmount(window)}
+            </span>
+            <span style={styles.modelMeta}>
+              {window.resetsAt === undefined ? '' : formatReset(window.resetsAt, t)}
+            </span>
+          </div>
+          {window.usedPercent !== undefined && (
+            <div className="dsh-subscription-meter">
+              <span
+                style={{ width: `${String(Math.min(100, Math.max(0, window.usedPercent)))}%` }}
+                data-exhausted={window.usedPercent >= 90 ? 'true' : 'false'}
+              />
+            </div>
+          )}
+        </div>
+      ))}
+      {entry.windows.length === 0 && (
+        <p style={styles.statusLine}>{t('usageNone')}</p>
+      )}
+    </div>
+  )
+}
+
+/** The plan-and-usage block for the whole route. */
 function UsageBlock(props: {
   usage: readonly ProviderUsage[]
   error?: string
@@ -661,9 +709,8 @@ function ProviderCard(props: {
         onClick={toggleCardOpen}
         onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleCardOpen() } }}
       >
-        <span style={{ ...styles.dot, background: dotColor(status) }} aria-hidden="true" />
+        <span style={{ ...styles.dot, ...dotStyle(status) }} aria-hidden="true" />
         <span style={styles.name}>{status.displayName}</span>
-        <span style={styles.providerId}>{status.provider}</span>
         {status.loggedIn && <span style={styles.badgeDefault}>{t('badgeLive')}</span>}
         {/*
           The state stays in the header whether the card is open or folded. The
@@ -694,7 +741,9 @@ function ProviderCard(props: {
       {message?.tone === 'error' && <p className="dsh-subscription-error">{message.text}</p>}
       {message?.tone === 'success' && <p className="dsh-subscription-success">{message.text}</p>}
 
-      {accounts.map((account) => (
+      {accounts.map((account) => {
+        const usageEntry = (status.usage ?? []).find((entry) => entry.account === account.account)
+        return (
         <div key={account.account} style={styles.accountRow}>
           <div style={styles.accountHeader}>
             <button
@@ -713,6 +762,9 @@ function ProviderCard(props: {
             {account.needsLogin === true && (
               <span style={styles.badgeWarn} title={t('accountNeedsLoginHint')}>{t('accountNeedsLogin')}</span>
             )}
+            {usageEntry?.plan !== undefined && (
+              <span style={styles.badge}>{t('usagePlan', { plan: usageEntry.plan })}</span>
+            )}
             <span style={styles.statusLine}>
               {account.expired
                 ? t('accountExpired')
@@ -728,8 +780,10 @@ function ProviderCard(props: {
               {t('logout')}
             </button>
           </div>
+          <AccountUsage entry={usageEntry} t={t} />
         </div>
-      ))}
+        )
+      })}
 
       {/* A signed-out route has nothing to configure here, and listing models it
           cannot call would only invite picker entries that fail. */}
@@ -903,14 +957,6 @@ function ProviderCard(props: {
         )}
       </div>
       )}
-
-      <UsageBlock
-        usage={status.usage ?? []}
-        {...status.usageError === undefined ? {} : { error: status.usageError }}
-        t={t}
-        busyAction={busyAction}
-        onRefresh={props.onRefreshUsage}
-      />
 
       {/* `auto` owns no account, so it offers no connect, cancel or manage. */}
       {connectable && (

@@ -183,6 +183,12 @@ export interface MimoSessionCookies {
 /** The Xiaomi sign-in has lapsed and the account must sign in again. */
 export class MimoSignInLapsed extends Error {}
 
+/** The open platform's origin (the Token Plan lives here, not at a MiMo server). */
+export const MIMO_PLATFORM = 'https://platform.xiaomimimo.com'
+
+/** A plan the app refused covers for this long before its endpoint is asked again. */
+const TP_LIFE_MS = 60 * 60 * 1000
+
 const appHeaders = (): Record<string, string> => ({
   'User-Agent': USER_AGENT,
   'X-Client-Version': APP_VERSION,
@@ -422,6 +428,8 @@ export async function refreshMimoSession(
 export interface MimoUsageWindow {
   label: string
   usedPercent?: number
+  used?: number
+  limit?: number
   resetsAt?: number
 }
 
@@ -534,5 +542,177 @@ export async function readMimoUsage(
   } catch {
     // The plan alone, when the week's allowance can't be read.
   }
+
+  // The Token Plan at the open platform, an aside the app's requests don't spend.
+  const tokenPlan = await readMimoTokenPlan(creds, fetchFn)
+  if (tokenPlan !== null) {
+    if (current === undefined) {
+      plan = tokenPlan.plan
+      if (tokenPlan.until !== undefined) renewsAt = tokenPlan.until
+    }
+    if (tokenPlan.window !== undefined) windows.push(tokenPlan.window)
+  }
   return { plan, ...renewsAt === undefined ? {} : { renewsAt }, windows }
+}
+
+/** A Token Plan read at the open platform. */
+interface MimoTokenPlan {
+  plan: string
+  until?: number
+  window?: MimoUsageWindow
+}
+
+/** A short count of the Token Plan's credits, "6.81M" / "4.1B" / "12K". */
+function mimoCredits(value: number): string {
+  for (const [divisor, unit] of [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']] as const) {
+    if (value >= divisor) return `${Number((value / divisor).toPrecision(3))}${unit}`
+  }
+  return String(value)
+}
+
+/** Read one of the platform's /api/v1 pages, signing on afresh when the session is gone. */
+async function mimoPlatformPage(
+  creds: MimoCredentials,
+  path: string,
+  cookies: Record<string, string> | undefined,
+  fetchFn: typeof fetch,
+): Promise<{ cookies: Record<string, string>, data: Record<string, unknown> | null }> {
+  const url = `${MIMO_PLATFORM}/api/v1${path}`
+  const ask = async (cookie: string): Promise<{ status: number, text: string }> => {
+    const response = await fetchFn(url, {
+      headers: cookie === '' ? {} : { Cookie: cookie },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(20_000),
+    })
+    return { status: response.status, text: await response.text() }
+  }
+  const parse = (text: string): Record<string, unknown> | null | undefined => {
+    try {
+      const value = JSON.parse(text) as Record<string, unknown>
+      return value?.code === 0 ? (isRecord(value.data) ? value.data : null) : undefined
+    } catch {
+      return undefined
+    }
+  }
+  if (cookies !== undefined && Object.keys(cookies).length > 0) {
+    const { status, text } = await ask(cookieHeaderOf(cookies))
+    const data = status === 200 ? parse(text) : undefined
+    if (data !== undefined) return { cookies, data }
+  }
+  let { status, text } = await ask('')
+  let login: unknown
+  try {
+    login = (JSON.parse(text) as Record<string, unknown>).loginUrl
+  } catch {
+    login = undefined
+  }
+  if (status !== 401 || typeof login !== 'string' || !login.startsWith('https://account.xiaomi.com/')) {
+    throw new Error(`Xiaomi MiMo platform ${path}: HTTP ${status}`)
+  }
+  // Follow the serviceLogin redirect with the passToken, collecting the platform's cookies.
+  const jar = new Jar()
+  for (const [key, value] of [
+    ['userId', creds.userId], ['passToken', creds.passToken], ['cUserId', creds.cUserId],
+    ['deviceId', creds.deviceId], ['pass_ua', 'pc'], ['uLocale', 'zh_CN'],
+  ] as const) {
+    if (value) jar.seed('https://account.xiaomi.com', key, value)
+  }
+  let at = login
+  for (let hop = 0; ; hop++) {
+    if (hop > 10) throw new Error('Xiaomi MiMo platform sign-in: too many redirects')
+    const cookie = jar.header(at)
+    const response = await fetchFn(at, {
+      headers: cookie === '' ? {} : { Cookie: cookie },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(20_000),
+    })
+    jar.take(response, at)
+    const location = response.headers.get('location')
+    if (response.status < 300 || response.status >= 400 || !location) {
+      status = response.status
+      text = await response.text()
+      break
+    }
+    await response.arrayBuffer().catch(() => {})
+    const next = new URL(location, at)
+    if (next.protocol === 'http:' && next.host === new URL(MIMO_PLATFORM).host) next.protocol = 'https:'
+    at = next.href
+  }
+  const data = status === 200 ? parse(text) : undefined
+  if (data === undefined) throw new Error(`Xiaomi MiMo platform ${path}: the Xiaomi account didn't sign on (HTTP ${status})`)
+  return { cookies: jar.forOrigin(`${MIMO_PLATFORM}/`), data }
+}
+
+/** Read the account's Token Plan, or null when it has none or the platform can't be read. */
+async function readMimoTokenPlan(
+  creds: MimoCredentials,
+  fetchFn: typeof fetch,
+): Promise<MimoTokenPlan | null> {
+  try {
+    const detail = await mimoPlatformPage(creds, '/tokenPlan/detail', undefined, fetchFn)
+    const p = detail.data
+    const name = p !== null && typeof p.planName === 'string' ? p.planName.trim() : ''
+    if (name === '' || p?.expired !== false) return null
+    const out: MimoTokenPlan = { plan: `Token Plan ${name}` }
+    const end = typeof p.currentPeriodEnd === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(p.currentPeriodEnd)
+      ? Date.parse(p.currentPeriodEnd.replace(' ', 'T') + 'Z')
+      : NaN
+    if (!Number.isNaN(end)) out.until = end
+    try {
+      const usage = await mimoPlatformPage(creds, '/tokenPlan/usage', detail.cookies, fetchFn)
+      const u = usage.data
+      const items = [
+        ...(isRecord(u) && isRecord(u.monthUsage) && Array.isArray(u.monthUsage.items) ? u.monthUsage.items : []),
+        ...(isRecord(u) && isRecord(u.usage) && Array.isArray(u.usage.items) ? u.usage.items : []),
+      ].filter(isRecord)
+      const it = items.find((x) => x.name === 'month_total_token') ?? items.find((x) => x.name === 'plan_total_token')
+      const used = typeof it?.used === 'number' ? it.used : NaN
+      const limit = typeof it?.limit === 'number' ? it.limit : NaN
+      if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) {
+        const window: MimoUsageWindow = {
+          label: 'Token Plan',
+          usedPercent: Math.max(0, Math.min(100, (100 * used) / limit)),
+          used,
+          limit,
+        }
+        if (out.until !== undefined) window.resetsAt = out.until
+        out.window = window
+      }
+    } catch {
+      // The plan alone, when its usage can't be read.
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+/** The account's Token Plan as a usable API credential, or null when it has none. */
+export async function readMimoPlanKey(
+  creds: MimoCredentials,
+  fetchFn: typeof fetch,
+): Promise<{ key: string, base: string } | null> {
+  try {
+    let cookies: Record<string, string> | undefined
+    const read = async (path: string): Promise<Record<string, unknown> | null> => {
+      const result = await mimoPlatformPage(creds, path, cookies, fetchFn)
+      cookies = result.cookies
+      return result.data
+    }
+    const detail = await read('/tokenPlan/detail')
+    if (detail === null || typeof detail.planName !== 'string' || detail.planName.trim() === '' || detail.expired !== false) {
+      return null
+    }
+    const keyInfo = await read('/tokenPlan/apiKey')
+    const base = typeof keyInfo?.openaiBaseUrl === 'string' && /^https:\/\/[^/]+\.xiaomimimo\.com\//.test(keyInfo.openaiBaseUrl)
+      ? keyInfo.openaiBaseUrl.replace(/\/+$/, '')
+      : ''
+    if (base === '') return null
+    const raw = await read('/tokenPlan/apiKey/raw')
+    const rawKey = typeof raw === 'string' ? raw : ''
+    if (!rawKey.startsWith('tp-')) return null
+    return { key: rawKey, base }
+  } catch {
+    return null
+  }
 }

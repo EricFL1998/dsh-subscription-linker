@@ -93,7 +93,7 @@ export const GROK_PREEMPT_MS = 2 * 60 * 1000
 const TRUSTED_AUTH_HOSTS = new Set(['auth.x.ai', 'accounts.x.ai'])
 
 /** The rung id the composer's quick-mode button selects. */
-const FAST_RUNG = 'lightspeed'
+const FAST_RUNG = 'fast'
 
 /** Display metadata for the reasoning ladder xAI documents. */
 const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
@@ -101,11 +101,11 @@ const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
   low: { name: 'Low', description: 'Short chain of thought' },
   medium: { name: 'Medium', description: 'Balanced thinking budget' },
   high: { name: 'High', description: 'Deep chain of thought' },
-  // Not a thinking budget: this rung is the model's fast/lightspeed variant, which the
-  // composer's quick-mode button selects. It rides the effort channel so the row keeps
-  // its own id — a swapped model id would leave the picker with no way back. xAI's own
-  // word for it is "lightspeed", which is what the rung is named here.
-  [FAST_RUNG]: { name: 'Lightspeed', description: 'xAI lightspeed variant of this model' },
+  // Not a thinking budget: this rung is the model's fast variant, which the
+  // composer's quick-mode button selects. It rides the effort channel so the row
+  // keeps its own id — a swapped model id would leave the picker with no way back.
+  // xAI's own word for it is "fast" (grok-4.7-build-fast), which names the rung.
+  [FAST_RUNG]: { name: 'Fast', description: 'xAI fast variant of this model' },
 }
 
 /**
@@ -186,7 +186,8 @@ interface GrokEndpoints {
 
 /** One `reasoning.efforts` entry. */
 function effortInfo(effort: string) {
-  const label = EFFORT_LABELS[effort] ?? { name: effort, description: '' }
+  const known = EFFORT_LABELS[effort]
+  const label = known ?? { name: effort[0]!.toUpperCase() + effort.slice(1), description: `${effort} variant of this model` }
   return { id: ReasoningEffortId(effort), name: label.name, description: label.description }
 }
 
@@ -194,11 +195,13 @@ function effortInfo(effort: string) {
  * The reasoning block for a catalog entry, or undefined when it supports none.
  *
  * @param entry - the catalog row.
- * @param fast - add the `fast` rung when this row has a fast variant.
+ * @param fastWireId - the row's fast variant wire id, when it has one; the rung is the
+ *   variant's own fast word (`grok-4.7-build-fast` → `fast`).
  */
-function reasoningInfo(entry: CatalogEntry, fast = false) {
+function reasoningInfo(entry: CatalogEntry, fastWireId?: string) {
   const efforts = entry.reasoningEfforts
-  const ids = fast ? [...efforts ?? [], FAST_RUNG] : efforts
+  const rung = fastWireId === undefined ? undefined : fastWordOf(fastWireId)
+  const ids = rung === undefined ? efforts : [...efforts ?? [], rung]
   if (ids === undefined || ids.length === 0) return undefined
   return {
     efforts: ids.map(effortInfo),
@@ -385,11 +388,16 @@ export function isImageModel(id: string): boolean {
  * (`kimi-for-coding-highspeed`). A word has to stand on its own, so `highspeed` never
  * matches inside another word.
  */
-const FAST_VARIANT = /(?:^|[-_@])(?:fast|lightspeed|turbo|quick|highspeed)(?=[-_@]|$)/i
+const FAST_VARIANT = /(?:^|[-_@])(fast|lightspeed|turbo|quick|highspeed)(?=[-_@]|$)/i
 
 /** True when a model id names a fast/lightspeed variant of a base model. */
 export function isFastVariant(id: string): boolean {
   return FAST_VARIANT.test(id)
+}
+
+/** The fast word a variant's own id names (`grok-4.7-build-fast` → `fast`), lowercased. */
+export function fastWordOf(id: string): string {
+  return FAST_VARIANT.exec(id)?.[1]?.toLowerCase() ?? 'fast'
 }
 
 /**
@@ -638,9 +646,10 @@ export class GrokAdapter extends LlmAdapter {
         ...reasoning === undefined ? {} : { reasoning },
       }
     }
-    // A row with a fast variant offers the `fast` rung; the picker shows the row under
-    // its own name and the mode as the effort, which is what the trigger already reads.
-    const reasoning = reasoningInfo(entry, this.fastVariants.variantOf(entry.id) !== undefined)
+    // A row with a fast variant offers a rung named for the variant's own word; the
+    // picker shows the row under its own name and the mode as the effort.
+    const fastWireId = this.fastVariants.variantOf(entry.id)
+    const reasoning = reasoningInfo(entry, fastWireId)
     return {
       provider: GROK_PROVIDER_ID,
       id: model,
@@ -656,13 +665,15 @@ export class GrokAdapter extends LlmAdapter {
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     // Resolve @Nk context suffixes to the largest variant the endpoint offers.
     const base = this.resolveModelId(options.model)
-    // Fast mode rides the reasoning channel: `fast` is a rung of the row, not a model id
-    // of its own, so the row the picker selected stays dispatchable and the user can
-    // always select the standard model again. Only the wire id changes.
-    const fast = String(options.reasoningEffort ?? '') === FAST_RUNG
-    const model = fast ? this.fastVariants.variantOf(base) ?? base : base
+    // Fast mode rides the reasoning channel: the rung is the variant's own fast word, not
+    // a model id of its own, so the row the picker selected stays dispatchable and the user
+    // can always select the standard model again. Only the wire id changes.
+    const effort = String(options.reasoningEffort ?? '')
+    const fastWireId = this.fastVariants.variantOf(base)
+    const fast = fastWireId !== undefined && effort === fastWordOf(fastWireId)
+    const model = fast ? fastWireId : base
     const call = { ...options, model }
-    // xAI has no `fast` effort; the variant already carries the behaviour.
+    // xAI has no fast-variant effort; the variant already carries the behaviour.
     if (fast) delete call.reasoningEffort
     return streamProviderResponses(call, {
       label: 'xAI API',
@@ -1185,7 +1196,7 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
       const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
-        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: 'lightspeed' },
+        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: fastWordOf(pair.wireId) },
         ...image === undefined ? {} : { image },
       }
     },

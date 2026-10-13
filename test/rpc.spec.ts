@@ -2,6 +2,8 @@
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
+import os from 'node:os'
+import path from 'node:path'
 
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
@@ -10,6 +12,7 @@ import { SubscriptionRegistry } from '../src/auth/registry.js'
 import type { ProviderRoute } from '../src/auth/registry.js'
 import { BAD_REQUEST, ProviderError, REAUTH_REQUIRED } from '../src/errors.js'
 import { RPC_ENDPOINTS, RPC_PREFIX } from '../src/protocol.js'
+import { ModelPreferences } from '../src/settings.js'
 import type { ProviderStatus } from '../src/protocol.js'
 
 /** A status payload one fake route answers with. */
@@ -98,7 +101,11 @@ function fakeRoute(id: string, overrides: Partial<ProviderRoute> = {}): FakeRout
 
 /** A registry over the given fake routes. */
 function registryOf(routes: readonly ProviderRoute[]): SubscriptionRegistry {
-  return new SubscriptionRegistry(routes)
+  return new SubscriptionRegistry(routes, new ModelPreferences(path.join(makeTempDir(), 'prefs.json')))
+}
+let tempDirSeq = 0
+function makeTempDir(): string {
+  return path.join(os.tmpdir(), `rpc-test-${process.pid}-${tempDirSeq++}`)
 }
 
 /** Read the success value out of one envelope, failing loudly otherwise. */

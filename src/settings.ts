@@ -50,14 +50,17 @@ export interface AutoPreferences {
   order: readonly string[]
   /** Keys `auto` must not use, whatever their own route offers. */
   off: readonly string[]
+  /** Whether the `auto` provider is offered at all. Defaults to true. */
+  enabled: boolean
 }
 
 /** Read the `auto` section, keeping only usable keys. */
 function readAuto(document: PreferencesDocument): AutoPreferences {
-  if (!isRecord(document.auto)) return { order: [], off: [] }
+  if (!isRecord(document.auto)) return { order: [], off: [], enabled: true }
   return {
     order: readIds(document.auto.order),
     off: readIds(document.auto.off),
+    enabled: document.auto.enabled !== false,
   }
 }
 
@@ -127,7 +130,7 @@ function readOrder(document: PreferencesDocument): Record<string, string[]> {
 export class ModelPreferences {
   private hidden: Record<string, Set<string>> = {}
   private order: Record<string, string[]> = {}
-  private auto: AutoPreferences = { order: [], off: [] }
+  private auto: AutoPreferences = { order: [], off: [], enabled: true }
   private extra: Record<string, string[]> = {}
   private loaded = false
   /** The in-flight first read, so concurrent callers share one. */
@@ -161,7 +164,7 @@ export class ModelPreferences {
     } catch {
       this.hidden = {}
       this.order = {}
-      this.auto = { order: [], off: [] }
+      this.auto = { order: [], off: [], enabled: true }
       this.extra = {}
       this.loaded = true
       return
@@ -176,7 +179,7 @@ export class ModelPreferences {
     } catch {
       this.hidden = {}
       this.order = {}
-      this.auto = { order: [], off: [] }
+      this.auto = { order: [], off: [], enabled: true }
       this.extra = {}
     }
     this.loaded = true
@@ -246,7 +249,20 @@ export class ModelPreferences {
   /** The `auto` provider's arrangement. */
   async autoPreferences(): Promise<AutoPreferences> {
     await this.ensureLoaded()
-    return { order: [...this.auto.order], off: [...this.auto.off] }
+    return { order: [...this.auto.order], off: [...this.auto.off], enabled: this.auto.enabled }
+  }
+
+  /**
+   * Record whether the `auto` provider is offered at all.
+   * @param enabled - whether `auto` appears in the picker.
+   * @returns whether the stored state actually changed.
+   */
+  async setAutoOn(enabled: boolean): Promise<boolean> {
+    await this.ensureLoaded()
+    if (this.auto.enabled === enabled) return false
+    this.auto = { ...this.auto, enabled }
+    await this.persist()
+    return true
   }
 
   /**

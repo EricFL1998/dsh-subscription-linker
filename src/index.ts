@@ -234,7 +234,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  const registry = new SubscriptionRegistry(routes)
+  const registry = new SubscriptionRegistry(routes, preferences)
 
   // `auto` stands in for the other routes, so it is built after them and added
   // to the same registry it reads. Its list spans routes, which is why it is a

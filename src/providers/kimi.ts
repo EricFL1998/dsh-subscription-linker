@@ -47,7 +47,7 @@ import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import { prepareMoonshotTool } from '../translate/moonshot-schema.js'
 import type { ImageResolver } from '../translate/responses.js'
-import { isImageModel, isFastVariant, baseModelOf, FastVariantIndex } from './grok.js'
+import { isImageModel, isFastVariant, baseModelOf, fastWordOf, FastVariantIndex } from './grok.js'
 
 /** Model ids that are clearly not chat models. */
 const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
@@ -181,11 +181,13 @@ function effortInfo(effort: string) {
  * The reasoning block for a catalog entry, or undefined when it supports none.
  *
  * @param entry - the catalog row.
- * @param fast - add the `fast` rung when this row has a fast variant.
+ * @param fastWireId - the row's fast variant wire id, when it has one; the rung is the
+ *   variant's own fast word (`kimi-for-coding-highspeed` → `highspeed`).
  */
-function reasoningInfo(entry: KimiModelEntry, fast = false) {
+function reasoningInfo(entry: KimiModelEntry, fastWireId?: string) {
   const efforts = entry.reasoningEfforts
-  const ids = fast ? [...efforts ?? [], FAST_RUNG] : efforts
+  const rung = fastWireId === undefined ? undefined : fastWordOf(fastWireId)
+  const ids = rung === undefined ? efforts : [...efforts ?? [], rung]
   if (ids === undefined || ids.length === 0) return undefined
   const defaultEffort = entry.defaultEffort ?? ids[ids.length - 1]
   return {
@@ -394,9 +396,10 @@ export class KimiAdapter extends LlmAdapter {
         ...reasoning === undefined ? {} : { reasoning },
       }
     }
-    // A row with a fast variant offers the `fast` rung; the picker shows the row under
-    // its own name and the mode as the effort, which is what the trigger already reads.
-    const reasoning = reasoningInfo(entry, this.fastVariants.variantOf(entry.id) !== undefined)
+    // A row with a fast variant offers a rung named for the variant's own word; the
+    // picker shows the row under its own name and the mode as the effort.
+    const fastWireId = this.fastVariants.variantOf(entry.id)
+    const reasoning = reasoningInfo(entry, fastWireId)
     // An alias is just another spelling of the row, so it resolves onto the row's own id:
     // that is what keeps a selection dispatchable and the picker able to show it.
     return {
@@ -412,13 +415,15 @@ export class KimiAdapter extends LlmAdapter {
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // Fast mode rides the reasoning channel: `fast` is a rung of the row, not a model id
-    // of its own, so the row the picker selected stays dispatchable and the user can
-    // always select the standard model again. Only the wire id changes.
-    const fast = String(options.reasoningEffort ?? '') === FAST_RUNG
-    const model = fast ? this.fastVariants.variantOf(options.model) ?? options.model : options.model
+    // Fast mode rides the reasoning channel: the rung is the variant's own fast word, not
+    // a model id of its own, so the row the picker selected stays dispatchable and the user
+    // can always select the standard model again. Only the wire id changes.
+    const fastWireId = this.fastVariants.variantOf(options.model)
+    const effort = String(options.reasoningEffort ?? '')
+    const fast = fastWireId !== undefined && effort === fastWordOf(fastWireId)
+    const model = fast ? fastWireId : options.model
     const call = { ...options, model }
-    // Kimi has no `fast` effort; the variant already carries the behaviour.
+    // Kimi has no fast-variant effort; the variant already carries the behaviour.
     if (fast) delete call.reasoningEffort
     return streamProviderResponses(call, {
       label: 'Kimi API',

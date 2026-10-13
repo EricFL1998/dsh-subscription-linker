@@ -12,6 +12,7 @@ import type { TokenManager } from '../src/auth/tokens.js'
 import {
   createGrokDiscovery,
   exchangeGrokCode,
+  fastWordOf,
   GROK_CALLBACK_PORT,
   GROK_CLIENT_ID,
   GROK_DISCOVERY_URL,
@@ -342,7 +343,7 @@ describe('GrokAdapter catalog', () => {
     assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
     // The row declares the `fast` rung, which is what the quick-mode button selects.
     const base = await adapter.resolveModel('grok', 'grok-4.7')
-    assert.equal(base.reasoning?.efforts.some((effort) => String(effort.id) === 'lightspeed'), true)
+    assert.equal(base.reasoning?.efforts.some((effort) => String(effort.id) === 'fast'), true)
     // The fast variant still resolves, with its base model's metadata, under its own wire
     // id — a session that selected it before this build keeps working.
     const fast = await adapter.resolveModel('grok', 'grok-4.7-build-fast')
@@ -438,7 +439,7 @@ describe('GrokAdapter requests', () => {
     assert.deepEqual(adapter.fastPairOf('grok-4.7'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
     // The selection keeps the row's own id — that is what the host validated — and the
     // request goes to the variant, with no `fast` effort sent to xAI.
-    await collect(adapter.stream(request({ model: 'grok-4.7', reasoningEffort: ReasoningEffortId('lightspeed') })))
+    await collect(adapter.stream(request({ model: 'grok-4.7', reasoningEffort: ReasoningEffortId('fast') })))
     assert.equal(seenBody.model, 'grok-4.7-build-fast')
     assert.equal(Object.hasOwn(seenBody, 'reasoning'), false)
   })
@@ -495,5 +496,12 @@ describe('GrokAdapter requests', () => {
     await adapter.fetchCatalog('token', undefined)
     assert.deepEqual(adapter.fastPairOf('grok-9.9'), { baseId: 'grok-9.9', wireId: 'grok-9.9-build-fast' })
     assert.deepEqual(adapter.fastPairOf('grok-9.9-build-fast'), { baseId: 'grok-9.9', wireId: 'grok-9.9-build-fast' })
+  })
+
+  test('fastWordOf reads the fast word out of a variant id', () => {
+    assert.equal(fastWordOf('grok-4.7-build-fast'), 'fast')
+    assert.equal(fastWordOf('kimi-for-coding-highspeed'), 'highspeed')
+    assert.equal(fastWordOf('some-turbo-model'), 'turbo')
+    assert.equal(fastWordOf('grok-4.7'), 'fast')
   })
 })

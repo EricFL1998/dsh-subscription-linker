@@ -17,6 +17,7 @@ import { kimiIdentityHeaders } from '../auth/headers.js'
 import { KimiAdapter, parseKimiSession } from './kimi.js'
 import type { KimiSession } from './kimi.js'
 import { readKimiUsage } from './usage.js'
+import { fastWordOf } from './grok.js'
 import type { ProviderSpec } from '../auth/provider-controller.js'
 import { ProviderController } from '../auth/provider-controller.js'
 import type { ProviderRoute } from '../auth/registry.js'
@@ -201,7 +202,7 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
       const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
-        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: 'highspeed' },
+        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: fastWordOf(pair.wireId) },
         ...image === undefined ? {} : { image },
       }
     },

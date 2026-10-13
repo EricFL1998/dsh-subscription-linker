@@ -152,6 +152,8 @@ export class AutoAdapter extends LlmAdapter {
   }
 
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    // A switched-off `auto` is not offered at all, so the picker shows the routes directly.
+    if (!(await this.options.preferences.autoPreferences()).enabled) return []
     const chain = await this.chain()
     // An `auto` with nothing to try is not offered at all, rather than offered
     // and guaranteed to fail.

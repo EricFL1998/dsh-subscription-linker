@@ -90,7 +90,7 @@ async function harness(
   name = `prefs-${String(Math.random()).slice(2)}`,
 ): Promise<{ route: ProviderRoute, adapter: AutoAdapter, preferences: ModelPreferences, registry: SubscriptionRegistry }> {
   const preferences = new ModelPreferences(path.join(directory, `${name}.json`))
-  const registry = new SubscriptionRegistry(routes)
+  const registry = new SubscriptionRegistry(routes, preferences)
   const route = createAutoProvider({ preferences, registry })
   registry.register(route)
   return { route, adapter: route.adapter as AutoAdapter, preferences, registry }
@@ -212,7 +212,7 @@ describe('the auto provider', () => {
     const b = stubRoute('b', ['b1'])
     const warnings: string[] = []
     const preferences = new ModelPreferences(path.join(directory, 'fallback.json'))
-    const registry = new SubscriptionRegistry([a.route, b.route])
+    const registry = new SubscriptionRegistry([a.route, b.route], new ModelPreferences(path.join(directory, 'ab.json')))
     const route = createAutoProvider({ preferences, registry, onWarn: (message) => warnings.push(message) })
     registry.register(route)
     const chunks = await collect(route.adapter.stream(call()))
@@ -259,7 +259,7 @@ describe('the auto provider', () => {
     const a = stubRoute('a', ['a1'])
     const warnings: string[] = []
     const preferences = new ModelPreferences(path.join(directory, 'broken.json'))
-    const registry = new SubscriptionRegistry([broken.route, a.route])
+    const registry = new SubscriptionRegistry([broken.route, a.route], new ModelPreferences(path.join(directory, 'broken.json')))
     const route = createAutoProvider({ preferences, registry, onWarn: (message) => warnings.push(message) })
     registry.register(route)
     const chain = await (route.adapter as AutoAdapter).chain()
@@ -288,7 +288,7 @@ describe('auto across the whole harness roster', () => {
     const preferences = new ModelPreferences(path.join(directory, `host-${String(Math.random()).slice(2)}.json`))
     const route = createAutoProvider({
       preferences,
-      registry: new SubscriptionRegistry([]),
+      registry: new SubscriptionRegistry([], new ModelPreferences(path.join(directory, 'empty.json'))),
       host: {
         providers: () => [
           { id: AUTO_PROVIDER_ID, name: 'Auto' },
@@ -368,7 +368,7 @@ describe('auto across the whole harness roster', () => {
         accounts: [], credentialFile: '—', discovery: true, models: [], details: [],
       }),
     } as unknown as ProviderRoute
-    const registry = new SubscriptionRegistry([signedOut])
+    const registry = new SubscriptionRegistry([signedOut], new ModelPreferences(path.join(directory, 'signedOut.json')))
     const route = createAutoProvider({
       preferences,
       registry,
@@ -395,7 +395,7 @@ describe('auto across the whole harness roster', () => {
         accounts: [], credentialFile: '—', discovery: true, models: [], details: [],
       }),
     } as unknown as ProviderRoute
-    const registry = new SubscriptionRegistry([signedIn])
+    const registry = new SubscriptionRegistry([signedIn], new ModelPreferences(path.join(directory, 'signedIn.json')))
     const route = createAutoProvider({
       preferences,
       registry,

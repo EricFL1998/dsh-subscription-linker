@@ -28,6 +28,7 @@ export const RPC_ENDPOINTS = [
   'removeModel',
   'usage',
   'reload',
+  'setAutoOn',
   'deepseek-balance',
   'ccswitch-balance',
   'model-variants',
@@ -316,6 +317,7 @@ export interface RpcMap {
   removeModel: { payload: ModelIdRequest, value: SubscriptionStatus }
   usage: { payload: DiscoverRequest, value: UsageResult }
   reload: { payload: undefined, value: SubscriptionStatus }
+  setAutoOn: { payload: SetAutoOnRequest, value: AutoStateResult }
   'deepseek-balance': { payload: DeepSeekBalanceRequest, value: DeepSeekBalanceResult }
   'ccswitch-balance': { payload: CcSwitchBalanceRequest, value: CcSwitchBalanceResult }
   'model-variants': { payload: ModelVariantsRequest, value: ModelVariantsResult }
@@ -374,6 +376,16 @@ export type ModelVariantsResult = ModelVariants | undefined
 export interface ModelVariantsRequest {
   provider: string
   id: string
+}
+
+/** Payload of `setAutoOn`: whether the `auto` provider is offered at all. */
+export interface SetAutoOnRequest {
+  enabled: boolean
+}
+
+/** Result of `setAutoOn`: the `auto` provider's live enabled state. */
+export interface AutoStateResult {
+  enabled: boolean
 }
 
 /** Payload of `deepseek-balance`. */

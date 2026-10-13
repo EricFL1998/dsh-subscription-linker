@@ -239,3 +239,60 @@ test('readMimoUsage shows the plan alone when there is no weekly allowance', asy
   assert.equal(read.plan, 'Pro')
   assert.equal(read.windows.length, 0)
 })
+
+test('readMimoUsage folds the Token Plan into the windows', async () => {
+  const creds: MimoCredentials = {
+    userId: 'u1',
+    cUserId: '',
+    passToken: 'pt',
+    deviceId: 'pc_x',
+    region: MIMO_REGION,
+    base: MIMO_HOSTS[MIMO_REGION as keyof typeof MIMO_HOSTS],
+  }
+  // A first platform read (no cookies) answers 401 with a serviceLogin URL, which the
+  // passToken follows through a couple of redirects; hand those redirects cookies so
+  // the page read then answers with the data.
+  const platformCookies = { serviceToken: 'pst' }
+  const fetchFn: typeof fetch = async (input, init) => {
+    const url = String(input)
+    const cookie = new Headers(init?.headers).get('cookie') ?? ''
+    // App plan and weekly allowance come from the MiMo server.
+    if (url.includes('mimo-server')) {
+      if (url.includes('/user/xiaomi/subscription/self')) {
+        return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ code: 0, data: { percent: 50, resetDate: '2026-10-20' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    // The platform signs on with the passToken when no session cookie is present: a page
+    // read answers 401 with a serviceLogin URL; the redirect hops through account to sts,
+    // which sets the platform cookie and serves the detail page.
+    if (url.includes('account.xiaomi.com')) {
+      return new Response('', { status: 302, headers: { location: 'https://platform.xiaomimimo.com/sts' } })
+    }
+    if (url.includes('platform.xiaomimimo.com')) {
+      if (url.includes('/sts')) {
+        return new Response(JSON.stringify({ code: 0, data: { planName: 'Pro', expired: false, currentPeriodEnd: '2026-11-06 23:59:59' } }), { status: 200, headers: { 'content-type': 'application/json', 'set-cookie': 'serviceToken=pst; Path=/' } })
+      }
+      if (cookie.includes('serviceToken=pst')) {
+        if (url.includes('/tokenPlan/usage')) {
+          return new Response(JSON.stringify({ code: 0, data: { monthUsage: { items: [{ name: 'month_total_token', used: 6810000, limit: 10000000 }] } } }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ code: 0, data: { planName: 'Pro', expired: false, currentPeriodEnd: '2026-11-06 23:59:59' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ loginUrl: 'https://account.xiaomi.com/serviceLogin' }), { status: 401, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const read = await readMimoUsage({ cookies: { serviceToken: 'st' }, userId: 'u1' }, creds, fetchFn)
+  // No app plan: the Token Plan names the account's plan.
+  assert.equal(read.plan, 'Token Plan Pro')
+  assert.ok(read.renewsAt !== undefined)
+  // The weekly window plus the Token Plan's credits.
+  assert.equal(read.windows.length, 2)
+  assert.equal(read.windows[0]?.label, '7 days')
+  const token = read.windows[1]!
+  assert.equal(token.label, 'Token Plan')
+  assert.equal(token.used, 6810000)
+  assert.equal(token.limit, 10000000)
+  assert.ok(Math.abs(token.usedPercent! - 68.1) < 0.1)
+})

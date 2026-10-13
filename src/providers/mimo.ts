@@ -24,7 +24,7 @@ import { proxiedFetch, type FetchFn } from '../http.js'
 import type { TokenManager } from '../auth/tokens.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { MimoCredentials } from '../auth/mimo-flow.js'
-import { refreshMimoSession } from '../auth/mimo-flow.js'
+import { readMimoPlanKey, refreshMimoSession } from '../auth/mimo-flow.js'
 
 /** The `mimo` provider route key. */
 export const MIMO_PROVIDER_ID = 'mimo'
@@ -205,6 +205,27 @@ export class MimoAdapter extends LlmAdapter {
         body: JSON.stringify(body),
         signal: watchdog.signal,
       })
+      // A 403 with code membership_required means the account has no app plan but a
+      // Token Plan at the open platform: re-ask at its endpoint with its tp- key.
+      if (response.status === 403) {
+        const text = await response.text()
+        let code: unknown
+        try {
+          code = (JSON.parse(text) as Record<string, unknown>).error !== undefined
+            ? (JSON.parse(text) as { error: { code?: unknown } }).error.code
+            : (JSON.parse(text) as Record<string, unknown>).code
+        } catch {
+          code = undefined
+        }
+        if (code === 'membership_required') {
+          const plan = await this.tokenPlanRequest(session, body, watchdog)
+          if (plan !== undefined) {
+            yield* this.readStream(plan, watchdog)
+            return
+          }
+        }
+        throw new Error(`Xiaomi MiMo: ${text.slice(0, 200)}`)
+      }
       if (!response.ok || response.body === null) {
         throw await httpLlmError(response, 'Xiaomi MiMo')
       }
@@ -213,6 +234,51 @@ export class MimoAdapter extends LlmAdapter {
       throw mapFetchFailure('Xiaomi MiMo', error, watchdog, options.signal)
     } finally {
       watchdog.stop()
+    }
+  }
+
+  /** The app's names for its models, as the Token Plan's endpoint names them. */
+  private static readonly TP_MODELS: Record<string, string> = {
+    'mimo-pro': 'mimo-v2.6-pro',
+    'mimo-flash': 'mimo-v2.6-flash',
+  }
+
+  /**
+   * Re-ask a membership_required chat at the Token Plan's endpoint.
+   *
+   * Reads the account's tp- API key from the open platform, then posts the chat to the
+   * plan's OpenAI base with that key. Undefined when the account has no live plan or no
+   * readable key.
+   */
+  private async tokenPlanRequest(
+    session: MimoSession,
+    body: Record<string, unknown>,
+    watchdog: ReturnType<typeof idleWatchdog>,
+  ): Promise<Response | undefined> {
+    let creds: MimoCredentials
+    try {
+      creds = JSON.parse(session.mimoCreds) as MimoCredentials
+    } catch {
+      return undefined
+    }
+    try {
+      const plan = await readMimoPlanKey(creds, this.fetchFn)
+      if (plan === null) return undefined
+      const model = MimoAdapter.TP_MODELS[String(body.model)] ?? String(body.model)
+      const path = new URL(session.apiBase.replace(/\/+$/, '') + '/route/chat/completions').pathname
+      const rest = path.replace(/^.*?\/route(?=\/|$)/, '')
+      return await this.fetchFn(`${plan.base}${rest}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'Authorization': `Bearer ${plan.key}`,
+        },
+        body: JSON.stringify({ ...body, model }),
+        signal: watchdog.signal,
+      })
+    } catch {
+      return undefined
     }
   }
 
