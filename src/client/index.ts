@@ -121,6 +121,9 @@ export function apply(ctx: ClientContext): void {
   // pills sit at order 0. This chip rides beside them and shows the allowance of the
   // provider the session is using. The scope hands `inject` the session id, but the chip
   // reads the selection from its own projection prop, so nothing here needs it.
+  const modelDirectories = ctx.get('modelDirectories') as
+    | { directoryFor?: (id: string) => { store?: unknown, select?: (selection: unknown) => Promise<unknown> } | undefined }
+    | undefined
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
     id: 'subscription-usage',
@@ -133,24 +136,16 @@ export function apply(ctx: ClientContext): void {
       ccSwitchBalance: createCcSwitchBalanceCall(connection.rpc),
       // The session's model directory: read for the current selection, written when the
       // quick-mode button routes to a fast variant. Absent on a host without it.
-      modelDirectory: sessionId === undefined ? undefined : modelDirectoryFor(ctx, sessionId) as UsageChipInjected['modelDirectory'],
+      modelDirectory: sessionId === undefined || modelDirectories?.directoryFor === undefined
+        ? undefined
+        : (() => {
+            const directory = modelDirectories.directoryFor?.(sessionId)
+            if (directory === undefined || directory.select === undefined) return undefined
+            return {
+              store: directory.store,
+              select: (selection: { provider: string, model: string }) => directory.select?.(selection) ?? Promise.resolve(),
+            }
+          })(),
     }),
   }, UsageChip))
-}
-
-/** One session's model directory, when the host exposes the service. */
-function modelDirectoryFor(ctx: ClientContext, sessionId: string): unknown {
-  try {
-    const directories = (ctx as unknown as { get: (key: string) => unknown }).get('modelDirectories') as
-      | { directoryFor?: (id: string) => { store?: unknown, select?: (selection: unknown) => Promise<unknown> } | undefined }
-      | undefined
-    const directory = directories?.directoryFor?.(sessionId)
-    if (directory === undefined) return undefined
-    return {
-      store: directory.store,
-      select: (selection: unknown) => directory.select?.(selection),
-    }
-  } catch {
-    return undefined
-  }
 }
