@@ -64,17 +64,21 @@ function modelInfo(raw: unknown): ModelInfo {
   }
 }
 
-/** A model id whose suffix fixes its reasoning tier, not a ladder the picker offers. */
-const TIER_SUFFIXED = /-(?:low|medium|high|extra-low|max)$/i
+/** A model id whose suffix or infix names a fixed reasoning tier, folded into its base family. */
+const TIER_MARKED = /(?:^|[-_])(?:extra-low|low|medium|high|max)(?:$|[-_])/i
 
 /** True when a model id names a specific tier of a family, not a model with a ladder. */
-export function isTierSuffixed(id: string): boolean {
-  return TIER_SUFFIXED.test(id)
+export function isTierMarked(id: string): boolean {
+  return TIER_MARKED.test(id)
 }
 
-/** The base family a tier-suffixed id belongs to (`gemini-3.5-flash-low` → `gemini-3.5-flash`). */
+/** The base family a tier-marked id belongs to (`gemini-3-flash-agent` → `gemini-3-flash`). */
 export function baseFamilyOf(id: string): string {
-  return id.replace(/-(?:extra-low|low|medium|high|max)$/i, '')
+  // Remove the tier token wherever it sits (suffix or infix), then tidy any trailing
+  // separator the removal left behind.
+  return id
+    .replace(/[-_](?:extra-low|low|medium|high|max)(?=[-_]|$)/i, '')
+    .replace(/[-_]$/, '')
 }
 
 /** Antigravity's own reasoning ladder, per model family. */
@@ -187,10 +191,11 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
   const seenBase = new Set<string>()
   for (const wireId of agentIds(payload)) {
     const info = modelInfo(models[wireId])
-    // Tier-suffixed ids (gemini-3.5-flash-low, …-high) are the family's fixed tiers;
-    // they fold into the base family row so the picker shows one entry with a ladder,
-    // not one row per tier. The base row is inserted the first time a tier of it is seen.
-    if (isTierSuffixed(wireId)) {
+    // Tier-marked ids (gemini-3.5-flash-low, gemini-3-flash-agent, …) are the family's
+    // fixed tiers; they fold into the base family row so the picker shows one entry with
+    // a ladder, not one row per tier. The base row is inserted the first time a tier of
+    // it is seen.
+    if (isTierMarked(wireId)) {
       const base = baseFamilyOf(wireId)
       if (seenBase.has(base)) continue
       seenBase.add(base)
