@@ -71,7 +71,7 @@ describe('KimiAdapter catalog', () => {
     // The fast variant rides beside its row in the host-facing list: the host validates
     // a GUI selection against that list and refuses an unknown id, so the variant must
     // be present even though the picker's model seat shows only the row.
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'])
     assert.equal(models[0]?.provider, 'kimi')
     assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
   })
@@ -103,8 +103,6 @@ describe('KimiAdapter catalog', () => {
     // rewritten onto its base.
     const models = await adapter.listModels('kimi')
     assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), true)
-    const variant = models.find((model) => model.id === 'kimi-for-coding-highspeed') as { id: string, group?: string } | undefined
-    assert.equal(variant?.group, 'kimi-for-coding')
     const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
     assert.equal(resolved.id, 'kimi-for-coding-highspeed')
     assert.equal(resolved.name, 'Kimi for Coding')
@@ -146,21 +144,21 @@ describe('KimiAdapter catalog', () => {
     const adapter = new KimiAdapter(options())
     adapter.discover(['kimi-for-coding', 'k3', 'k3-256k'])
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'])
   })
 
   test('appends live ids this build does not know', async () => {
     const adapter = new KimiAdapter(options())
     adapter.discover(['k3', 'k3-next', 'k3-next', 'kimi-k3'])
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
     assert.match(models.at(-1)?.description ?? '', /model list/)
   })
 
   test('appends configured extra models', async () => {
     const adapter = new KimiAdapter(options({ extraModels: ['k3-next', 'k3'], discovery: true }))
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
     assert.match(models.at(-1)?.description ?? '', /plugin configuration/)
   })
 })
@@ -458,7 +456,7 @@ describe('KimiAdapter model order', () => {
     const adapter = new KimiAdapter(options({ userModels: async () => ['k3-next'] }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'],
+      ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'],
     )
     // It has no shipped metadata, so the standard window is advertised.
     const resolved = await adapter.resolveModel('kimi', 'k3-next')
@@ -469,7 +467,7 @@ describe('KimiAdapter model order', () => {
     const known = new KimiAdapter(options({ userModels: async () => ['k3'] }))
     assert.deepEqual(
       (await known.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'],
+      ['kimi-for-coding-highspeed', 'k3', 'k3[1m]', 'k3-256k'],
     )
   })
 
@@ -479,7 +477,7 @@ describe('KimiAdapter model order', () => {
       userModels: async () => { throw new Error('disk offline') },
       onWarn: (message) => warnings.push(message),
     }))
-    assert.equal((await adapter.listModels('kimi')).length, 5)
+    assert.equal((await adapter.listModels('kimi')).length, 4)
     assert.equal(warnings.length, 1)
     assert.match(warnings[0] ?? '', /user-added models unavailable/)
   })

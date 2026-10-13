@@ -407,19 +407,24 @@ export class ProviderController<S extends SessionBase> {
     // A logged-out install has nothing to discover, and warning about it on
     // every startup would be noise.
     if (!await this.options.store.hasAny()) return this.status()
-    // Discovery resolves tokens to read the model list, but a resolve must never
-    // open the browser: a transient network failure, or a token the endpoint refuses
-    // while still being within its stored expiry, is not a signal to start a login.
-    // Only an explicit user action (the connect button) opens the consent page.
+    // Discovery reads the live catalog on startup so the picker shows what the account
+    // actually serves without a manual refresh. A resolve must never open the browser:
+    // a refresh failure is recorded as the route's last error, never as a login prompt.
     const discovered: string[] = []
     for (const account of Object.keys(await this.options.store.list())) {
+      // An unexpired token is used as-is; a lapsed one is refreshed in memory so the
+      // catalog still loads on startup. The refreshed token is not written back to the
+      // store here — a durable renewal still happens on the next real request.
       let session = await this.options.store.get(account)
       if (session === undefined) continue
-      // A token that is still within its stored expiry is used as-is; a lapsed one
-      // is a silent skip (the route works, the catalog is just not refreshed).
       if (session.expiresAt <= Date.now()) {
-        this.options.onWarn?.(`${spec.id} model discovery for ${account} skipped: token expired`)
-        continue
+        try {
+          const refreshed = await this.options.tokens.resolve(account, true)
+          session = { ...session, accessToken: refreshed.accessToken, expiresAt: refreshed.expiresAt }
+        } catch {
+          this.options.onWarn?.(`${spec.id} model discovery for ${account} skipped: token refresh failed`)
+          continue
+        }
       }
       const ids = await spec.discover(session.accessToken)
       if (ids !== undefined) {

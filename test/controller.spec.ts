@@ -173,9 +173,10 @@ describe('eager refresh', () => {
     assert.deepEqual(resolves, [])
   })
 
-  test('a permanent refresh failure is not surfaced by discover', async () => {
-    const store = makeStore('dead')
-    // Store an already-expired token: discover skips it without resolving.
+  test('discover refreshes a lapsed token so the catalog still loads', async () => {
+    const store = makeStore('refresh-on-discover')
+    // Store an already-expired token: discover refreshes it in memory so the catalog
+    // loads, and a refresh failure is recorded without ever opening the browser.
     await store.save('user-1', { accessToken: 'stale', expiresAt: Date.now() - 1, refreshToken: 'r' })
     const { controller: subject, resolves } = controller({
       store,
@@ -188,9 +189,9 @@ describe('eager refresh', () => {
     const status = await subject.status()
     assert.equal(status.accounts.length, 1)
     assert.equal(status.lastError, undefined)
-    // Discover skips the expired token without resolving it.
+    // Discover attempts the refresh; the failure is contained and reported, not thrown.
     await subject.discover(true)
-    assert.deepEqual(resolves, [])
+    assert.deepEqual(resolves, ['user-1'])
     const after = await subject.status()
     assert.equal(after.lastError, undefined)
   })

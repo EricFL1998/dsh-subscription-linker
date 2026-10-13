@@ -323,23 +323,22 @@ export class KimiAdapter extends LlmAdapter {
     if (await this.options.tokens.session() === undefined) return []
     await this.syncUserModels()
     const hidden = await this.hidden()
-    // A fast variant is not a picker row, but the host validates a GUI selection
-    // against the exact list `listModels` returns, so the variant must appear there
-    // or selecting it is refused with `session/model-unavailable`. The picker's
-    // menu collapses entries that share one `group` value into a single choice,
-    // so the variant rides with its base id as the group: the host can name and
-    // select it, and the picker still shows one row per model.
+    // The host validates a GUI selection against the exact ids `listModels` returns
+    // and refuses an unknown one with `session/model-unavailable`, and its picker
+    // lists every returned id as its own row. So a fast variant is published under
+    // its base id: selecting it names the variant the request must send, and the
+    // base's own id is withheld so the variant does not appear twice.
     const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
-    const listed = resolveCatalog(imageless, [], hidden).entries.flatMap((entry) => {
+    const listed = resolveCatalog(imageless, [], hidden).entries.map((entry) => {
       const fast = this.fastVariants.variantOf(entry.id)
-      const base = {
+      const id = fast ?? entry.id
+      return {
         provider: KIMI_PROVIDER_ID,
-        id: entry.id,
+        id,
         name: entry.name,
         ...entry.description === undefined ? {} : { description: entry.description },
         ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
       }
-      return fast === undefined ? [base] : [base, { provider: KIMI_PROVIDER_ID, id: fast, name: entry.name, group: entry.id, description: 'Fast variant', ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities } }]
     })
     return listed
   }
