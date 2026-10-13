@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
-import { parseAntigravitySession, fetchAntigravityModels } from '../lib/providers/antigravity.js'
+import { parseAntigravitySession, fetchAntigravityModels, refreshAntigravityToken } from '../lib/providers/antigravity.js'
 
 const storePath = path.join(homedir(), '.dsh', 'plugins', 'kimi-oauth', 'auth.json')
 const raw = await readFile(storePath, 'utf8')
@@ -19,8 +19,19 @@ for (const key of Object.keys(accounts)) {
   }
   console.log('\n=== account:', key, '===')
   console.log('projectId:', parsed.projectId)
+  let accessToken = parsed.accessToken
+  if (parsed.expiresAt <= Date.now()) {
+    try {
+      const refreshed = await refreshAntigravityToken({ fetchFn: fetch, refreshToken: accounts[key].refreshToken })
+      accessToken = refreshed.accessToken
+      console.log('token refreshed')
+    } catch (e) {
+      console.log('token refresh failed:', e.message)
+      continue
+    }
+  }
   const result = await fetchAntigravityModels({
-    accessToken: parsed.accessToken,
+    accessToken,
     projectId: parsed.projectId ?? '',
     fetchFn: fetch,
   })

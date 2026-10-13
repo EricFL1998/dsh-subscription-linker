@@ -123,8 +123,11 @@ function agentIds(payload: unknown): string[] {
   // The response also carries models under API_PROVIDER_GOOGLE_GEMINI /
   // ANTHROPIC_VERTEX / OPENAI_VERTEX that the agent grouping does not name (3.1 Pro,
   // 3 Flash, the flash family). Keep every one of those; NON_AGENT surfaces stay out.
+  // Old generations (2.5) are dropped: the picker is for the current models.
+  const OLD_GENERATION = /gemini-2\./
   for (const [id, value] of Object.entries(models)) {
     if (NON_AGENT.test(id)) continue
+    if (OLD_GENERATION.test(id)) continue
     if (!isRecord(value)) continue
     const api = value.apiProvider
     if (api === 'API_PROVIDER_GOOGLE_GEMINI' || api === 'API_PROVIDER_ANTHROPIC_VERTEX' || api === 'API_PROVIDER_OPENAI_VERTEX') {
