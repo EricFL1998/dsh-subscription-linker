@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-subscription-oauth",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "description": "Use subscription accounts as DeepSeek Harness LLM providers — Kimi Code (OAuth device flow), Grok / X Premium (OIDC + PKCE), Google Antigravity (Google OAuth + Cloud Code Assist) and GLM / BigModel (ZCode's browser sign-in) — with per-model visibility, drag-to-reorder Auto fallback and plan quotas from the web Settings page",
   "license": "MIT",
   "author": "EricFL1998",
