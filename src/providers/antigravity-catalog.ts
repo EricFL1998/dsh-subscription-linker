@@ -100,8 +100,26 @@ export function baseFamilyOf(id: string): string {
  * families; other families (pro, …) keep their id.
  */
 export function geminiBaseOf(id: string): string {
-  const match = /^(gemini-\d+(?:\.\d+)?-flash)/.exec(id)
+  const match = /^(gemini-\d+(?:\.\d+)?)-flash/.exec(id)
   return match?.[1] ?? id
+}
+
+/**
+ * The wire id to send for one gemini flash family and reasoning effort.
+ *
+ * The service names tiers inconsistently: the High tier of 3.5 Flash is
+ * `gemini-3.5-flash-high` in some groups and `gemini-3.5-flash-agent` in others;
+ * 3.8 Flash is `gemini-3.8-flash-tiered`. The picker shows the base family with a
+ * ladder; this maps the chosen level back to the wire id the endpoint accepts.
+ * When no specific mapping is known, the effort is appended as a suffix.
+ */
+export function geminiTierId(base: string, effort: string): string {
+  if (effort === 'high') {
+    if (base === 'gemini-3.5-flash') return 'gemini-3.5-flash-agent'
+    if (base === 'gemini-3.8-flash') return 'gemini-3.8-flash-tiered'
+    if (base === 'gemini-3-flash') return 'gemini-3-flash-agent'
+  }
+  return `${base}-${effort}`
 }
 
 /** Antigravity's own reasoning ladder, per model family. */

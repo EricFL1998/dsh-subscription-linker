@@ -364,16 +364,33 @@ export function isImageModel(id: string): boolean {
 }
 
 /** Model ids that are the fast/lightspeed variant of a base model, matched per base. */
-const FAST_VARIANT = /(?:^|[-_])(?:fast|lightspeed|turbo|quick)$/i
+const FAST_VARIANT = /(?:^|[-_@])(?:fast|lightspeed|turbo|quick)(?=[-_@]|$)/i
 
 /** True when a model id names a fast/lightspeed variant of a base model. */
 export function isFastVariant(id: string): boolean {
   return FAST_VARIANT.test(id)
 }
 
-/** The base model id a fast variant belongs to (`grok-4.7-fast` → `grok-4.7`). */
+/** The base model id a fast variant belongs to (`grok-4.7-fast@500k` → `grok-4.7`). */
 export function baseModelOf(id: string): string {
-  return id.replace(FAST_VARIANT, '')
+  return id
+    .replace(FAST_VARIANT, '')
+    .replace(/[-_@]$/, '')
+    .replace(/@\d+k$/i, '')
+}
+
+/** A context-size suffix like `@500k` on a model id. */
+const CONTEXT_SUFFIX = /@(\d+)k$/i
+
+/** Extract the context size from a model id's `@Nk` suffix, or undefined. */
+export function contextOf(id: string): number | undefined {
+  const match = CONTEXT_SUFFIX.exec(id)
+  return match ? parseInt(match[1]!, 10) : undefined
+}
+
+/** Strip the `@Nk` context suffix from a model id. */
+export function stripContext(id: string): string {
+  return id.replace(CONTEXT_SUFFIX, '')
 }
 
 /** Constructor dependencies for {@link GrokAdapter}. */
@@ -490,7 +507,9 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return streamProviderResponses(options, {
+    // Resolve @Nk context suffixes to the largest variant the endpoint offers.
+    const model = this.resolveModelId(options.model)
+    return streamProviderResponses({ ...options, model }, {
       label: 'xAI API',
       tokens: this.options.tokens,
       request: (call, model, accessToken, signal) => this.request(call, model, accessToken, signal),
@@ -613,6 +632,24 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   /** Build and send one request for one model. */
+  /** The default context variant per base model, set during discovery. */
+  private defaultContext = new Map<string, string>()
+
+  /** Resolve a model id to the wire id the endpoint accepts (largest context). */
+  resolveModelId(model: string): string {
+    return this.defaultContext.get(model) ?? model
+  }
+
+  /** Record one default-context mapping. */
+  private noteContextVariant(base: string, context: number, wireId: string): void {
+    const existing = this.defaultContext.get(base)
+    if (existing !== undefined) {
+      const existingCtx = contextOf(existing)
+      if (existingCtx !== undefined && existingCtx >= context) return
+    }
+    this.defaultContext.set(base, wireId)
+  }
+
   private async request(
     options: GenerateOptions,
     model: string,
@@ -695,14 +732,27 @@ export class GrokAdapter extends LlmAdapter {
       const rawIds = allIds.filter((id) => !NON_CHAT_ID.test(id))
       // Fast/lightspeed variants ride with their base model: they share the base's
       // visibility switch and are reached by a picker button, not a separate row.
+      // Context variants (@500k) also fold into the base; the largest context wins.
       this.fastVariants.clear()
+      this.defaultContext.clear()
       for (const id of rawIds) {
-        if (!isFastVariant(id)) continue
-        const base = baseModelOf(id)
-        if (!this.fastVariants.has(base)) this.fastVariants.set(base, id)
+        if (isFastVariant(id)) {
+          const base = baseModelOf(id)
+          if (!this.fastVariants.has(base)) this.fastVariants.set(base, id)
+          continue
+        }
+        const ctx = contextOf(id)
+        if (ctx !== undefined) {
+          this.noteContextVariant(stripContext(id), ctx, id)
+        }
       }
       const ids = rawIds
-        .map((id) => (isFastVariant(id) ? baseModelOf(id) : id))
+        .map((id) => {
+          if (isFastVariant(id)) return baseModelOf(id)
+          const ctx = contextOf(id)
+          if (ctx !== undefined) return stripContext(id)
+          return id
+        })
         .filter((id, index, list) => list.indexOf(id) === index)
       if (ids.length === 0) {
         this.options.onWarn?.('xAI model discovery returned an empty catalog; using the built-in catalog')

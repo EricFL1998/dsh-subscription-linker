@@ -47,6 +47,7 @@ import {
   parseAntigravityModelQuota,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
+  geminiTierId,
 } from './antigravity-catalog.js'
 import { toAntigravityRequest, streamAntigravity, antigravityReasoning } from '../translate/antigravity.js'
 import type { ImageResolver } from '../translate/responses.js'
@@ -630,7 +631,12 @@ export class AntigravityAdapter extends LlmAdapter {
       // `auto` owns the fallback chain now, so this route serves exactly the
       // model it was asked for — but it draws on every account the provider holds, so a
       // spent allowance moves to the next account rather than failing the call.
-      const model = options.model
+      // A base gemini flash id (gemini-3.8-flash) with a chosen effort maps to the
+      // wire id the endpoint accepts (gemini-3.8-flash-tiered for high, …).
+      // Non-flash models pass through unchanged.
+      const model = /^gemini-.*-flash$/.test(options.model)
+        ? geminiTierId(options.model, options.reasoningEffort ?? 'medium')
+        : options.model
       // Accounts come from the manager when it can list them; a minimal manager (or a
       // test double) without `accounts()` means a single account, which is just the
       // default one.
