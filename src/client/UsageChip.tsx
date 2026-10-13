@@ -309,12 +309,18 @@ export function mergeAccountWindows(readings: readonly AccountReading[]): readon
     const withPercent = list.filter((window) => window.usedPercent !== undefined)
     if (withPercent.length === 0) continue
     const usedPercent = withPercent.reduce((sum, window) => sum + (window.usedPercent ?? 0), 0) / withPercent.length
+    // A credit window carries the raw figures too; keep them so the compact line can read
+    // money as money (0/1500) rather than as a spent share (0%), which misreads an empty
+    // balance as nothing to meter.
+    const used = list.reduce((sum, window) => sum + (window.used ?? 0), 0)
+    const limit = list.reduce((sum, window) => sum + (window.limit ?? 0), 0)
     // The pool's reset is the soonest account reset: the window refills when the first
     // account's does.
     const resets = list.map((window) => window.resetsAt).filter((at): at is number => typeof at === 'number')
     merged.push({
       label,
       usedPercent: Math.max(0, Math.min(100, usedPercent)),
+      ...limit > 0 ? { used, limit } : {},
       ...resets.length === 0 ? {} : { resetsAt: Math.min(...resets) },
     })
   }
@@ -614,7 +620,9 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
           <span className="dsh-subscription-usage-chip-cell" key={window.label}>
             <span className="dsh-subscription-usage-chip-window">{shortWindow(window.label)}</span>
             <span className="dsh-subscription-usage-chip-value">
-              {`${String(Math.round(window.usedPercent ?? 0))}%`}
+              {window.used !== undefined && window.limit !== undefined
+                ? `${String(window.used)}/${String(window.limit)}`
+                : `${String(Math.round(window.usedPercent ?? 0))}%`}
             </span>
           </span>
         ))}
