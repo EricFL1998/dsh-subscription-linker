@@ -692,8 +692,15 @@ export class AntigravityAdapter extends LlmAdapter {
         yield* streamAntigravity(response.body, () => { watchdog.pulse() })
         return
       }
-      const exhausted = new LlmError(`Antigravity API: every account's allowance is spent [${diag.join(' | ')}]`, EMPTY_RESPONSE_CODE)
-      throw exhausted
+      // Every account was tried and none served. The headline names the most actionable
+      // refusal — a 403 "verify your account" is something the user can fix in the browser;
+      // a 429 "allowance spent" just means wait for the reset. The diagnostic lists each
+      // account and the status it returned.
+      const last403 = diag.reduce<string | undefined>((acc, line) => (line.startsWith('403 on') ? line : acc), undefined)
+      const message = last403 === undefined
+        ? `Antigravity API: every account's allowance is spent [${diag.join(' | ')}]`
+        : `Antigravity API request failed: ${last403.replace(/^403 on /, 'account ')} refused (HTTP 403: Verify your account to continue) [${diag.join(' | ')}]`
+      throw new LlmError(message, EMPTY_RESPONSE_CODE)
     } catch (error: unknown) {
       throw mapFetchFailure('Antigravity API', this.refreshHint(error), watchdog, options.signal)
     } finally {
