@@ -406,6 +406,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
   const [balance, setBalance] = useState<readonly ChipBalance[] | undefined>(undefined)
   const [ccBalance, setCcBalance] = useState<{ currency: string, total: string } | undefined>(undefined)
   const [fastVariant, setFastVariant] = useState<string | undefined>(undefined)
+  const [fastBase, setFastBase] = useState<string | undefined>(undefined)
   const [fastActive, setFastActive] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [open, setOpen] = useState(false)
@@ -424,6 +425,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
   useEffect(() => {
     if (selected === undefined || selectedModel === undefined || !isOwnProvider(selected)) {
       setFastVariant(undefined)
+      setFastBase(undefined)
       setFastActive(false)
       return
     }
@@ -431,17 +433,15 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     void call('model-variants', { provider: selected, id: selectedModel })
       .then((result) => {
         if (!live) return
-        // TEMP diagnostics: why the fast button does not appear.
-        console.warn(`[subscription-oauth] model-variants ${selected}/${selectedModel}:`, JSON.stringify(result), 'modelDirectory:', modelDirectory !== undefined)
         setFastVariant(result?.fast)
+        setFastBase(result?.fastBase)
         setFastActive(result?.fast !== undefined && result.fast === selectedModel)
       })
-      .catch((error) => {
-        console.warn(`[subscription-oauth] model-variants ${selected}/${selectedModel} failed:`, error)
-        if (live) { setFastVariant(undefined); setFastActive(false) }
+      .catch(() => {
+        if (live) { setFastVariant(undefined); setFastBase(undefined); setFastActive(false) }
       })
     return () => { live = false }
-  }, [selected, selectedModel, isOwnProvider, call, modelDirectory])
+  }, [selected, selectedModel, isOwnProvider, call])
 
   // A non-subscription provider has no usage windows to meter, so the chip shows its
   // balance instead, read by cc-switch's query. The host's account (deepseek-account)
@@ -658,7 +658,10 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
             onClick={(event) => {
               event.stopPropagation()
               if (selected === undefined) return
-              const target = fastActive ? (selectedModel ?? fastVariant) : fastVariant
+              // Fast mode is the fast variant being the current selection; switching it
+              // off returns to the base model the variant belongs to.
+              const target = fastActive ? (fastBase ?? selectedModel) : fastVariant
+              if (target === undefined || target === selectedModel) return
               void modelDirectory.select?.({ provider: selected, model: target })
             }}
           >

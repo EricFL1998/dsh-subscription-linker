@@ -301,6 +301,43 @@ describe('GrokAdapter catalog', () => {
     assert.equal(String(resolved.reasoning?.defaultEffort), 'high')
   })
 
+  test('learns the account fast variant from its own CLI catalog', async () => {
+    // Ground truth from the live endpoints: the public model list holds no fast id at
+    // all, the CLI catalog answers only for the account's bearer, and the id it names is
+    // `grok-4.7-build-fast` — not `grok-4.7-build-fast@500k`, which the Responses
+    // endpoint refuses.
+    const seen: { url: string, authorization: string | null }[] = []
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input)
+      seen.push({ url, authorization: new Headers(init?.headers).get('authorization') })
+      if (url.includes('cli-chat-proxy')) {
+        return jsonResponse({
+          data: [
+            { id: 'grok-4.7', context_window: 256_000 },
+            { id: 'grok-4.7-build-fast', context_window: 256_000 },
+          ],
+        })
+      }
+      return jsonResponse({ data: [{ id: 'grok-4.7' }, { id: 'grok-imagine-image' }] })
+    }
+    const adapter = new GrokAdapter(adapterOptions({ discovery: true, fetchFn }))
+    const ids = await adapter.fetchCatalog('account-token', undefined) as readonly string[] | undefined
+    // The fast variant is not a picker row of its own; it rides the base model's.
+    assert.deepEqual(ids, ['grok-4.7'])
+    assert.deepEqual(
+      seen.find((call) => call.url.includes('cli-chat-proxy'))?.authorization,
+      'Bearer account-token',
+    )
+    assert.deepEqual(adapter.fastPairOf('grok-4.7'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
+    // Asked about the fast id itself, the pair still names the row to switch back to.
+    assert.deepEqual(adapter.fastPairOf('grok-4.7-build-fast'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
+    assert.equal(adapter.fastPairOf('grok-4.5'), undefined)
+    const models = await adapter.listModels('grok')
+    assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), false)
+    // The CLI catalog's window applies to the seed it names.
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+  })
+
   test('honours the hidden-model set', async () => {
     const adapter = new GrokAdapter(adapterOptions({ hiddenModels: async () => new Set(['grok-4.5']) }))
     assert.deepEqual((await adapter.listModels('grok')).map((model) => model.id), ['grok-4.6', 'grok-4.7'])

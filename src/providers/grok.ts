@@ -618,6 +618,26 @@ export class GrokAdapter extends LlmAdapter {
     return this.fastVariants.get(baseId)
   }
 
+  /**
+   * The fast pair one picker id belongs to, from either side.
+   *
+   * The picker's own row is the base id, but selecting the fast variant makes that
+   * variant the current selection, so the button must still find its pair — and know
+   * which id to switch back to — when asked about the fast id itself.
+   *
+   * @param id - the selected model id.
+   * @returns the base model and the fast variant's wire id, or undefined when the
+   *   model has no fast variant.
+   */
+  fastPairOf(id: string): { baseId: string, wireId: string } | undefined {
+    const direct = this.fastVariants.get(id)
+    if (direct !== undefined) return { baseId: id, wireId: direct }
+    for (const [base, wire] of this.fastVariants) {
+      if (wire === id) return { baseId: base, wireId: wire }
+    }
+    return undefined
+  }
+
   /** The image-generation model id, when discovery reported one. */
   imageModelId(): string | undefined {
     return this.imageModel
@@ -729,8 +749,6 @@ export class GrokAdapter extends LlmAdapter {
       const allIds = (payload.data ?? [])
         .map((entry) => entry.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
-      // TEMP diagnostics: log what discovery saw so a missed fast variant is visible.
-      console.warn(`[subscription-oauth] grok discovery: ${allIds.length} ids: ${allIds.join(', ')}`)
       // Image models are not chat models; they are picked by an agent, not the picker.
       this.imageModel = allIds.find((id) => isImageModel(id))
       const rawIds = allIds.filter((id) => !NON_CHAT_ID.test(id))
@@ -739,17 +757,7 @@ export class GrokAdapter extends LlmAdapter {
       // Context variants (@500k) also fold into the base; the largest context wins.
       this.fastVariants.clear()
       this.defaultContext.clear()
-      for (const id of rawIds) {
-        if (isFastVariant(id)) {
-          const base = baseModelOf(id)
-          if (!this.fastVariants.has(base)) this.fastVariants.set(base, id)
-          continue
-        }
-        const ctx = contextOf(id)
-        if (ctx !== undefined) {
-          this.noteContextVariant(stripContext(id), ctx, id)
-        }
-      }
+      this.noteWireVariants(rawIds)
       const ids = rawIds
         .map((id) => {
           if (isFastVariant(id)) return baseModelOf(id)
@@ -762,8 +770,12 @@ export class GrokAdapter extends LlmAdapter {
         this.options.onWarn?.('xAI model discovery returned an empty catalog; using the built-in catalog')
         return undefined
       }
-      const metadata = await this.fetchCliMetadata(fetchFn, signal)
-      for (const [id, meta] of metadata) this.metadata.set(id, meta)
+      const cli = await this.readCliCatalog(fetchFn, signal, accessToken)
+      for (const [id, meta] of cli.metadata) this.metadata.set(id, meta)
+      // The account's own CLI catalog is the only surface that names a fast variant:
+      // the public `/models` list omits `grok-4.7-build-fast` entirely. Its ids fold
+      // into the same base rows, and are never added as picker rows of their own.
+      this.noteWireVariants(cli.ids)
       return ids
     } catch (error: unknown) {
       if (signal?.aborted === true) return undefined
@@ -772,18 +784,49 @@ export class GrokAdapter extends LlmAdapter {
     }
   }
 
-  /** Read per-model capabilities from the CLI catalog; failures are silent. */
-  private async fetchCliMetadata(
+  /**
+   * Fold the fast and context variants of one id list into their base models.
+   *
+   * @param ids - wire ids to classify.
+   */
+  private noteWireVariants(ids: readonly string[]): void {
+    for (const id of ids) {
+      if (NON_CHAT_ID.test(id) || isImageModel(id)) continue
+      if (isFastVariant(id)) {
+        const base = baseModelOf(id)
+        if (base.length > 0 && !this.fastVariants.has(base)) this.fastVariants.set(base, id)
+        continue
+      }
+      const ctx = contextOf(id)
+      if (ctx !== undefined) this.noteContextVariant(stripContext(id), ctx, id)
+    }
+  }
+
+  /**
+   * Read per-model capabilities from the CLI catalog; failures are silent.
+   *
+   * The catalog answers only for the signed-in account's own bearer — an anonymous
+   * request is refused — and it, unlike the public `/models` list, names the account's
+   * fast variant.
+   *
+   * @param fetchFn - fetch implementation.
+   * @param signal - caller cancellation.
+   * @param accessToken - the account's bearer.
+   * @returns the capability metadata and every id the catalog named.
+   */
+  private async readCliCatalog(
     fetchFn: FetchFn,
-    signal?: AbortSignal,
-  ): Promise<Map<string, GrokCliMetadata>> {
+    signal: AbortSignal | undefined,
+    accessToken: string,
+  ): Promise<{ metadata: Map<string, GrokCliMetadata>, ids: readonly string[] }> {
     const result = new Map<string, GrokCliMetadata>()
+    const ids: string[] = []
     try {
       const response = await fetchFn(GROK_CLI_MODELS_URL, {
-        headers: attributedHeaders({ 'authorization': 'Bearer anonymous' }),
+        headers: attributedHeaders({ 'authorization': `Bearer ${accessToken}` }),
         ...signal === undefined ? {} : { signal },
       })
-      if (!response.ok) return result
+      if (!response.ok) return { metadata: result, ids }
       const payload = await response.json() as {
         data?: {
           id?: unknown
@@ -796,6 +839,7 @@ export class GrokAdapter extends LlmAdapter {
       for (const entry of payload.data ?? []) {
         const id = typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : undefined
         if (id === undefined) continue
+        ids.push(id)
         const contextWindow = typeof entry.context_window === 'number' && Number.isFinite(entry.context_window)
           ? entry.context_window
           : undefined
@@ -818,7 +862,7 @@ export class GrokAdapter extends LlmAdapter {
     } catch {
       // Capability metadata is a bonus; the id list is what matters.
     }
-    return result
+    return { metadata: result, ids }
   }
 }
 
@@ -989,10 +1033,10 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
     modelVariants: (id: string) => {
-      const fast = adapter.fastVariant(id)
+      const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
-        ...fast === undefined ? {} : { fast },
+        ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId },
         ...image === undefined ? {} : { image },
       }
     },

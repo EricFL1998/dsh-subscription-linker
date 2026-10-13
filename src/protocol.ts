@@ -348,6 +348,13 @@ export type BalanceResult =
 export interface ModelVariants {
   /** Fast/lightspeed variant wire id, when the provider reported one. */
   fast?: string
+  /**
+   * The base model the fast variant belongs to.
+   *
+   * Sent with `fast` so the picker button can switch back off when the selection is
+   * already the fast variant, which is not itself a listed row.
+   */
+  fastBase?: string
   /** Image-generation model wire id, when the provider reported one. */
   image?: string
 }
