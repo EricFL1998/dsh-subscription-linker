@@ -629,10 +629,11 @@ export class AntigravityAdapter extends LlmAdapter {
       const diag: string[] = [`pool=${accounts.join(',') || '(none)'}`]
       const tried = new Set<string>()
       let token = await this.options.tokens.resolve()
-      // Move an account known to be spent (from a past failure) to the back, so a fresh
-      // request starts on one that has allowance. A lone account still serves.
-      const order = [...accounts.filter((a) => a !== token.account && !this.isSpent(a)), token.account,
-        ...accounts.filter((a) => a !== token.account && this.isSpent(a))]
+      // Stay on the default account until it refuses. opencodex keeps account affinity —
+      // a request stays on one account and only moves after a 429 — because switching
+      // accounts on every request is what reads to Google as two accounts in play at once
+      // and trips the verify gate. Reordering here caused exactly that.
+      const order = [token.account, ...accounts.filter((a) => a !== token.account)]
       for (const accountKey of order) {
         if (tried.has(accountKey)) continue
         tried.add(accountKey)

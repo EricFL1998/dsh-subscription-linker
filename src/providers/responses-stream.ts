@@ -198,26 +198,17 @@ export async function* streamProviderResponses<S extends SessionBase>(
     if (models.length === 0) {
       throw new LlmError(`${label} has no enabled model to dispatch to`, EMPTY_RESPONSE_CODE)
     }
-    // When the provider meters per account and an account's allowance can run out,
-    // every account is a candidate: a spent one falls through to the next, so one
-    // model id draws on the whole pool's allowance. Accounts are tried in order;
-    // the first that serves the request wins.
+    // Stay on the default account until it refuses. opencodex keeps account affinity — a
+    // request stays on one account and only moves after a 429 — because switching accounts
+    // on every request is what reads to a provider as several accounts in play at once and
+    // trips the safety gate. Reordering candidates here caused exactly that.
     let accounts = input.accounts === undefined
       ? undefined
       : [...await input.accounts()]
-    // Send work straight to an account that has allowance: one already known to be
-    // spent until a future reset is moved to the back, so a fresh request does not
-    // fail against it once to find out. This is a preference, not a skip — a lone
-    // account still serves, and the spent-retry below catches a stale record.
-    if (accounts !== undefined && accounts.length > 1 && input.isAccountSpent !== undefined) {
-      const fresh: string[] = []
-      const tired: string[] = []
-      for (const account of accounts) {
-        if (await input.isAccountSpent(account)) tired.push(account)
-        else fresh.push(account)
-      }
-      if (tired.length > 0 && fresh.length > 0) {
-        accounts = [...fresh, ...tired]
+    if (accounts !== undefined && accounts.length > 1) {
+      const defaultAccount = await tokens.defaultAccount()
+      if (defaultAccount !== undefined) {
+        accounts = [defaultAccount, ...accounts.filter((a) => a !== defaultAccount)]
       }
     }
     const tryAccounts = accounts === undefined || accounts.length === 0
