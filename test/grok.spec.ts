@@ -294,7 +294,7 @@ describe('GrokAdapter catalog', () => {
     adapter.discover(ids ?? [])
     const models = await adapter.listModels('grok')
     // Seeds first, in curated order, then the live id this build did not know.
-    assert.deepEqual(models.map((model) => model.id), ['grok-4.6', 'grok-4.5', 'grok-5'])
+    assert.deepEqual(models.map((model) => model.id), ['grok-4.6', 'grok-4.5', 'grok-4.7', 'grok-5'])
     const resolved = await adapter.resolveModel('grok', 'grok-5')
     assert.equal(resolved.context?.contextWindow, 1_000_000)
     assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high'])
@@ -303,7 +303,7 @@ describe('GrokAdapter catalog', () => {
 
   test('honours the hidden-model set', async () => {
     const adapter = new GrokAdapter(adapterOptions({ hiddenModels: async () => new Set(['grok-4.5']) }))
-    assert.deepEqual((await adapter.listModels('grok')).map((model) => model.id), ['grok-4.6'])
+    assert.deepEqual((await adapter.listModels('grok')).map((model) => model.id), ['grok-4.6', 'grok-4.7'])
     // Still resolvable, so an existing session keeps working.
     assert.equal((await adapter.resolveModel('grok', 'grok-4.5')).id, 'grok-4.5')
     assert.equal(adapter.catalogEntries().some((entry) => entry.id === 'grok-4.5'), true)

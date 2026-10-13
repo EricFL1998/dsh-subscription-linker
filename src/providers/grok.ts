@@ -122,6 +122,13 @@ export const GROK_MODELS: readonly CatalogEntry[] = [
     contextWindow: GROK_CONTEXT_WINDOW,
     inputModalities: ['text', 'image'],
   },
+  {
+    id: 'grok-4.7',
+    name: 'Grok 4.7',
+    description: 'Latest flagship with extended context',
+    contextWindow: 500_000,
+    inputModalities: ['text', 'image'],
+  },
 ]
 
 /** A stored Grok (X Premium) login. */
