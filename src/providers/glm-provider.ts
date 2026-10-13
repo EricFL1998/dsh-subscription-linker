@@ -151,6 +151,11 @@ export function createGlmProvider(options: GlmProviderOptions): ProviderRoute {
     ...options.resolveAttachments === undefined ? {} : { resolveAttachments: options.resolveAttachments },
     hiddenModels: () => options.preferences.hiddenIds(GLM_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(GLM_PROVIDER_ID),
+    readUsage: async (account) => {
+      const token = await tokens.resolve(account)
+      const read = await readGlmUsage({ origin: GLM_ORIGIN, accessToken: token.accessToken, fetchFn })
+      return read.windows
+    },
     ...options.extraModels === undefined ? {} : { extraModels: options.extraModels },
     fetchFn,
   })

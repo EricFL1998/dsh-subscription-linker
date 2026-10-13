@@ -41,7 +41,8 @@ import type { FetchFn } from '../http.js'
 import type { CatalogEntry } from './catalog.js'
 import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { isMissingOrInvalidCredential } from './common.js'
-import { streamProviderResponses } from './responses-stream.js'
+import { streamProviderResponses, accountPoolHooks } from './responses-stream.js'
+import type { UsageWindow } from '../protocol.js'
 import { readGrokUsage } from './usage.js'
 import { toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ImageResolver } from '../translate/responses.js'
@@ -371,6 +372,8 @@ export interface GrokAdapterOptions {
   modelOrder?: () => Promise<readonly string[]>
   fetchFn?: FetchFn
   onCredentialRejected?: (account: string) => void
+  /** Read one account's metered windows, so the streamer can steer away from a spent one. */
+  readUsage?: ((account: string) => Promise<readonly UsageWindow[]>) | undefined
 }
 
 /** Grok wire adapter: one instance serves the `grok` provider route. */
@@ -458,6 +461,9 @@ export class GrokAdapter extends LlmAdapter {
       tokens: this.options.tokens,
       request: (call, model, accessToken, signal) => this.request(call, model, accessToken, signal),
       streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+      // A 402/429 means this account's allowance is spent: draw on the next account's.
+      isAllowanceExhausted: (status) => status === 402 || status === 429,
+      ...accountPoolHooks({ provider: GROK_PROVIDER_ID, tokens: this.options.tokens, readUsage: this.options.readUsage }),
       ...this.options.onCredentialRejected === undefined
         ? {}
         : { onCredentialRejected: this.options.onCredentialRejected },
@@ -813,6 +819,11 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
     hiddenModels: () => options.preferences.hiddenIds(GROK_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(GROK_PROVIDER_ID),
     modelOrder: () => options.preferences.orderOf(GROK_PROVIDER_ID),
+    readUsage: async (account) => {
+      const token = await tokens.resolve(account)
+      const read = await readGrokUsage({ accessToken: token.accessToken, fetchFn: options.discoveryFetchFn ?? proxiedFetch })
+      return read === undefined ? [] : read.windows
+    },
     ...options.discoveryFetchFn === undefined ? {} : { fetchFn: options.discoveryFetchFn },
   })
 

@@ -235,6 +235,46 @@ export function pickWindow(windows: readonly UsageWindow[]): UsageWindow | undef
  * @param usage - the accounts the route answered for.
  * @returns the reading, or undefined when the route stated no figure.
  */
+/** What one account's allowance reduces to for the chip. */
+export interface AccountReading {
+  /** Which account these figures belong to. */
+  account: string
+  /** Plan name, when the provider stated one. */
+  plan?: string
+  /** Every metered window, in the order the route stated them. */
+  windows: readonly UsageWindow[]
+}
+
+/**
+ * Reduce a route's per-account usage to one reading per account.
+ *
+ * A provider can hold several accounts (two Antigravity sign-ins, say), and the chip
+ * shows each one's allowance on its own line, the way the settings cards do — a merged
+ * figure would hide that one account is exhausted while the other is free.
+ *
+ * @param usage - every account the route answered for.
+ * @returns one reading per account that states a figure, in the route's order.
+ */
+export function accountReadingsOf(usage: readonly ProviderUsage[]): readonly AccountReading[] {
+  const out: AccountReading[] = []
+  for (const entry of usage) {
+    const windows = entry.windows.filter((candidate) => candidate.usedPercent !== undefined)
+    if (windows.length === 0) continue
+    out.push({ account: entry.account, windows, ...entry.plan === undefined ? {} : { plan: entry.plan } })
+  }
+  return out
+}
+
+/**
+ * Reduce one route's usage to the single line the compact chip renders.
+ *
+ * Kept for the balance-free providers that still show one merged line.
+ *
+ * @param provider - the route id.
+ * @param label - the route's display name.
+ * @param usage - the accounts the route answered for.
+ * @returns the first account's reading, or undefined when none states a figure.
+ */
 export function readingOf(
   provider: string,
   label: string,
@@ -284,6 +324,7 @@ export function formatReset(at: number | undefined, now: number): string | undef
  */
 export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBalance, useProjection }: UsageChipInjected & SessionStandardProps): ReactNode {
   const [reading, setReading] = useState<ChipReading | undefined>(undefined)
+  const [accountReadings, setAccountReadings] = useState<readonly AccountReading[] | undefined>(undefined)
   const [balance, setBalance] = useState<readonly ChipBalance[] | undefined>(undefined)
   const [ccBalance, setCcBalance] = useState<{ currency: string, total: string } | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
@@ -326,11 +367,10 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     }
   }, [isBalanceProvider, selected, ccSwitchBalance])
 
-  const load = useCallback(async (target: string): Promise<ChipReading | undefined> => {
+  const load = useCallback(async (target: string): Promise<readonly AccountReading[] | undefined> => {
     try {
       const result = await call('usage', { provider: target })
-      const label = result.status.providers.find((entry) => entry.provider === target)?.displayName ?? target
-      return readingOf(target, label, result.usage)
+      return accountReadingsOf(result.usage)
     } catch {
       // A failed read is not worth a chip of its own: the settings page is where a user
       // goes to find out why a route cannot report.
@@ -366,7 +406,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
       // Not one of ours (or none selected): keep showing the last own reading.
       : lastOwn.current
     if (target === undefined) {
-      setReading(undefined)
+      setAccountReadings(undefined)
       return
     }
     let live = true
@@ -375,7 +415,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
       void load(target).then((next) => {
         if (!live || next === undefined) return
         lastOwn.current = target
-        setReading(next)
+        setAccountReadings(next)
       })
     }
     refresh()
@@ -481,13 +521,12 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
     )
   }
 
-  if (reading === undefined) return null
-  const percent = reading.window.usedPercent
-  if (percent === undefined) return null
-  const reset = formatReset(reading.window.resetsAt, now)
-  const clamped = Math.max(0, Math.min(100, percent))
-  const short = shortLabel(reading.provider, reading.label)
+  if (accountReadings === undefined || accountReadings.length === 0) return null
+  const short = shortLabel(selected ?? '', selected ?? '')
 
+  // One model id draws on every account the provider holds, so the chip shows each
+  // account's allowance on its own line — a merged figure would hide that one account is
+  // spent while another is free. With a single account the line reads exactly as before.
   return (
     <span className="dsh-subscription-usage-chip">
       {/* An element, so unmounting the chip takes its rules with it. */}
@@ -496,7 +535,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
         type="button"
         className="dsh-subscription-usage-chip-trigger"
         aria-expanded={open}
-        title={t('usageChipTitle', { provider: reading.label })}
+        title={t('usageChipTitle', { provider: selected ?? '' })}
         onClick={(event) => {
           // The document listener would otherwise close what this click just opened.
           event.stopPropagation()
@@ -504,44 +543,50 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
         }}
       >
         <span className="dsh-subscription-usage-chip-label">{short}</span>
-        {/* Every metered window, abbreviated: `5h 25% 7d 71%` is one line of tokens
-            where the full names would be three times the width. */}
-        {reading.windows.map((window) => (
-          <span className="dsh-subscription-usage-chip-cell" key={window.label}>
-            <span className="dsh-subscription-usage-chip-window">{shortWindow(window.label)}</span>
-            <span className="dsh-subscription-usage-chip-value">
-              {`${String(Math.round(window.usedPercent ?? 0))}%`}
-            </span>
+        {accountReadings.map((account) => (
+          <span className="dsh-subscription-usage-chip-cell" key={account.account} title={account.account}>
+            {account.windows.map((window) => (
+              <span className="dsh-subscription-usage-chip-window" key={window.label}>
+                <span>{shortWindow(window.label)}</span>
+                <span className="dsh-subscription-usage-chip-value">
+                  {`${String(Math.round(window.usedPercent ?? 0))}%`}
+                </span>
+              </span>
+            ))}
           </span>
         ))}
       </button>
       {open && (
         <span className="dsh-subscription-usage-chip-panel" role="status">
           <span className="dsh-subscription-usage-chip-full">
-            {t('usageChipFull', { provider: reading.label })}
+            {t('usageChipFull', { provider: selected ?? '' })}
           </span>
-          {reading.windows.map((window) => {
-            const windowReset = formatReset(window.resetsAt, now)
-            return (
-              <span className="dsh-subscription-usage-chip-meter" key={window.label}>
-                <span className="dsh-subscription-usage-chip-meterHead">
-                  <span>{window.label}</span>
-                  <span className="dsh-subscription-usage-chip-detail">
-                    {`${String(Math.round(window.usedPercent ?? 0))}%${windowReset === undefined ? '' : ` · ${windowReset}`}`}
-                  </span>
-                </span>
-                <span className="dsh-subscription-usage-chip-track" aria-hidden="true">
-                  <span
-                    className="dsh-subscription-usage-chip-fill"
-                    style={{ width: `${String(Math.max(0, Math.min(100, window.usedPercent ?? 0)))}%` }}
-                  />
-                </span>
+          {accountReadings.map((account) => (
+            <span key={account.account} className="dsh-subscription-usage-chip-account">
+              <span className="dsh-subscription-usage-chip-meterHead">
+                <span>{account.plan ?? account.account}</span>
               </span>
-            )
-          })}
-          {reading.plan === undefined ? null : (
-            <span className="dsh-subscription-usage-chip-detail">{reading.plan}</span>
-          )}
+              {account.windows.map((window) => {
+                const windowReset = formatReset(window.resetsAt, now)
+                return (
+                  <span className="dsh-subscription-usage-chip-meter" key={window.label}>
+                    <span className="dsh-subscription-usage-chip-meterHead">
+                      <span>{window.label}</span>
+                      <span className="dsh-subscription-usage-chip-detail">
+                        {`${String(Math.round(window.usedPercent ?? 0))}%${windowReset === undefined ? '' : ` · ${windowReset}`}`}
+                      </span>
+                    </span>
+                    <span className="dsh-subscription-usage-chip-track" aria-hidden="true">
+                      <span
+                        className="dsh-subscription-usage-chip-fill"
+                        style={{ width: `${String(Math.max(0, Math.min(100, window.usedPercent ?? 0)))}%` }}
+                      />
+                    </span>
+                  </span>
+                )
+              })}
+            </span>
+          ))}
         </span>
       )}
     </span>

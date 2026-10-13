@@ -37,7 +37,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { UsageWindow } from '../protocol.js'
 import type { CatalogEntry } from './catalog.js'
 import { findEntry, resolveCatalog } from './catalog.js'
-import { streamProviderResponses } from './responses-stream.js'
+import { streamProviderResponses, accountPoolHooks } from './responses-stream.js'
 import { toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ImageResolver } from '../translate/responses.js'
 import type { UsageRead } from './usage.js'
@@ -169,6 +169,8 @@ export interface ArkAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   onWarn?: (message: string) => void
   onCredentialRejected?: (account: string) => void
+  /** Read one account's metered windows, so the streamer can steer away from a spent one. */
+  readUsage?: ((account: string) => Promise<readonly UsageWindow[]>) | undefined
   fetchFn?: FetchFn
 }
 
@@ -238,6 +240,9 @@ export class ArkAdapter extends LlmAdapter {
       tokens: this.options.tokens,
       request: (call, model, accessToken, signal) => this.request(call, model, accessToken, signal),
       streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+      // A 402/429 means this account's allowance is spent: draw on the next account's.
+      isAllowanceExhausted: (status) => status === 402 || status === 429,
+      ...accountPoolHooks({ provider: ARK_PROVIDER_ID, tokens: this.options.tokens, readUsage: this.options.readUsage }),
       ...this.options.onCredentialRejected === undefined
         ? {}
         : { onCredentialRejected: this.options.onCredentialRejected },

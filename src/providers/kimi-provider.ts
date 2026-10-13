@@ -134,6 +134,11 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
     ...options.onWarn === undefined ? {} : { onWarn: options.onWarn },
     ...options.resolveAttachments === undefined ? {} : { resolveAttachments: options.resolveAttachments },
     identityHeaders: async () => kimiIdentityHeaders(await loadOrCreateDeviceId(options.dataDir)),
+    readUsage: async (account) => {
+      const token = await tokens.resolve(account)
+      const read = await readKimiUsage({ apiBase: options.apiBase, accessToken: token.accessToken, fetchFn })
+      return read === undefined ? [] : read.windows
+    },
     hiddenModels: () => options.preferences.hiddenIds(KIMI_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(KIMI_PROVIDER_ID),
     modelOrder: () => options.preferences.orderOf(KIMI_PROVIDER_ID),

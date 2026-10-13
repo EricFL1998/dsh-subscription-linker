@@ -40,7 +40,8 @@ import type { TokenManager } from '../auth/tokens.js'
 import type { SessionBase } from '../auth/store.js'
 import { finiteInstant, nonEmpty } from '../auth/store.js'
 import { idleWatchdog, httpLlmError, isMissingOrInvalidCredential, mapFetchFailure } from './common.js'
-import { streamProviderResponses } from './responses-stream.js'
+import { streamProviderResponses, accountPoolHooks } from './responses-stream.js'
+import type { UsageWindow } from '../protocol.js'
 import type { CatalogEntry } from './catalog.js'
 import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
@@ -198,6 +199,14 @@ export interface KimiAdapterOptions {
   fetchFn?: FetchFn
   /** Called when a call proved the stored credential unusable. */
   onCredentialRejected?: (account: string) => void
+  /**
+   * Read one account's metered windows, so the streamer can steer away from an account
+   * whose allowance is spent before it fails there.
+   *
+   * Resolved per request; absence means the streamer only learns an account is spent by
+   * failing against it once.
+   */
+  readUsage?: (account: string) => Promise<readonly UsageWindow[]>
   /** Extra model ids from the plugin configuration, appended to the catalog. */
   extraModels?: readonly string[]
   /**
@@ -337,6 +346,13 @@ export class KimiAdapter extends LlmAdapter {
       tokens: this.options.tokens,
       request: (call, model, accessToken, signal) => this.request(call, model, accessToken, signal),
       streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+      // A 402/429 means this account's allowance is spent: draw on the next account's
+      // before giving up, so one model id uses the whole pool's quota.
+      isAllowanceExhausted: (status) => status === 402 || status === 429,
+      ...accountPoolHooks({ provider: KIMI_PROVIDER_ID, tokens: this.options.tokens, readUsage: this.options.readUsage }),
+      onAccountSwitch: (from, to, reason) => {
+        this.options.onWarn?.(`kimi: account ${from} allowance spent (${reason}); switching to ${to}`)
+      },
       ...this.options.onCredentialRejected === undefined
         ? {}
         : { onCredentialRejected: this.options.onCredentialRejected },

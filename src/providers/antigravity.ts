@@ -27,6 +27,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 import { REAUTH_REQUIRED, ProviderError } from '../errors.js'
 import { attributedHeaders } from '../auth/headers.js'
+import { allowanceScheduler } from '../auth/allowance-scheduler.js'
 import { LoopbackFlow } from '../auth/pkce-flow.js'
 import { TokenStore, finiteInstant, nonEmpty } from '../auth/store.js'
 import type { SessionBase } from '../auth/store.js'
@@ -584,29 +585,79 @@ export class AntigravityAdapter extends LlmAdapter {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       // `auto` owns the fallback chain now, so this route serves exactly the
-      // model it was asked for.
+      // model it was asked for — but it draws on every account the provider holds, so a
+      // spent allowance moves to the next account rather than failing the call.
       const model = options.model
+      // Accounts come from the manager when it can list them; a minimal manager (or a
+      // test double) without `accounts()` means a single account, which is just the
+      // default one.
+      const accounts = typeof this.options.tokens.accounts === 'function'
+        ? await this.options.tokens.accounts()
+        : []
+      const tried = new Set<string>()
       let token = await this.options.tokens.resolve()
-      let response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
-      if (response.status === 401 || response.status === 403) {
-        // The stored token was accepted locally but refused on the wire; force
-        // one refresh, then report the credential as dead if it still fails.
-        token = await this.options.tokens.resolve(token.account, true)
-        response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
+      // Move an account known to be spent (from a past failure) to the back, so a fresh
+      // request starts on one that has allowance. A lone account still serves.
+      const order = [...accounts.filter((a) => a !== token.account && !this.isSpent(a)), token.account,
+        ...accounts.filter((a) => a !== token.account && this.isSpent(a))]
+      for (const accountKey of order) {
+        if (tried.has(accountKey)) continue
+        tried.add(accountKey)
+        token = await this.options.tokens.resolve(accountKey)
+        let response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
         if (response.status === 401 || response.status === 403) {
-          this.options.onCredentialRejected?.(token.account)
+          // The stored token was accepted locally but refused on the wire; force
+          // one refresh, then report the credential as dead if it still fails.
+          token = await this.options.tokens.resolve(token.account, true)
+          response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
+          if (response.status === 401 || response.status === 403) {
+            this.options.onCredentialRejected?.(token.account)
+          }
         }
+        // A spent allowance (402/429) moves to the next account, remembering when this
+        // one refills so later requests skip it until then.
+        if (!response.ok && (response.status === 402 || response.status === 429) && order.length > 1) {
+          this.noteSpent(token.account)
+          const resetAt = await this.resetAt(token.account)
+          allowanceScheduler.noteReset(ANTIGRAVITY_PROVIDER_ID, token.account, resetAt)
+          continue
+        }
+        if (!response.ok) throw await httpLlmError(response, 'Antigravity API')
+        if (response.body === null) {
+          throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
+        }
+        yield* streamAntigravity(response.body, () => { watchdog.pulse() })
+        return
       }
-      if (!response.ok) throw await httpLlmError(response, 'Antigravity API')
-      if (response.body === null) {
-        throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
-      }
-      yield* streamAntigravity(response.body, () => { watchdog.pulse() })
+      throw new LlmError('Antigravity API: every account\'s allowance is spent', EMPTY_RESPONSE_CODE)
     } catch (error: unknown) {
       throw mapFetchFailure('Antigravity API', this.refreshHint(error), watchdog, options.signal)
     } finally {
       watchdog.stop()
     }
+  }
+
+  /** Whether an account is remembered as spent until a future reset. */
+  private isSpent(account: string): boolean {
+    return allowanceScheduler.isSpentUntilReset(ANTIGRAVITY_PROVIDER_ID, account)
+  }
+
+  /** The moment an account's allowance is known to reset, when recorded. */
+  private async resetAt(account: string): Promise<number | undefined> {
+    const held = await this.options.tokens.session(account)
+    if (held === undefined) return undefined
+    try {
+      const read = await this.usage(held.session.accessToken, held.session.projectId ?? '', held.session.email)
+      const spent = read.windows.find((window) => (window.usedPercent ?? 0) >= 100)
+      return spent?.resetsAt
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Remember an account as spent (its exact reset is learned separately). */
+  private noteSpent(account: string): void {
+    this.options.onWarn?.(`antigravity: account ${account} allowance spent; moving to another account`)
   }
 
   /** Translate an auth failure into the message a user can act on. */

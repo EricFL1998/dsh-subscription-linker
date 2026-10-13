@@ -145,6 +145,13 @@ export function createArkProvider(options: ArkProviderOptions): ProviderRoute {
     discovery: options.discovery,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs,
     tokens,
+    readUsage: async (account) => {
+      const held = await tokens.session(account)
+      const sts = held?.session.sts
+      if (sts === undefined) return []
+      const read = await readArkUsage({ credentials: sts, fetchFn })
+      return read.windows
+    },
     ...options.onWarn === undefined ? {} : { onWarn: options.onWarn },
     ...options.resolveAttachments === undefined ? {} : { resolveAttachments: options.resolveAttachments },
     hiddenModels: () => options.preferences.hiddenIds(ARK_PROVIDER_ID),

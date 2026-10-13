@@ -17,8 +17,54 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 import type { SessionBase } from '../auth/store.js'
 import type { TokenManager } from '../auth/tokens.js'
+import type { UsageWindow } from '../protocol.js'
+import { allowanceScheduler } from '../auth/allowance-scheduler.js'
 import { streamResponses } from '../translate/responses.js'
 import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+
+/**
+ * Build the cross-account hooks one route needs to draw on its whole account pool.
+ *
+ * Every Responses-wire route (Kimi, Grok, GLM, Ark) meters per account and can run out;
+ * this wires the three account hooks identically, so a route only supplies how to read
+ * one account's allowance and its provider id. A route with no `readUsage` still rotates
+ * accounts on failure, it just cannot predict exhaustion before the first failure.
+ *
+ * @param provider - the provider route id, the scheduler's key.
+ * @param tokens - the route's token manager, enumerates accounts.
+ * @param readUsage - read one account's metered windows, when wired.
+ */
+export function accountPoolHooks<S extends SessionBase>(input: {
+  provider: string
+  tokens: TokenManager<S>
+  readUsage?: ((account: string) => Promise<readonly UsageWindow[]>) | undefined
+}): Pick<ResponsesStreamInput<S>, 'accounts' | 'isAccountSpent' | 'noteAccountSpent' | 'resetsAt'> {
+  const { provider, tokens, readUsage } = input
+  return {
+    accounts: () => tokens.accounts(),
+    // Steer away from an account that has no allowance: read its live figures when a
+    // reader is wired (so a 100 % window is avoided before it fails there), else fall
+    // back to the remembered reset time from a past failure.
+    isAccountSpent: async (account) => {
+      if (readUsage !== undefined) {
+        try {
+          const windows = await readUsage(account)
+          const spentWindow = windows.find((window) => (window.usedPercent ?? 0) >= 100)
+          if (spentWindow !== undefined) {
+            allowanceScheduler.noteReset(provider, account, spentWindow.resetsAt)
+            return true
+          }
+          return false
+        } catch {
+          // A failed read is not a reason to avoid the account; fall through to memory.
+        }
+      }
+      return allowanceScheduler.isSpentUntilReset(provider, account)
+    },
+    noteAccountSpent: (account, resetsAt) => { allowanceScheduler.noteReset(provider, account, resetsAt) },
+    resetsAt: async (account) => allowanceScheduler.resetAt(provider, account),
+  }
+}
 
 /** Constructor inputs for {@link streamProviderResponses}. */
 export interface ResponsesStreamInput<S extends SessionBase> {
@@ -43,6 +89,32 @@ export interface ResponsesStreamInput<S extends SessionBase> {
   describeFailure?(error: unknown): unknown
   /** Called when a model in the chain was skipped, with the reason. */
   onFallback?: (from: string, to: string, reason: string) => void
+  /**
+   * Whether a 402/429 on this provider means "this account's allowance is spent",
+   * so the call should move to the next account rather than fail.
+   *
+   * When omitted, an exhausted allowance fails the call (the old behaviour). When
+   * set, the caller enumerates the provider's other accounts and retries each until
+   * one serves the request or every account is spent.
+   */
+  isAllowanceExhausted?: (status: number) => boolean
+  /** Enumerate the provider's accounts, most preferred first; enables cross-account retry. */
+  accounts?: () => Promise<readonly string[]>
+  /** Called when a call moved to another account because the first was spent. */
+  onAccountSwitch?: (from: string, to: string, reason: string) => void
+  /**
+   * Whether one account's allowance is best not used for a fresh request right now.
+   *
+   * The caller supplies this to steer a request away from an account that is nearly
+   * spent (or already spent until a remembered reset), so the request starts on a fuller
+   * account instead of failing once to find out. It may read the account's live figures;
+   * an account flagged here is tried last, not skipped, so a lone account still serves.
+   */
+  isAccountSpent?: (account: string) => Promise<boolean>
+  /** Remember that an account's allowance is spent until a given reset moment. */
+  noteAccountSpent?: (account: string, resetsAt: number | undefined) => void
+  /** The moment one account's allowance is known to reset, when it was recorded. */
+  resetsAt?: (account: string) => Promise<number | undefined>
 }
 
 /**
@@ -95,20 +167,91 @@ export async function* streamProviderResponses<S extends SessionBase>(
     if (models.length === 0) {
       throw new LlmError(`${label} has no enabled model to dispatch to`, EMPTY_RESPONSE_CODE)
     }
-    let token = await tokens.resolve()
-    for (const [index, model] of models.entries()) {
-      try {
-        let response = await request(options, model, token.accessToken, watchdog.signal)
-        if (response.status === 401 || response.status === 403) {
-          token = await tokens.resolve(token.account, true)
-          response = await request(options, model, token.accessToken, watchdog.signal)
+    // When the provider meters per account and an account's allowance can run out,
+    // every account is a candidate: a spent one falls through to the next, so one
+    // model id draws on the whole pool's allowance. Accounts are tried in order;
+    // the first that serves the request wins.
+    let accounts = input.accounts === undefined
+      ? undefined
+      : [...await input.accounts()]
+    // Send work straight to an account that has allowance: one already known to be
+    // spent until a future reset is moved to the back, so a fresh request does not
+    // fail against it once to find out. This is a preference, not a skip — a lone
+    // account still serves, and the spent-retry below catches a stale record.
+    if (accounts !== undefined && accounts.length > 1 && input.isAccountSpent !== undefined) {
+      const fresh: string[] = []
+      const tired: string[] = []
+      for (const account of accounts) {
+        if (await input.isAccountSpent(account)) tired.push(account)
+        else fresh.push(account)
+      }
+      if (tired.length > 0 && fresh.length > 0) {
+        accounts = [...fresh, ...tired]
+      }
+    }
+    const tryAccounts = accounts === undefined || accounts.length === 0
+      ? [undefined]
+      : accounts
+
+    for (const accountKey of tryAccounts) {
+      let token = await tokens.resolve(accountKey)
+      // Track which accounts a spent-allowance already moved past, so a later model
+      // in the chain does not re-try an account known to be exhausted.
+      const spent = new Set<string>()
+      for (const [index, model] of models.entries()) {
+        try {
+          if (spent.has(token.account)) continue
+          let response = await request(options, model, token.accessToken, watchdog.signal)
           if (response.status === 401 || response.status === 403) {
-            input.onCredentialRejected?.(token.account)
+            token = await tokens.resolve(token.account, true)
+            response = await request(options, model, token.accessToken, watchdog.signal)
+            if (response.status === 401 || response.status === 403) {
+              input.onCredentialRejected?.(token.account)
+            }
           }
-        }
-        if (!response.ok) {
-          const error = await httpLlmError(response, label)
-          if (models.length > 1 && isModelFallbackWorthy(response.status) && index < models.length - 1) {
+          // A spent allowance moves to the next account (when the provider supports
+          // it), not to the next model: the model is fine, the account is not.
+          if (
+            !response.ok
+            && input.isAllowanceExhausted !== undefined
+            && input.accounts !== undefined
+            && input.isAllowanceExhausted(response.status)
+            && tryAccounts.length > 1
+          ) {
+            spent.add(token.account)
+            // Remember when this account's allowance refills, so later requests go
+            // straight to another account until then instead of failing here again.
+            input.noteAccountSpent?.(token.account, await input.resetsAt?.(token.account))
+            const next = tryAccounts.find((candidate) => candidate !== undefined && !spent.has(candidate))
+            if (next !== undefined) {
+              lastError = await httpLlmError(response, label)
+              input.onAccountSwitch?.(token.account, next, reasonOf(lastError))
+              token = await tokens.resolve(next)
+              // Re-try this same model on the fresh account.
+              response = await request(options, model, token.accessToken, watchdog.signal)
+            }
+          }
+          if (!response.ok) {
+            const error = await httpLlmError(response, label)
+            if (models.length > 1 && isModelFallbackWorthy(response.status) && index < models.length - 1) {
+              const next = models[index + 1]
+              if (next !== undefined) {
+                lastError = error
+                input.onFallback?.(model, next, reasonOf(error))
+                continue
+              }
+            }
+            throw error
+          }
+          if (response.body === null) {
+            throw new LlmError(`${label} returned no response body`, EMPTY_RESPONSE_CODE)
+          }
+          yield* streamResponses(response.body, () => { watchdog.pulse() })
+          return
+        } catch (error: unknown) {
+          // A transport failure on a chain is also worth another model.
+          const transport = error instanceof TypeError || (error as { name?: string }).name === 'AbortError'
+          if (transport && options.signal?.aborted !== true && index < models.length - 1) {
             const next = models[index + 1]
             if (next !== undefined) {
               lastError = error
@@ -116,25 +259,8 @@ export async function* streamProviderResponses<S extends SessionBase>(
               continue
             }
           }
-          throw error
+          throw input.describeFailure === undefined ? error : input.describeFailure(error)
         }
-        if (response.body === null) {
-          throw new LlmError(`${label} returned no response body`, EMPTY_RESPONSE_CODE)
-        }
-        yield* streamResponses(response.body, () => { watchdog.pulse() })
-        return
-      } catch (error: unknown) {
-        // A transport failure on a chain is also worth another model.
-        const transport = error instanceof TypeError || (error as { name?: string }).name === 'AbortError'
-        if (transport && options.signal?.aborted !== true && index < models.length - 1) {
-          const next = models[index + 1]
-          if (next !== undefined) {
-            lastError = error
-            input.onFallback?.(model, next, reasonOf(error))
-            continue
-          }
-        }
-        throw input.describeFailure === undefined ? error : input.describeFailure(error)
       }
     }
     throw lastError ?? new LlmError(`${label} served none of the requested models`, EMPTY_RESPONSE_CODE)
