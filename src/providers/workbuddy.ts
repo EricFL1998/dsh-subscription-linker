@@ -13,11 +13,13 @@ import {
   LlmAdapter,
   errorChain,
   ReasoningEffortId,
+  ToolCallId,
   type GenerateOptions,
   type LlmModelInfo,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
   type StreamChunk,
+  type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 
 import { idleWatchdog, mapFetchFailure } from './common.js'
@@ -84,7 +86,18 @@ export const WORKBUDDY_CATALOG: readonly CatalogEntry[] = CN_MODELS.map((entry) 
 
 /** A chat-completions choice delta, as the wire frames it. */
 interface ChatChunk {
-  choices?: { delta?: { content?: string, role?: string }, index?: number }[]
+  choices?: {
+    delta?: {
+      content?: string
+      role?: string
+      tool_calls?: {
+        index?: number
+        id?: string
+        function?: { name?: string, arguments?: string }
+      }[]
+    }
+    index?: number
+  }[]
   usage?: { prompt_tokens?: number, completion_tokens?: number, total_tokens?: number }
 }
 
@@ -133,6 +146,108 @@ function randomHex(): string {
   const bytes = new Uint8Array(16)
   crypto.getRandomValues(bytes)
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/** A tool's name may hold letters, digits, `_`, `-`; another character is refused. */
+const NAME_OK = /^[A-Za-z0-9_-]+$/
+
+/** A name with each character WorkBuddy refuses as `_`, kept apart from `taken`. */
+function safeName(name: string, taken: Set<string>): string {
+  const base = name.replace(/[^A-Za-z0-9_-]/g, '_') || 'tool'
+  let candidate = base
+  for (let index = 2; taken.has(candidate); index++) candidate = `${base}_${index}`
+  taken.add(candidate)
+  return candidate
+}
+
+/** True for a plain object usable as a JSON-schema node. */
+function isSchemaRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Mend a schema where the model gateway refuses one: `\0` escapes in a pattern, and an
+ * `items` list (deep models take a single shape or an anyOf, not a bare array).
+ */
+function fitSchema(schema: Record<string, unknown>, depth = 0): boolean {
+  if (depth > 64) return false
+  let changed = false
+  if (Array.isArray(schema)) {
+    for (const item of schema) if (isSchemaRecord(item) && fitSchema(item, depth + 1)) changed = true
+    return changed
+  }
+  if (typeof schema.pattern === 'string' && schema.pattern.includes('\\0')) {
+    schema.pattern = schema.pattern.replace(/\\0/g, '\\u0000')
+    changed = true
+  }
+  if (Array.isArray(schema.items)) {
+    const list = schema.items.filter(isSchemaRecord)
+    schema.items = list.length === 0 ? {} : list.length === 1 ? list[0] : { anyOf: list }
+    delete schema.additionalItems
+    changed = true
+  }
+  for (const value of Object.values(schema)) {
+    if (isSchemaRecord(value) && fitSchema(value, depth + 1)) changed = true
+  }
+  return changed
+}
+
+/** The schema a local `$ref` names, or `node` itself. */
+function localRef(root: Record<string, unknown>, node: Record<string, unknown>): Record<string, unknown> {
+  const ref = node.$ref
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) return node
+  let at: unknown = root
+  for (const key of ref.slice(2).split('/')) {
+    at = isSchemaRecord(at) ? at[key.replaceAll('~1', '/').replaceAll('~0', '~')] : undefined
+  }
+  return isSchemaRecord(at) ? at : node
+}
+
+/**
+ * Make a tool's parameters an object at the root, the shape every model takes: `allOf`'s
+ * branches are merged whole; of `anyOf`/`oneOf`'s object branches the properties are
+ * merged and a field each requires stays required.
+ */
+function objectRoot(node: Record<string, unknown>, root: Record<string, unknown> = node, depth = 0): boolean {
+  const unions = ['allOf', 'anyOf', 'oneOf'].filter((key) => Array.isArray(node[key]))
+  if (node.type === 'object' && unions.length === 0) return false
+  const properties: Record<string, unknown> = isSchemaRecord(node.properties) ? { ...node.properties } : {}
+  const required: string[] = Array.isArray(node.required) ? [...node.required] : []
+  for (const branch0 of Array.isArray(node.allOf) ? node.allOf : []) {
+    let branch = localRef(root, isSchemaRecord(branch0) ? branch0 : {})
+    if (unions.length > 0 && depth < 8) objectRoot((branch = structuredClone(branch)), root, depth + 1)
+    if (isSchemaRecord(branch) && isSchemaRecord(branch.properties)) {
+      for (const [key, value] of Object.entries(branch.properties)) if (!(key in properties)) properties[key] = value
+    }
+    if (isSchemaRecord(branch) && Array.isArray(branch.required)) required.push(...branch.required)
+  }
+  const branches: Record<string, unknown>[] = []
+  for (const key of ['anyOf', 'oneOf']) {
+    for (const branch0 of Array.isArray(node[key]) ? node[key] : []) {
+      let branch = localRef(root, isSchemaRecord(branch0) ? branch0 : {})
+      if (unions.length > 0 && depth < 8) objectRoot((branch = structuredClone(branch)), root, depth + 1)
+      if (isSchemaRecord(branch) && (branch.type === 'object' || isSchemaRecord(branch.properties))) branches.push(branch)
+    }
+  }
+  const from = new Map<string, unknown[]>()
+  for (const branch of branches) {
+    if (!isSchemaRecord(branch.properties)) continue
+    for (const [key, value] of Object.entries(branch.properties)) {
+      if (key in properties) continue
+      const seen = from.get(key) ?? []
+      if (!seen.some((entry) => JSON.stringify(entry) === JSON.stringify(value))) seen.push(value)
+      from.set(key, seen)
+    }
+  }
+  for (const [key, list] of from) properties[key] = list.length === 1 ? list[0] : { anyOf: list }
+  delete node.allOf
+  delete node.anyOf
+  delete node.oneOf
+  node.type = 'object'
+  node.properties = properties
+  if (required.length > 0) node.required = [...new Set(required)]
+  else delete node.required
+  return true
 }
 
 /** The WorkBuddy China wire adapter serving the `workbuddy` route. */
@@ -212,6 +327,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
     if (held === undefined) throw new Error('WorkBuddy is not signed in')
     const token = this.tokenOf(held.session)
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
+    // Capture the tool-call history so unsafe tool names in past turns can be renamed to
+    // the safe ones the model now sees, keeping the conversation consistent.
+    this.historyMessages = options.messages.filter((message) => message.role === 'assistant' || message.role === 'tool') as unknown as Record<string, unknown>[]
     try {
       const body = this.requestBody(options)
       const response = await this.fetchFn(WORKBUDDY_API, {
@@ -268,12 +386,104 @@ export class WorkBuddyAdapter extends LlmAdapter {
     // Claude Code's own) out of every message — WorkBuddy reads them all, whatever role.
     const system = this.systemPrompt(options)
     messages.unshift({ role: 'system', content: system })
+    const tools = this.fittedTools(options.tools)
     return {
       model: options.model,
       messages: unflagMessages(messages),
+      ...tools === undefined ? {} : { tools: tools.tools },
       ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
       stream: true,
     }
+  }
+
+  /**
+   * Mend the tool schemas the way WorkBuddy's model gateway accepts.
+   *
+   * A tool name may hold only letters, digits, `_`, `-`; another character is refused, and
+   * a schema with a union at the parameter root or a `\0` escape is turned away by the
+   * model. Each unsafe name is made safe and the safe→original map kept on the adapter so
+   * the model's calls can be renamed back in the answer. Adapted from magpie's fitTools.
+   *
+   * @param tools - the declared tool schemas, when any.
+   * @returns the mended wire tools, or undefined when there are none.
+   */
+  private fittedTools(tools: readonly ToolSchema[] | undefined): { tools: Record<string, unknown>[], names: Map<string, string> } | undefined {
+    if (tools === undefined || tools.length === 0) return undefined
+    const wire: Record<string, unknown>[] = tools.map((tool) => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        ...tool.description === '' ? {} : { description: tool.description },
+        ...tool.parameters === undefined ? {} : { parameters: structuredClone(tool.parameters) },
+      },
+    }))
+    const taken = new Set<string>()
+    for (const tool of wire) {
+      const name = (tool.function as Record<string, unknown>).name
+      if (typeof name === 'string' && NAME_OK.test(name)) taken.add(name)
+    }
+    const names = new Map<string, string>()
+    const theirs = new Map<string, string>()
+    for (const tool of wire) {
+      const fn = tool.function as Record<string, unknown>
+      if (typeof fn.name === 'string' && !NAME_OK.test(fn.name)) {
+        const safe = safeName(fn.name, taken)
+        names.set(safe, fn.name)
+        theirs.set(fn.name, safe)
+        fn.name = safe
+      }
+      if (fn.parameters !== undefined) {
+        if (!isSchemaRecord(fn.parameters)) fn.parameters = { type: 'object', properties: {} }
+        else {
+          fitSchema(fn.parameters)
+          objectRoot(fn.parameters)
+        }
+      }
+    }
+    // Rename the calls in the conversation history to the safe names, so a turn that
+    // already called a tool matches the name the model now sees.
+    for (const message of this.historyMessages ?? []) {
+      for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+        const fn = call?.function
+        if (fn && typeof fn.name === 'string' && theirs.has(fn.name)) fn.name = theirs.get(fn.name)
+      }
+      if (message.role === 'tool' && typeof message.name === 'string' && theirs.has(message.name)) {
+        message.name = theirs.get(message.name)
+      }
+    }
+    this.safeToolNames = names
+    return { tools: wire, names }
+  }
+
+  /** The safe→original tool names to restore in the answer. */
+  private safeToolNames: Map<string, string> = new Map()
+
+  /** The assistant/tool history of the request being built, for renaming past calls. */
+  private historyMessages: Record<string, unknown>[] = []
+
+  /**
+   * Restore the original tool names the model was given, in one parsed chunk.
+   *
+   * @param value - a decoded SSE payload.
+   * @returns whether any name changed.
+   */
+  private namedBack(value: Record<string, unknown>): boolean {
+    let changed = false
+    for (const choice of Array.isArray(value.choices) ? value.choices : []) {
+      if (!isSchemaRecord(choice)) continue
+      for (const at of [choice.message, choice.delta]) {
+        if (!isSchemaRecord(at)) continue
+        for (const call of Array.isArray(at.tool_calls) ? at.tool_calls : []) {
+          if (!isSchemaRecord(call) || !isSchemaRecord(call.function)) continue
+          const original = this.safeToolNames.get(String(call.function.name))
+          if (original !== undefined) {
+            call.function.name = original
+            changed = true
+          }
+        }
+      }
+    }
+    return changed
   }
 
   /** The system prompt: the caller's, else WorkBuddy's default. */
@@ -368,6 +578,28 @@ export class WorkBuddyAdapter extends LlmAdapter {
           if (typeof wireCode === 'number' && wireCode !== 0) {
             const msg = (chunk as Record<string, unknown>).msg
             throw new Error(`WorkBuddy: ${typeof msg === 'string' ? msg : `error ${wireCode}`}`)
+          }
+          // Restore the tool names the model called to the ones the client declared, before
+          // the chunk is read as a stream event.
+          this.namedBack(chunk as Record<string, unknown>)
+          // A tool-call delta: emit it so the harness can run the tool. The id and name ride
+          // the first delta of each call; later deltas carry argument fragments.
+          const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
+          if (Array.isArray(toolCalls)) {
+            for (const call of toolCalls) {
+              const fn = call?.function
+              if (fn === undefined || fn === null) continue
+              const index = call.index ?? 0
+              const id = ToolCallId(call.id ?? `wb-tool-${index}`)
+              const name = fn.name
+              const args = fn.arguments
+              if (typeof name === 'string' && name !== '') {
+                yield { type: 'tool-call-delta', index, id, name, argumentsDelta: '' }
+              }
+              if (typeof args === 'string' && args !== '') {
+                yield { type: 'tool-call-delta', index, id, argumentsDelta: args }
+              }
+            }
           }
           const delta = chunk.choices?.[0]?.delta?.content
           if (typeof delta === 'string' && delta !== '') {

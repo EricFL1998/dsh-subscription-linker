@@ -173,6 +173,25 @@ test('the stream posts chat completions with the WorkBuddy headers', async () =>
   assert.equal(chunks.some((chunk) => chunk.type === 'finish'), true)
 })
 
+test('a tool with an unsafe name is made safe for the wire and renamed back in the answer', async () => {
+  let seenBody: Record<string, unknown> = {}
+  const fetchFn: typeof fetch = async (_input, init) => {
+    seenBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    return sse([
+      JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_file', arguments: '{"path":"/x"}' } }] } }] }),
+    ])
+  }
+  const adapter = new WorkBuddyAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const withTools = { ...request(), tools: [{ name: 'read.file', description: 'Read', parameters: { type: 'object', properties: { path: { type: 'string' } } } }] }
+  const chunks = await collect(adapter.stream(withTools))
+  // The unsafe name went out safe: a `.` became `_`.
+  const tools = seenBody.tools as { function: { name: string } }[]
+  assert.equal(tools[0]?.function.name, 'read_file')
+  // The model's call is renamed back to the name the client declared.
+  const call = chunks.find((chunk) => chunk.type === 'tool-call-delta' && chunk.name !== undefined)
+  assert.equal(call?.type === 'tool-call-delta' ? call.name : undefined, 'read.file')
+})
+
 test('a credits-exhausted 403 names the package fix, not a network fault', async () => {
   const fetchFn: typeof fetch = async () =>
     new Response(JSON.stringify({ code: 14018, msg: 'Credits exhausted' }), { status: 403, headers: { 'content-type': 'application/json' } })
