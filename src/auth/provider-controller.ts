@@ -347,9 +347,11 @@ export class ProviderController<S extends SessionBase> {
     const key = account ?? await this.options.store.defaultAccount()
     if (key !== undefined) {
       await this.options.store.remove(key)
-      // The signed-out account's remembered allowance state is no longer meaningful;
-      // drop it so the chip and the scheduler stop treating it as a live account.
+      // Drop every trace of the signed-out account: the remembered allowance state (so
+      // the scheduler stops treating it as live) and the cached usage figures (so the
+      // card and chip stop showing its quota).
       allowanceScheduler.clear(this.options.spec.id, key)
+      this.usageByAccount.delete(key)
     }
     return this.status()
   }

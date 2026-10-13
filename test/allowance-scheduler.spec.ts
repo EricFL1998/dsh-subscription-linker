@@ -64,4 +64,30 @@ describe('AllowanceScheduler', () => {
     s.clear('kimi', 'unknown')
     assert.equal(s.isSpentUntilReset('kimi', 'a'), true)
   })
+
+  test('a cooled account is spent until the cooldown passes', () => {
+    const s = new AllowanceScheduler()
+    s.coolDown('antigravity', 'a', Date.now() + 60_000)
+    assert.equal(s.isCooling('antigravity', 'a'), true)
+    assert.equal(s.isSpentUntilReset('antigravity', 'a'), true)
+    // A different account is untouched.
+    assert.equal(s.isCooling('antigravity', 'b'), false)
+  })
+
+  test('a cooldown that has passed no longer marks the account spent', () => {
+    const s = new AllowanceScheduler()
+    s.coolDown('antigravity', 'a', Date.now() - 1000)
+    assert.equal(s.isCooling('antigravity', 'a'), false)
+    assert.equal(s.isSpentUntilReset('antigravity', 'a'), false)
+  })
+
+  test('a reset and a cooldown coexist; the sooner one governs', () => {
+    const s = new AllowanceScheduler()
+    s.noteReset('antigravity', 'a', Date.now() + 60 * 60 * 1000)
+    s.coolDown('antigravity', 'a', Date.now() + 60_000)
+    assert.equal(s.isSpentUntilReset('antigravity', 'a'), true)
+    // Clearing the reset leaves the cooldown; the account is still spent until it passes.
+    s.noteReset('antigravity', 'a', undefined)
+    assert.equal(s.isSpentUntilReset('antigravity', 'a'), true)
+  })
 })

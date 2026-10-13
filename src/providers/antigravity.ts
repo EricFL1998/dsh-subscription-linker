@@ -609,22 +609,38 @@ export class AntigravityAdapter extends LlmAdapter {
         token = await this.options.tokens.resolve(accountKey)
         let response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
         if (response.status === 401 || response.status === 403) {
-          // The stored token was accepted locally but refused on the wire; force
-          // one refresh, then report the credential as dead if it still fails.
+          // The stored token was accepted locally but refused on the wire; force one
+          // refresh. A 403 that survives the refresh is Google's "verify your account"
+          // gate, not a dead credential — the account is fine, it just cannot serve now —
+          // so the call moves to the next account rather than failing. Only a 401 marks
+          // the credential as dead.
           token = await this.options.tokens.resolve(token.account, true)
           response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
-          if (response.status === 401 || response.status === 403) {
+          if (response.status === 401) {
             this.options.onCredentialRejected?.(token.account)
           }
         }
-        // A spent allowance (402/429) moves to the next account, remembering when this
+        // A spent allowance (402/429) moves to the next account, remembering when a spent
         // one refills so later requests skip it until then.
         if (!response.ok && (response.status === 402 || response.status === 429) && order.length > 1) {
-          diag.push(`429 on ${token.account}, moving to next`)
+          diag.push(`${response.status} on ${token.account}, moving to next`)
           this.noteSpent(token.account)
           const resetAt = await this.resetAt(token.account)
           allowanceScheduler.noteReset(ANTIGRAVITY_PROVIDER_ID, token.account, resetAt)
           continue
+        }
+        // A 403 "verify your account" is Google's safety gate, not a dead credential.
+        // Cool the account (so the gate is not re-hit at once) and move to the next —
+        // but only if one has not been cooled already this pass, else the loop would
+        // sweep every account and trip the gate on all of them at once.
+        if (!response.ok && response.status === 403 && order.length > 1) {
+          const alreadyCooled = [...tried].some((account) => allowanceScheduler.isCooling(ANTIGRAVITY_PROVIDER_ID, account))
+          if (!alreadyCooled) {
+            diag.push(`403 on ${token.account}, cooling and moving to next`)
+            allowanceScheduler.coolDown(ANTIGRAVITY_PROVIDER_ID, token.account)
+            continue
+          }
+          diag.push(`403 on ${token.account}, another account already cooling; stopping the sweep`)
         }
         if (!response.ok) {
           diag.push(`fail ${response.status} on ${token.account} (no switch)`)

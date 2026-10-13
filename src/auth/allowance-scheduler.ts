@@ -18,9 +18,14 @@
 export interface AllowanceState {
   /** Epoch milliseconds at which the account's allowance resets, when known. */
   resetsAt?: number
+  /** Epoch milliseconds until which the account is cooling after a refused request. */
+  cooldownUntil?: number
   /** Epoch milliseconds at which this state was last learned. */
   learnedAt: number
 }
+
+/** Default cooldown after a refused request, so the provider's gate is not re-hit at once. */
+export const DEFAULT_REFUSAL_COOLDOWN_MS = 2 * 60 * 1000
 
 /** In-memory, per-provider memory of account reset times. */
 export class AllowanceScheduler {
@@ -44,7 +49,46 @@ export class AllowanceScheduler {
    * @param resetsAt - epoch milliseconds of the allowance reset, when known.
    */
   noteReset(provider: string, account: string, resetsAt?: number): void {
-    this.provider(provider).set(account, { ...resetsAt === undefined ? {} : { resetsAt }, learnedAt: Date.now() })
+    const existing = this.byProvider.get(provider)?.get(account)
+    this.provider(provider).set(account, {
+      ...existing?.cooldownUntil === undefined ? {} : { cooldownUntil: existing.cooldownUntil },
+      ...resetsAt === undefined ? {} : { resetsAt },
+      learnedAt: Date.now(),
+    })
+  }
+
+  /**
+   * Cool one account after its request was refused, so the provider's gate is not
+   * re-hit at once.
+   *
+   * A 403 "verify your account" is Google's safety gate, not a dead credential; hitting
+   * it in a tight loop across every account is what turns a transient check into a
+   * sustained block. Cooling the refused account for a short beat (and trying another)
+   * is what keeps the pool reachable — the same discipline a careful client keeps.
+   *
+   * @param provider - the provider route id.
+   * @param account - the account key.
+   * @param until - epoch milliseconds to cool until; defaults to a short beat.
+   */
+  coolDown(provider: string, account: string, until = Date.now() + DEFAULT_REFUSAL_COOLDOWN_MS): void {
+    const existing = this.byProvider.get(provider)?.get(account)
+    this.provider(provider).set(account, {
+      ...existing?.resetsAt === undefined ? {} : { resetsAt: existing.resetsAt },
+      cooldownUntil: until,
+      learnedAt: Date.now(),
+    })
+  }
+
+  /**
+   * Whether one account is cooling after a refused request and should be left alone.
+   *
+   * @param provider - the provider route id.
+   * @param account - the account key.
+   * @returns whether the account is mid-cooldown.
+   */
+  isCooling(provider: string, account: string): boolean {
+    const state = this.byProvider.get(provider)?.get(account)
+    return state?.cooldownUntil !== undefined && Date.now() < state.cooldownUntil
   }
 
   /**
@@ -74,6 +118,7 @@ export class AllowanceScheduler {
   isSpentUntilReset(provider: string, account: string): boolean {
     const state = this.byProvider.get(provider)?.get(account)
     if (state === undefined) return false
+    if (state.cooldownUntil !== undefined && Date.now() < state.cooldownUntil) return true
     if (state.resetsAt === undefined) return false
     return Date.now() < state.resetsAt
   }
