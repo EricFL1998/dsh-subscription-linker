@@ -103,6 +103,8 @@ describe('KimiAdapter catalog', () => {
     // rewritten onto its base.
     const models = await adapter.listModels('kimi')
     assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), true)
+    const variant = models.find((model) => model.id === 'kimi-for-coding-highspeed') as { id: string, group?: string } | undefined
+    assert.equal(variant?.group, 'kimi-for-coding')
     const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
     assert.equal(resolved.id, 'kimi-for-coding-highspeed')
     assert.equal(resolved.name, 'Kimi for Coding')
