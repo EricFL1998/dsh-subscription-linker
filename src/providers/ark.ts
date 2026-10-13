@@ -41,6 +41,10 @@ import { streamProviderResponses, accountPoolHooks } from './responses-stream.js
 import { toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ImageResolver } from '../translate/responses.js'
 import type { UsageRead } from './usage.js'
+import { isImageModel } from './grok.js'
+
+/** Model ids that are clearly not chat models. */
+const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
 
 /** Provider route this module serves. */
 export const ARK_PROVIDER_ID = 'ark'
@@ -182,6 +186,8 @@ function extraEntry(id: string): CatalogEntry {
 /** The adapter behind the `ark` route. */
 export class ArkAdapter extends LlmAdapter {
   private live: readonly string[] | undefined
+  /** Image-generation model id, when discovery reported one. */
+  private imageModel: string | undefined
 
   constructor(private readonly options: ArkAdapterOptions) {
     super()
@@ -200,13 +206,20 @@ export class ArkAdapter extends LlmAdapter {
     // must not appear in the picker, and Auto must not try it.
     if (await this.options.tokens.session() === undefined) return []
     const hidden = await this.hidden()
-    return resolveCatalog(this.catalog(), [], hidden).entries.map((entry) => ({
+    // Image models are never picker rows: they are agent-called, always on.
+    const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
+    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({
       provider: ARK_PROVIDER_ID,
       id: entry.id,
       name: entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
     }))
+  }
+
+  /** The image-generation model id, when discovery reported one. */
+  imageModelId(): string | undefined {
+    return this.imageModel
   }
 
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -324,9 +337,12 @@ export class ArkAdapter extends LlmAdapter {
         return undefined
       }
       const body = await response.json() as { data?: readonly { id?: unknown }[] }
-      const ids = (body.data ?? [])
+      const allIds = (body.data ?? [])
         .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : ''))
         .filter((id) => id !== '')
+      // Image models are never picker rows: they are agent-called, always on.
+      this.imageModel = allIds.find((id) => isImageModel(id))
+      const ids = allIds.filter((id) => !NON_CHAT_ID.test(id))
       return ids.length === 0 ? undefined : ids
     } catch (error: unknown) {
       this.options.onWarn?.(`Ark model list unavailable (${error instanceof Error ? error.message : String(error)})`)
