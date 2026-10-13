@@ -454,7 +454,11 @@ export const fastModeCss = `
 .dsh-subscription-fast-mode[data-active="true"] .dsh-subscription-fast-mode-bolt {
   color: var(--dsw-alias-state-warning-primary, #f5a524);
 }
-.dsh-subscription-fast-mode-label {
-  font-variant-numeric: tabular-nums;
+.dsh-subscription-fast-mode-reason {
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
 }
 `

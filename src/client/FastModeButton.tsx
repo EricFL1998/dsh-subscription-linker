@@ -56,7 +56,7 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
   const [pair, setPair] = useState<{ wireId: string, baseId?: string } | undefined>(undefined)
   // A switch that the host refuses must not look like a dead button: the reason is kept
   // and shown, because the only alternative is a control that silently does nothing.
-  const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [failure, setFailure] = useState<{ code?: string, message: string } | undefined>(undefined)
   const [pending, setPending] = useState(false)
   const selection = useProjection('modelSelection', (value) => (value as ModelSelectionProjection))
   const provider = providerOf(selection)
@@ -88,8 +88,12 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
   // Active without a base to return to would be a control that cannot switch anything off.
   if (target === undefined || target === model) return null
 
-  const base = active ? 'Fast mode is on; switch back to the standard model' : 'Switch to the fast variant of this model'
-  const title = failure === undefined ? base : `${base}\nThe switch was refused: ${failure}`
+  const base = active
+    ? 'Fast mode is on; press to go back to the standard model'
+    : 'Fast mode: switch to the fast variant of this model'
+  const title = failure === undefined
+    ? base
+    : `${base}\nThe switch was refused — ${`${failure.code ?? ''} ${failure.message}`.trim()}`
 
   return (
     <>
@@ -103,7 +107,7 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
         aria-pressed={active}
         aria-busy={pending}
         title={title}
-        aria-label={active ? 'Fast mode is on' : 'Switch to fast mode'}
+        aria-label={title}
         onClick={(event) => {
           event.stopPropagation()
           setPending(true)
@@ -112,22 +116,23 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
             .then((result) => {
               // The directory reports its own outcome: a refused selection carries why.
               const outcome = result as { ok?: boolean, error?: { code?: string, message?: string } } | undefined
-              const refused = outcome?.ok === false
-              setFailure(refused
-                ? outcome.error?.message ?? outcome.error?.code ?? 'the host refused the selection'
-                : undefined)
-              if (refused) console.warn(`[subscription-oauth] fast mode ${provider}/${target} refused:`, outcome.error)
+              if (outcome?.ok !== false) return
+              const code = outcome.error?.code
+              const message = outcome.error?.message ?? code ?? 'the host refused the selection'
+              setFailure({ ...code === undefined ? {} : { code }, message })
+              console.warn(`[subscription-oauth] fast mode ${provider}/${target} refused:`, outcome.error)
             })
             .catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : String(error)
-              setFailure(message)
+              setFailure({ message: error instanceof Error ? error.message : String(error) })
               console.warn(`[subscription-oauth] fast mode ${provider}/${target} failed:`, error)
             })
             .finally(() => { setPending(false) })
         }}
       >
         <span className="dsh-subscription-fast-mode-bolt" aria-hidden="true">⚡</span>
-        <span className="dsh-subscription-fast-mode-label">{failure === undefined ? 'Fast' : 'Fast ⚠'}</span>
+        {failure !== undefined && (
+          <span className="dsh-subscription-fast-mode-reason">{failure.code ?? failure.message}</span>
+        )}
       </button>
     </>
   )
