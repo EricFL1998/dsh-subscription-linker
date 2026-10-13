@@ -332,8 +332,11 @@ describe('GrokAdapter catalog', () => {
     // Asked about the fast id itself, the pair still names the row to switch back to.
     assert.deepEqual(adapter.fastPairOf('grok-4.7-build-fast'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
     assert.equal(adapter.fastPairOf('grok-4.5'), undefined)
+    // The variant now also appears in the host-facing list — the host validates a GUI
+    // selection against that list and refuses an unknown id with `session/model-unavailable`.
     const models = await adapter.listModels('grok')
-    assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), false)
+    assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), true)
+    assert.equal(models.some((model) => model.id === 'grok-4.7'), true)
     // The CLI catalog states 256k for grok-4.7, which really serves 500k: a live read
     // may widen what this build ships, never narrow it.
     assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)

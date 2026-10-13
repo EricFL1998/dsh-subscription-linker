@@ -411,7 +411,7 @@ export const fastModeCss = `
   align-items: center;
   gap: 4px;
   margin: 0;
-  padding: 2px 6px;
+  padding: 3px;
   border: 0;
   border-radius: var(--dsw-radius-sm, 6px);
   background: transparent;
@@ -445,14 +445,11 @@ export const fastModeCss = `
 .dsh-subscription-fast-mode[data-active="false"] .dsh-subscription-fast-mode-bolt {
   opacity: 0.55;
 }
-/* On: the control takes the accent, which is the only thing distinguishing the fast
-   variant from its base — both answer with the same model name. */
-.dsh-subscription-fast-mode[data-active="true"] {
-  background: var(--dsw-alias-interactive-bg-active, #ffffff1f);
-  color: var(--dsw-alias-label-primary, #e8e8e8);
-}
+/* On: the bolt takes the accent and glows, which is the only thing distinguishing the
+   fast variant from its base — both answer with the same model name. */
 .dsh-subscription-fast-mode[data-active="true"] .dsh-subscription-fast-mode-bolt {
   color: var(--dsw-alias-state-warning-primary, #f5a524);
+  filter: drop-shadow(0 0 6px var(--dsw-alias-state-warning-primary, #f5a52455));
 }
 .dsh-subscription-fast-mode-reason {
   max-width: 14ch;

@@ -515,15 +515,24 @@ export class GrokAdapter extends LlmAdapter {
     if (await this.options.tokens.session() === undefined) return []
     await this.syncUserModels()
     const hidden = await this.hidden()
-    // Image models are never picker rows: they are agent-called, always on.
+    // A fast variant is not a picker row, but the host validates a GUI selection
+    // against the exact list `listModels` returns, so the variant must appear there
+    // or selecting it is refused with `session/model-unavailable`. Each base row
+    // therefore carries its variant as a sibling entry — present, selectable, and
+    // not promoted to a row the picker's model seat shows.
     const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
-    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({
-      provider: GROK_PROVIDER_ID,
-      id: entry.id,
-      name: entry.name,
-      ...entry.description === undefined ? {} : { description: entry.description },
-      ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
-    }))
+    const listed = resolveCatalog(imageless, [], hidden).entries.flatMap((entry) => {
+      const fast = this.fastVariants.variantOf(entry.id)
+      const base = {
+        provider: GROK_PROVIDER_ID,
+        id: entry.id,
+        name: entry.name,
+        ...entry.description === undefined ? {} : { description: entry.description },
+        ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
+      }
+      return fast === undefined ? [base] : [base, { provider: GROK_PROVIDER_ID, id: fast, name: entry.name, description: 'Fast variant', ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities } }]
+    })
+    return listed
   }
 
 

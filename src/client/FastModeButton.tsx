@@ -129,7 +129,9 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
             .finally(() => { setPending(false) })
         }}
       >
-        <span className="dsh-subscription-fast-mode-bolt" aria-hidden="true">⚡</span>
+        <svg className="dsh-subscription-fast-mode-bolt" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none">
+          <path d="M13 2 3.6 13.2a1.2 1.2 0 0 0 .92 1.98H11l-.86 6.42a1.2 1.2 0 0 0 2.2.7L21.4 10.6a1.2 1.2 0 0 0-.92-1.98H13l.86-6.42A1.2 1.2 0 0 0 13 2z" fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+        </svg>
         {failure !== undefined && (
           <span className="dsh-subscription-fast-mode-reason">{failure.code ?? failure.message}</span>
         )}
