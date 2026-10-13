@@ -13,7 +13,7 @@
  * @module dsh-plugin-subscription-oauth/client/SubscriptionsSection
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
 import { en } from './locales.js'
@@ -156,29 +156,40 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex', flexDirection: 'column', gap: 12, maxWidth: SECTION_WIDTH,
     color: 'var(--dsw-alias-label-primary)',
   },
-  intro: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 14, lineHeight: '22px' },
+  sectionHeader: { display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 2 },
+  heading: { margin: 0, fontSize: 18, lineHeight: '26px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
+  intro: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px', maxWidth: 560 },
   card: {
     border: '0.5px solid var(--dsw-alias-settings-card-stroke, var(--dsw-alias-border-l4))',
-    borderRadius: 'var(--dsw-radius-xl, 20px)',
+    borderRadius: 'var(--dsw-radius-xl, 16px)',
     background: 'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2))',
-    padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+    padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 8,
+    transition: 'border-color 120ms ease, background 120ms ease',
   },
-  cardHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  cardOpen: {
+    borderColor: 'var(--dsw-alias-border-l2, var(--dsw-alias-border-l3))',
+    background: 'var(--dsw-alias-settings-card-fill-hover, var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2)))',
+  },
+  cardHeader: { display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' },
   /** Everything a folded card hides. */
-  cardBody: { display: 'flex', flexDirection: 'column', gap: 6 },
+  cardBody: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 2 },
   /** The one-line state a folded card shows in place of its body. */
   cardSummary: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
-  name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
-  providerId: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-dimmed)' },
+  dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0, boxShadow: '0 0 0 3px var(--dsw-alias-state-success-primary, transparent)' },
+  name: { fontWeight: 600, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
+  providerId: {
+    fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-dimmed)',
+    padding: '1px 6px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1))',
+    fontFamily: 'monospace',
+  },
   statusLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
   errorLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' },
   successLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-success-primary)' },
   actions: { display: 'flex', gap: 8, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' },
   accountRow: {
     display: 'flex', flexDirection: 'column', gap: 6,
-    border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg, 16px)',
-    padding: '8px 10px', marginTop: 4,
+    border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg, 12px)',
+    padding: '10px 12px', background: 'var(--dsw-alias-bg-layer-1)',
   },
   accountHeader: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   starButton: {
@@ -188,9 +199,20 @@ const styles: Record<string, CSSProperties> = {
   },
   accountName: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', userSelect: 'all' },
   badge: {
-    fontSize: 11, lineHeight: '16px', padding: '0 6px', borderRadius: 8,
-    background: 'var(--dsw-alias-bg-layer-1)', border: '0.5px solid var(--dsw-alias-border-l2)',
+    fontSize: 10, lineHeight: '14px', padding: '1px 7px', borderRadius: 999, fontWeight: 500,
+    background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1))',
+    border: '0.5px solid var(--dsw-alias-border-l2)',
     color: 'var(--dsw-alias-label-secondary)',
+  },
+  badgeDefault: {
+    fontSize: 10, lineHeight: '14px', padding: '1px 7px', borderRadius: 999, fontWeight: 500,
+    background: 'var(--dsw-alias-state-success-primary, #067647)',
+    color: 'var(--dsw-alias-label-primary-foreground, #fff)',
+  },
+  badgeWarn: {
+    fontSize: 10, lineHeight: '14px', padding: '1px 7px', borderRadius: 999, fontWeight: 500,
+    background: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+    color: 'var(--dsw-alias-label-primary-foreground, #fff)',
   },
   pushRight: { marginLeft: 'auto', flexShrink: 0 },
   catalog: {
@@ -238,15 +260,20 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)',
   },
   usage: {
-    display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4,
-    borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 8,
+    display: 'flex', flexDirection: 'column', gap: 8, marginTop: 2,
+    borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 10,
   },
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
+  usageRow: { display: 'flex', flexDirection: 'column', gap: 4 },
   usageLine: { display: 'flex', alignItems: 'baseline', gap: 8, justifyContent: 'space-between' },
   usageMeter: {
     height: 6, borderRadius: 999, background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2))',
-    overflow: 'hidden',
+    overflow: 'hidden', boxShadow: 'inset 0 0 0 1px #8a8f9833',
+  },
+  usageAccount: {
+    display: 'flex', flexDirection: 'column', gap: 6,
+    padding: '8px 10px', borderRadius: 'var(--dsw-radius-md, 10px)',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '0.5px solid var(--dsw-alias-border-l2)',
   },
   modelRow: {
     display: 'flex', alignItems: 'flex-start', gap: 8,
@@ -342,7 +369,7 @@ function UsageBlock(props: {
       {error !== undefined && <p className="dsh-subscription-error">{t('usageError', { message: error })}</p>}
       {usage.length === 0 && error === undefined && <p style={styles.statusLine}>{t('usageNone')}</p>}
       {usage.map((entry) => (
-        <div key={entry.account} style={styles.usageRow}>
+        <div key={entry.account} style={styles.usageAccount}>
           <div style={styles.usageLine}>
             <span style={styles.modelMeta}>
               {entry.plan === undefined ? entry.account : t('usagePlan', { plan: entry.plan })}
@@ -619,17 +646,25 @@ function ProviderCard(props: {
         : t('statusSignedOut')
 
   return (
-    <div style={styles.card}>
+    <div style={cardOpen ? { ...styles.card, ...styles.cardOpen } : styles.card}>
       {/*
         The header is the disclosure: folded, the page is a list of providers, and
         the whole card is one row with its state and an edit affordance. The
         status dot stays visible either way, so a folded card still reports
         whether the route is signed in.
       */}
-      <div style={styles.cardHeader}>
+      <div
+        style={styles.cardHeader}
+        role="button"
+        tabIndex={0}
+        aria-expanded={cardOpen}
+        onClick={toggleCardOpen}
+        onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleCardOpen() } }}
+      >
         <span style={{ ...styles.dot, background: dotColor(status) }} aria-hidden="true" />
         <span style={styles.name}>{status.displayName}</span>
         <span style={styles.providerId}>{status.provider}</span>
+        {status.loggedIn && <span style={styles.badgeDefault}>{t('badgeLive')}</span>}
         {/*
           The state stays in the header whether the card is open or folded. The
           body used to repeat the same sentence as its first line, so expanding a
@@ -643,7 +678,7 @@ function ProviderCard(props: {
           style={styles.pushRight}
           aria-expanded={cardOpen}
           aria-controls={`dsh-subscription-card-${status.provider}`}
-          onClick={toggleCardOpen}
+          onClick={(event) => { event.stopPropagation(); toggleCardOpen() }}
         >
           {cardOpen ? t('collapse') : t('edit')}
         </button>
@@ -673,10 +708,10 @@ function ProviderCard(props: {
               {account.isDefault ? '★' : '☆'}
             </button>
             <span style={styles.accountName}>{account.label}</span>
-            {account.isDefault && <span style={styles.badge}>{t('defaultBadge')}</span>}
+            {account.isDefault && <span style={styles.badgeDefault}>{t('defaultBadge')}</span>}
             {/* The provider refused this grant: only a new sign-in helps. */}
             {account.needsLogin === true && (
-              <span style={styles.badge} title={t('accountNeedsLoginHint')}>{t('accountNeedsLogin')}</span>
+              <span style={styles.badgeWarn} title={t('accountNeedsLoginHint')}>{t('accountNeedsLogin')}</span>
             )}
             <span style={styles.statusLine}>
               {account.expired
@@ -1102,6 +1137,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     else stopPolling()
   }, [anyBusy, startPolling, stopPolling])
 
+  /**
+   * Signed-in providers read first: a route with a live account is the one a
+   * reader most likely wants, and `auto` (which owns no account) leads the rest.
+   * The sort is stable, so equal ranks keep the host's configured order.
+   */
+  const orderedProviders = useMemo(() => {
+    const providers = status?.providers ?? []
+    const rank = (provider: ProviderStatus): number => {
+      if (provider.provider === 'auto') return 0
+      if (provider.loggedIn) return 1
+      return 2
+    }
+    return [...providers].sort((left, right) => rank(left) - rank(right))
+  }, [status?.providers])
+
   /** Run one action for one provider, reporting its own failure. */
   const act = useCallback(async (provider: string, run: () => Promise<void>): Promise<void> => {
     setBusyAction(true)
@@ -1235,10 +1285,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div className="dsh-subscriptions-settings" style={styles.section}>
       <style>{subscriptionsCss}</style>
-      <p style={styles.intro}>{t('intro')}</p>
+      <div style={styles.sectionHeader}>
+        <h2 style={styles.heading}>{t('nav')}</h2>
+        <p style={styles.intro}>{t('intro')}</p>
+      </div>
       {error !== undefined && <p className="dsh-subscription-error">{error}</p>}
       {status === undefined && <p style={styles.statusLine}>{t('loading')}</p>}
-      {status?.providers.map((provider) => (
+      {orderedProviders.map((provider) => (
         <ProviderCard
           key={provider.provider}
           status={provider}

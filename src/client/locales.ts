@@ -9,7 +9,7 @@
 /** English strings. */
 export const en = {
   nav: 'Subscriptions',
-  intro: 'Sign in with a subscription account — Kimi Code, Grok (X Premium) or Google Antigravity. DeepSeek Harness keeps the tokens on this machine and streams every request through the provider\'s own API.',
+  intro: 'Sign in with the AI subscriptions you already pay for — no API key. Pick a provider below, connect once, and its models join the model picker with live plan usage. Tokens stay on this machine.',
   loading: 'Checking subscriptions…',
   unavailable: 'The subscriptions page needs the web connection service, which this composition does not provide.',
   statusConnected: 'Connected · {count} account(s)',
@@ -27,6 +27,7 @@ export const en = {
   logout: 'Sign out',
   makeDefault: 'Use by default',
   defaultBadge: 'Default',
+  badgeLive: 'Live',
   accountNeedsLogin: 'Sign in again',
   accountNeedsLoginHint: 'The provider refused this account\'s grant, so its token cannot be renewed',
   accountExpired: 'token expired',
@@ -107,7 +108,7 @@ export type SubscriptionsKey = keyof typeof en
 /** Chinese strings. */
 export const zh = {
   nav: '订阅',
-  intro: '使用订阅账号登录 —— Kimi Code、Grok (X Premium) 或 Google Antigravity。DeepSeek Harness 将令牌保存在本机，并通过各服务自己的 API 发起请求。',
+  intro: '使用你已付费的 AI 订阅 —— 无需 API Key。在下方选择服务，连接一次，其模型即进入模型选择器并显示实时额度。令牌仅保存在本机。',
   loading: '正在检查订阅…',
   unavailable: '订阅页面需要 Web 连接服务，当前组合未提供该服务。',
   statusConnected: '已连接 {count} 个账号',
@@ -125,6 +126,7 @@ export const zh = {
   logout: '退出登录',
   makeDefault: '设为默认',
   defaultBadge: '默认',
+  badgeLive: '已连接',
   accountNeedsLogin: '需重新登录',
   accountNeedsLoginHint: '服务方已拒绝该账号的授权，令牌无法自动续期',
   accountExpired: '令牌已过期',
