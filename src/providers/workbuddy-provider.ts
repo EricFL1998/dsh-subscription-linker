@@ -157,7 +157,14 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
       }
       try {
         const renewed = await refreshWorkBuddyToken(token, fetchFn)
-        return { accessToken: renewed.accessToken, expiresAt: renewed.expiresAt }
+        // WorkBuddy rotates the refresh token: keep the new one so the next restart can
+        // still refresh, otherwise the stale token signs the account out.
+        return {
+          accessToken: renewed.accessToken,
+          expiresAt: renewed.expiresAt,
+          ...renewed.refreshToken === undefined ? {} : { refreshToken: renewed.refreshToken },
+          ...renewed.refreshExpiresAt === undefined ? {} : { refreshExpiresAt: renewed.refreshExpiresAt },
+        }
       } catch (error) {
         throw new ProviderError(
           `${WORKBUDDY_PROVIDER_NAME} token refresh failed: ${error instanceof Error ? error.message : String(error)}`,

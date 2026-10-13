@@ -620,9 +620,7 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
           <span className="dsh-subscription-usage-chip-cell" key={window.label}>
             <span className="dsh-subscription-usage-chip-window">{shortWindow(window.label)}</span>
             <span className="dsh-subscription-usage-chip-value">
-              {window.used !== undefined && window.limit !== undefined
-                ? `${String(window.used)}/${String(window.limit)}`
-                : `${String(Math.round(window.usedPercent ?? 0))}%`}
+              {`${String(Math.round(window.usedPercent ?? 0))}%`}
             </span>
           </span>
         ))}
