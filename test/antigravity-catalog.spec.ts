@@ -42,7 +42,7 @@ describe('parseAntigravityModels', () => {
       'gemini-pro',
       'gemini-3.8-flash',
       'claude-sonnet-4-6',
-      'gpt-oss-120b',
+      'gpt-oss-120b-medium',
     ])
     // Image models, tabs, commit messages and transcription are not agent-callable.
     assert.equal(entries.some((entry) => /image|tab|commit|transcription/.test(entry.id)), false)
@@ -61,7 +61,8 @@ describe('parseAntigravityModels', () => {
   test('a tier-suffixed id folds into its base family with a ladder', () => {
     const entries = parseAntigravityModels(availableModels())
     // gemini-3.1-pro-low is a fixed tier; it folds into the gemini-3.1-pro base row,
-    // which carries the family's ladder.
+    // which carries the family's ladder. gemini-pro-agent has a different base, so it
+    // stays its own row.
     assert.deepEqual(entries.find((entry) => entry.id === 'gemini-3.1-pro')?.reasoningEfforts, ['low', 'medium', 'high'])
     assert.deepEqual(entries.find((entry) => entry.id === 'gemini-3.8-flash')?.reasoningEfforts, ['low', 'medium', 'high'])
     assert.deepEqual(antigravityEffortsFor('claude-opus-4-6'), ['low', 'medium', 'high', 'max'])

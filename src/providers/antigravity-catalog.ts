@@ -130,6 +130,135 @@ export function antigravityEffortsFor(model: string): readonly string[] {
   return []
 }
 
+// ── magpie-style family collapse ─────────────────────────────────────────
+
+/** One effort word of Antigravity's ids and the level it means. */
+const EFFORT_WORDS: readonly { word: string, level: string }[] = [
+  { word: 'extra-high', level: 'xhigh' },
+  { word: 'extra-low', level: 'minimal' },
+  { word: 'xhigh', level: 'xhigh' },
+  { word: 'minimal', level: 'minimal' },
+  { word: 'low', level: 'low' },
+  { word: 'medium', level: 'medium' },
+  { word: 'high', level: 'high' },
+]
+
+/** An id's family and the level its effort word says, '' when it has none. */
+function splitEffortId(id: string): { family: string, effort: string } {
+  for (const { word, level } of EFFORT_WORDS) {
+    if (id.endsWith(`-${word}`)) {
+      const base = id.slice(0, id.length - word.length - 1)
+      if (base.length > 0) return { family: base, effort: level }
+    }
+  }
+  return { family: id, effort: '' }
+}
+
+/** The level a display name's bracketed suffix says ("Gemini 3.7 Flash (High)" → high). */
+function nameEffort(name: string): { base: string, effort: string } {
+  const open = name.lastIndexOf(' (')
+  if (open < 0 || !name.endsWith(')')) return { base: name, effort: '' }
+  const inner = name.slice(open + 2, -1).toLowerCase()
+  let effort = ''
+  if (inner === 'minimal' || inner === 'extra low') effort = 'minimal'
+  else if (inner === 'low') effort = 'low'
+  else if (inner === 'medium') effort = 'medium'
+  else if (inner === 'high') effort = 'high'
+  else if (inner === 'extra high' || inner === 'xhigh') effort = 'xhigh'
+  if (effort === '') return { base: name, effort: '' }
+  return { base: name.slice(0, open).trim(), effort }
+}
+
+/** One family of Antigravity's ids, as magpie groups them. */
+interface Family {
+  id: string
+  variants: { id: string, name: string, contextWindow: number, inputModalities: readonly string[], efforts: readonly string[] }[]
+  efforts: string[]
+}
+
+/** Group raw entries into families by stripping effort words. */
+function familiesOf(raw: CatalogEntry[]): Family[] {
+  const byId = new Map<string, Family>()
+  const order: Family[] = []
+  for (const entry of raw) {
+    const { family } = splitEffortId(entry.id)
+    let f = byId.get(family)
+    if (f === undefined) {
+      f = { id: family, variants: [], efforts: [] }
+      byId.set(family, f)
+      order.push(f)
+    }
+    f.variants.push({
+      id: entry.id,
+      name: entry.name,
+      contextWindow: entry.contextWindow,
+      inputModalities: entry.inputModalities ?? ['text'],
+      efforts: entry.reasoningEfforts ?? [],
+    })
+  }
+  // Determine each variant's effort: prefer the name's bracket, else the id's word.
+  // magpie: a family is only ids that are one id with an effort word after it — a
+  // variant named like another but with an id of its own (gemini-3-flash-agent is
+  // "Gemini 3.5 Flash (High)") stays a variant of its own family, as the name says.
+  for (const f of order) {
+    const named: string[] = []
+    for (const v of f.variants) {
+      const { effort } = nameEffort(v.name)
+      if (effort !== '' && !named.includes(effort)) named.push(effort)
+    }
+    for (const v of f.variants) {
+      let effort = splitEffortId(v.id).effort
+      // When every variant's name says a distinct level, the name wins over the id.
+      if (named.length === f.variants.length && named.length > 1) {
+        effort = nameEffort(v.name).effort
+      }
+      f.efforts.push(effort)
+    }
+  }
+  return order
+}
+
+/** The id for each effort level, '' the default. */
+function byEffort(f: Family): Map<string, string> {
+  const out = new Map<string, string>()
+  for (let i = 0; i < f.variants.length; i++) {
+    if (!out.has(f.efforts[i]!)) out.set(f.efforts[i]!, f.variants[i]!.id)
+  }
+  if (!out.has('')) {
+    out.set('', out.get('high') ?? '')
+    for (const level of ['xhigh', 'high', 'medium', 'low', 'minimal']) {
+      if (out.get('') === '') out.set('', out.get(level) ?? '')
+    }
+  }
+  return out
+}
+
+/** Collapse families into one row each, as magpie does. */
+export function collapseFamilies(raw: CatalogEntry[]): CatalogEntry[] {
+  const out: CatalogEntry[] = []
+  for (const f of familiesOf(raw)) {
+    if (f.variants.length === 1) {
+      out.push(raw.find((e) => e.id === f.variants[0]!.id)!)
+      continue
+    }
+    const def = byEffort(f).get('') ?? f.variants[0]!.id
+    const defVariant = f.variants.find((v) => v.id === def) ?? f.variants[0]!
+    const efforts: string[] = []
+    for (const level of ['minimal', 'low', 'medium', 'high', 'xhigh']) {
+      if (f.efforts.includes(level)) efforts.push(level)
+    }
+    const modalities = defVariant.inputModalities as CatalogEntry['inputModalities']
+    out.push({
+      id: f.id,
+      name: nameEffort(defVariant.name).base || f.id,
+      contextWindow: Math.min(...f.variants.map((v) => v.contextWindow)),
+      ...(modalities === undefined ? {} : { inputModalities: modalities }),
+      reasoningEfforts: efforts,
+    })
+  }
+  return out
+}
+
 /**
  * The ids the agent can actually call, in the order the response groups them.
  *
@@ -228,59 +357,20 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
       'utf8',
     )
   } catch { /* diagnostics never break parsing */ }
-  const entries: CatalogEntry[] = []
-  const seenBase = new Set<string>()
+  const raw: CatalogEntry[] = []
   for (const wireId of agentIds(payload)) {
     // Image-generation models are never picker rows: they are agent-called, always on.
     if (isImageModel(wireId)) continue
     const info = modelInfo(models[wireId])
-    // Strip any tier suffix first so all naming schemes meet as a clean base id.
-    const stripped = isTierMarked(wireId) ? baseFamilyOf(wireId) : wireId
-    // All gemini flash ids collapse into one row per generation: `gemini-3.5-flash`,
-    // `gemini-3.5-flash-agent` (its High tier), `gemini-3.5-flash-low` are one family.
-    // The row carries the family's reasoning ladder; picking a level routes to the tier.
-    const family = geminiBaseOf(stripped)
-    if (/^gemini-/.test(family) && family.includes('-flash')) {
-      if (seenBase.has(family)) continue
-      seenBase.add(family)
-      const baseInfo = modelInfo(models[family]) ?? info
-      entries.push({
-        id: family,
-        name: displayNameOf(family, models[family] as Record<string, unknown> ?? {}),
-        contextWindow: baseInfo.maxTokens ?? baseInfo.maxInputTokens ?? baseInfo.inputTokenLimit ?? 1_048_576,
-        inputModalities: baseInfo.supportsImages === true ? ['text', 'image'] : ['text'],
-        reasoningEfforts: antigravityEffortsFor(family),
-      })
-      continue
-    }
-    // Other tier-marked ids (claude-…-max, gpt-oss-…-high, …) fold into their base.
-    if (isTierMarked(wireId)) {
-      const base = baseFamilyOf(wireId)
-      if (seenBase.has(base)) continue
-      seenBase.add(base)
-      const baseInfo = modelInfo(models[base]) ?? info
-      entries.push({
-        id: base,
-        name: displayNameOf(base, models[base] as Record<string, unknown> ?? {}),
-        contextWindow: baseInfo.maxTokens ?? baseInfo.maxInputTokens ?? baseInfo.inputTokenLimit ?? 1_048_576,
-        inputModalities: baseInfo.supportsImages === true ? ['text', 'image'] : ['text'],
-        reasoningEfforts: antigravityEffortsFor(base),
-      })
-      continue
-    }
-    seenBase.add(wireId)
-    const tiers = /-(?:low|medium|high)$/.test(wireId)
-    const efforts = tiers ? [] : antigravityEffortsFor(wireId)
     const contextWindow = info.maxTokens ?? info.maxInputTokens ?? info.inputTokenLimit ?? 1_048_576
-    entries.push({
+    raw.push({
       id: wireId,
       name: displayNameOf(wireId, models[wireId] as Record<string, unknown> ?? {}),
       contextWindow,
       inputModalities: info.supportsImages === true ? ['text', 'image'] : ['text'],
-      ...efforts.length === 0 ? {} : { reasoningEfforts: efforts },
     })
   }
-  return entries
+  return collapseFamilies(raw)
 }
 
 /** A quota reading normalised to a percentage spent. */
