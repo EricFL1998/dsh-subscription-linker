@@ -40,6 +40,7 @@ import { createArkProvider } from './providers/ark-provider.js'
 import { createMimoProvider } from './providers/mimo-provider.js'
 import { createWorkBuddyProvider } from './providers/workbuddy-provider.js'
 import { ModelPreferences } from './settings.js'
+import { ModelCatalogCache } from './providers/model-cache.js'
 
 /** Plugin id; also the name every effect label and log line is prefixed with. */
 export const name = 'dsh-plugin-subscription-oauth'
@@ -132,6 +133,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   const dataDir = dshHomePath(...KIMI_DATA_DIR)
   const credentialFile = path.join(dataDir, 'auth.json')
   const preferences = new ModelPreferences(path.join(dataDir, 'preferences.json'))
+  // The endpoint's own last answer per route. It is written whenever a route reads its
+  // live listing — at startup, after a login, and on the page's "refresh models" action
+  // — and read as the route's model table, so a picker query is never a request.
+  const catalogCache = new ModelCatalogCache(path.join(dataDir, 'model-catalog.json'))
 
   /** Registration handles, so a catalog change can re-announce one route. */
   const handles = new Map<string, AdapterRegistrationHandle>()
@@ -150,6 +155,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           streamIdleTimeoutMs,
           ...config.defaultModel === undefined ? {} : { defaultModel: config.defaultModel },
           ...config.extraModels === undefined ? {} : { extraModels: config.extraModels },
+          cachedListing: () => catalogCache.read('kimi'),
+          saveListing: (rows) => catalogCache.write('kimi', rows),
           preferences,
           // Resolved per request: the attachment service may start after this plugin.
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
@@ -164,6 +171,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           discovery: config.discovery ?? true,
           streamIdleTimeoutMs,
           preferences,
+          cachedListing: () => catalogCache.read('grok'),
+          saveListing: (payload) => catalogCache.write('grok', payload),
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
           onCatalogChanged: () => { reannounce('grok') },
           onWarn,
@@ -179,6 +188,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
           onCatalogChanged: () => { reannounce('antigravity') },
           onWarn,
+          cachedListing: () => catalogCache.read('antigravity'),
+          saveListing: (payload) => catalogCache.write('antigravity', payload),
           fetchFn: proxiedFetch,
         }))
         break
@@ -188,6 +199,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           discovery: config.discovery ?? true,
           streamIdleTimeoutMs,
           preferences,
+          cachedListing: () => catalogCache.read('glm'),
+          saveListing: (payload) => catalogCache.write('glm', payload),
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
           onCatalogChanged: () => { reannounce('glm') },
           onWarn,
@@ -200,6 +213,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           discovery: config.discovery ?? true,
           streamIdleTimeoutMs,
           preferences,
+          cachedListing: () => catalogCache.read('ark'),
+          saveListing: (payload) => catalogCache.write('ark', payload),
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
           onCatalogChanged: () => { reannounce('ark') },
           onWarn,
@@ -209,8 +224,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       case 'mimo':
         routes.push(createMimoProvider({
           credentialFile,
+          discovery: config.discovery ?? true,
           streamIdleTimeoutMs,
           preferences,
+          cachedListing: () => catalogCache.read('mimo'),
+          saveListing: (payload) => catalogCache.write('mimo', payload),
           resolveAttachments: () => ctx.get('attachments') as AttachmentStore | undefined,
           onCatalogChanged: () => { reannounce('mimo') },
           onWarn,
@@ -220,8 +238,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       case 'workbuddy':
         routes.push(createWorkBuddyProvider({
           credentialFile,
+          discovery: config.discovery ?? true,
           streamIdleTimeoutMs,
           preferences,
+          cachedListing: () => catalogCache.read('workbuddy'),
+          saveListing: (payload) => catalogCache.write('workbuddy', payload),
           onCatalogChanged: () => { reannounce('workbuddy') },
           onWarn,
           fetchFn: proxiedFetch,

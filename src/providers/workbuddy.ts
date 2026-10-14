@@ -3,8 +3,15 @@
  *
  * WorkBuddy chats are chat completions at `https://copilot.tencent.com/v2/chat/completions`,
  * streamed only, and the API refuses a request whose User-Agent is not
- * `WorkBuddy/<version>`. The route ships the China build's catalog (Hy, GLM, Kimi,
- * DeepSeek, MiniMax). Adapted from magpie's `workbuddy` for this plugin's contracts.
+ * `WorkBuddy/<version>`. The model table this route publishes is the console's own
+ * listing — `GET /console/enterprises/<enterpriseId || personal>/models`, the route
+ * WorkBuddy's web console reads — fetched once and kept in this plugin's cache (see
+ * {@link WorkBuddyAdapter.hydrate} and {@link WorkBuddyAdapter.fetchCatalog}).
+ * {@link WORKBUDDY_CATALOG} is the cold-start seed used until a listing has been read,
+ * the fallback when a read fails, and the metadata overlay for a row the listing
+ * describes only partly, so a model released, renamed or retired server-side reaches the
+ * picker without a plugin update and without a request per refresh.
+ * Adapted from magpie's `workbuddy` for this plugin's contracts.
  *
  * @module dsh-plugin-subscription-oauth/providers/workbuddy
  */
@@ -25,10 +32,23 @@ import {
 import { idleWatchdog, mapFetchFailure } from './common.js'
 import { proxiedFetch, type FetchFn } from '../http.js'
 import type { TokenManager } from '../auth/tokens.js'
-import type { CatalogEntry } from './catalog.js'
-import { findEntry } from './catalog.js'
+import type { CatalogEntry, LiveModelFacts } from './catalog.js'
+import { composeCatalog, findEntry, liveEntry } from './catalog.js'
 import { WORKBUDDY_ENDPOINT, workbuddyHeaders, type WorkBuddyTokenSet, type WorkBuddySession } from '../auth/workbuddy-flow.js'
 import { recordSpend } from './workbuddy-credits.js'
+import { appendFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import path from 'node:path'
+
+/** Append one diagnostic line to a file the user can read regardless of where stdout goes. */
+function diag(message: string): void {
+  const line = `[${new Date().toISOString()}] ${message}\n`
+  try {
+    appendFileSync(path.join(homedir(), '.dsh', 'workbuddy-diag.log'), line)
+  } catch {
+    console.warn(`[wb-diag] ${message}`)
+  }
+}
 
 /** The `workbuddy` provider route key (China build). */
 export const WORKBUDDY_PROVIDER_ID = 'workbuddy'
@@ -38,8 +58,32 @@ export const WORKBUDDY_PROVIDER_NAME = 'WorkBuddy'
 export const WORKBUDDY_CODE_URL = 'https://copilot.tencent.com'
 /** The chat completions endpoint. */
 const WORKBUDDY_API = `${WORKBUDDY_ENDPOINT}/v2/chat/completions`
-/** The model the picker preselects. */
-export const WORKBUDDY_DEFAULT_MODEL = 'hy4-preview-f'
+/**
+ * The model the picker preselects.
+ *
+ * The console's own default, and a row its listing actually serves, so the page's
+ * "recommended" marker never names a model the picker cannot offer. The previous value
+ * (`hy4-preview-f`) was a seed-table spelling the live listing does not serve — it offers
+ * `hy4-preview` — which is the staleness this route no longer keeps in its catalog.
+ */
+export const WORKBUDDY_DEFAULT_MODEL = 'auto'
+/** Context advertised for a listed id neither the listing nor the seed table describes. */
+export const WORKBUDDY_FALLBACK_CONTEXT_WINDOW = 168_000
+
+/**
+ * The console route that lists the models one account may use.
+ *
+ * The scope segment is the enterprise the session is attributed to, or `personal` for an
+ * account that states none. This is the route WorkBuddy's own console reads; it is not
+ * one of the plugin's `/v2` API routes, which is why probing those found nothing.
+ *
+ * @param enterpriseId - the session's enterprise, when it has one.
+ * @returns the absolute listing URL.
+ */
+export function workbuddyModelsUrl(enterpriseId?: string): string {
+  const scope = typeof enterpriseId === 'string' && enterpriseId.trim() !== '' ? enterpriseId.trim() : 'personal'
+  return `${WORKBUDDY_ENDPOINT}/console/enterprises/${encodeURIComponent(scope)}/models`
+}
 
 /** One signed-in WorkBuddy session, as stored. */
 export interface WorkBuddyStored {
@@ -55,7 +99,20 @@ export interface WorkBuddyStored {
   refreshExpiresAt?: number
 }
 
-/** The China build's catalog, [id, name, context, efforts?]. */
+/**
+ * The cold-start seed table for the China build's catalog, [id, name, context, efforts?].
+ *
+ * Not the roster. Membership and metadata come from WorkBuddy's own listing (see
+ * {@link WorkBuddyAdapter.fetchCatalog}); this table is what the picker shows until a
+ * listing has been read, what a failed read falls back to, and the metadata overlay for a
+ * listed row that states less than this table knows.
+ *
+ * It cannot be the authority, because it ships with the plugin: a model WorkBuddy
+ * releases, renames or retires server-side would reach a user only through a plugin
+ * update. The live listing already contradicts it — `hy4-preview-f` and `hy3-x` are rows
+ * here that the console does not serve, while `hy4-preview`, `step-5-preview`,
+ * `space-bunny` and `kimi-k2.8-preview` are served and are not rows here.
+ */
 const CN_MODELS: readonly (readonly [string, string, number] | readonly [string, string, number, readonly string[]])[] = [
   ['auto', 'Auto', 168_000],
   ['hy4-preview-f', 'Hy4 preview', 1_000_000, ['high']],
@@ -74,7 +131,14 @@ const CN_MODELS: readonly (readonly [string, string, number] | readonly [string,
   ['deepseek-v4-pro', 'Deepseek-V4-Pro', 1_000_000, ['none', 'high', 'xhigh']],
 ]
 
-/** The catalog the route serves. */
+/**
+ * The seed table the route falls back to when no listing has been read (see
+ * {@link CN_MODELS}).
+ *
+ * A table this build ships, never the roster: WorkBuddy's own listing decides which
+ * models exist, and each row's own figures decide what they are. This is only the
+ * cold-start membership and the overlay for what a listing leaves unsaid.
+ */
 export const WORKBUDDY_CATALOG: readonly CatalogEntry[] = CN_MODELS.map((entry) => {
   const [id, name, contextWindow, efforts] = entry
   return {
@@ -84,6 +148,104 @@ export const WORKBUDDY_CATALOG: readonly CatalogEntry[] = CN_MODELS.map((entry) 
     ...efforts === undefined ? {} : { reasoningEfforts: efforts as readonly string[] },
   }
 })
+
+/** The reasoning rungs this route publishes; a listing's own word outside the ladder is dropped. */
+const REASONING_LADDER: ReadonlySet<string> = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+/** A non-empty trimmed string from a wire field. */
+function textField(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/** A positive whole number from a wire field, stated as a number or as a numeric string. */
+function countField(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
+  if (typeof value !== 'string' || value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined
+}
+
+/**
+ * The facts one row of WorkBuddy's own listing states.
+ *
+ * The shared reader knows the field names Kimi, xAI and BigModel use
+ * (`context_length`, `think_efforts`, `supports_image_in`); WorkBuddy states its own —
+ * `maxInputTokens` (a few rows `contextWindow`, some `maxAllowedSize`), `supportsImages`,
+ * `reasoning.effort` — so a row is read here and the result handed to the shared merge.
+ * A field the row does not state stays absent, so the seed table can describe it.
+ *
+ * @param row - one entry of the listing's `data.models`.
+ * @returns the facts, or undefined when the row names no model.
+ */
+function workbuddyFacts(row: unknown): LiveModelFacts | undefined {
+  if (!isSchemaRecord(row)) return undefined
+  const id = textField(row['id'])
+  if (id === undefined) return undefined
+  const name = textField(row['name'])
+  const description = textField(row['descriptionEn']) ?? textField(row['descriptionZh'])
+  // The row's own order of preference: what it takes per request, the window it states,
+  // then the cap the app applies. The first figure it states is the one it means.
+  const contextWindow = countField(row['maxInputTokens'])
+    ?? countField(row['contextWindow'])
+    ?? countField(row['maxAllowedSize'])
+  // A row is text-only unless it says otherwise; `supportsImages` is the app's own field.
+  const inputModalities = row['supportsImages'] === true ? (['text', 'image'] as const) : (['text'] as const)
+  const reasoning = isSchemaRecord(row['reasoning']) ? row['reasoning'] : undefined
+  const stated = reasoning === undefined ? undefined : textField(reasoning['effort'])?.toLowerCase()
+  // A word the harness has no rung for (`turbo`) is dropped rather than advertised.
+  const rung = stated !== undefined && REASONING_LADDER.has(stated) ? stated : undefined
+  return {
+    id,
+    inputModalities,
+    ...name === undefined ? {} : { name },
+    ...description === undefined ? {} : { description },
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...rung === undefined ? {} : { reasoningEfforts: [rung], defaultEffort: rung },
+  }
+}
+
+/** The `data` object of one listing payload, from either shape a cache may hold. */
+function listingData(payload: unknown): Record<string, unknown> | undefined {
+  if (Array.isArray(payload) || !isSchemaRecord(payload)) return undefined
+  const data = payload['data']
+  if (isSchemaRecord(data)) return data
+  // A cache written as the route's own object (`{models, agents}`) is read too.
+  return 'models' in payload || 'agents' in payload ? payload : undefined
+}
+
+/** The model rows of one listing payload. */
+function listingRows(payload: unknown, data: Record<string, unknown> | undefined): readonly unknown[] {
+  if (Array.isArray(payload)) return payload
+  const models = data?.['models']
+  return Array.isArray(models) ? models : []
+}
+
+/**
+ * The ids WorkBuddy's own console offers, when the listing narrows them.
+ *
+ * The console reads the account's `cli` agent: its `models` list is the set enabled for
+ * this account, and it can be narrower than the model table (models the account may see
+ * but not call). An absent, empty or non-array `cli` entry means the whole table is
+ * available, which is the console's own fallback.
+ *
+ * @param data - the listing's `data` object.
+ * @returns the ids to offer, or undefined when the listing does not narrow them.
+ */
+function cliModelIds(data: Record<string, unknown> | undefined): readonly string[] | undefined {
+  const agents = data?.['agents']
+  if (!Array.isArray(agents)) return undefined
+  for (const agent of agents) {
+    if (!isSchemaRecord(agent) || textField(agent['name']) !== 'cli') continue
+    const models = agent['models']
+    if (!Array.isArray(models)) return undefined
+    const ids = models.flatMap((model) => {
+      const id = textField(model)
+      return id === undefined ? [] : [id]
+    })
+    return ids.length === 0 ? undefined : ids
+  }
+  return undefined
+}
 
 /** A chat-completions choice delta, as the wire frames it. */
 interface ChatChunk {
@@ -104,11 +266,24 @@ interface ChatChunk {
 
 /** Constructor dependencies for {@link WorkBuddyAdapter}. */
 export interface WorkBuddyAdapterOptions {
+  /** Whether the console's live model listing is consulted. */
+  discovery: boolean
   streamIdleTimeoutMs: number
   tokens: TokenManager<WorkBuddySession>
   onWarn?: (message: string) => void
   hiddenModels?: () => Promise<ReadonlySet<string>>
   userModels?: () => Promise<readonly string[]>
+  /**
+   * The listing WorkBuddy's console answered last, as this plugin's cache kept it.
+   *
+   * Read once per session, before the first catalog query, so the picker offers the real
+   * models without asking the console anything. A route that fetched once and cached the
+   * answer has no reason to fetch again on every refresh; the Settings "refresh models"
+   * action is what re-reads it.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
   /** Where per-account credit spends accumulate; beside the credential file. */
   spendFile?: string
   fetchFn?: FetchFn
@@ -150,6 +325,11 @@ function randomHex(): string {
   crypto.getRandomValues(bytes)
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
+
+// DSH runs a turn and a session-title request at the same time on one adapter instance,
+// so nothing a request needs may live on the instance: the tool rename map, the history
+// it rewrites, the text it accumulates, and the credit it bills are all locals, built and
+// consumed inside the one `stream()` call that owns them.
 
 /** A tool's name may hold letters, digits, `_`, `-`; another character is refused. */
 const NAME_OK = /^[A-Za-z0-9_-]+$/
@@ -256,6 +436,16 @@ function objectRoot(node: Record<string, unknown>, root: Record<string, unknown>
 /** The WorkBuddy China wire adapter serving the `workbuddy` route. */
 export class WorkBuddyAdapter extends LlmAdapter {
   private readonly fetchFn: FetchFn
+  /**
+   * The catalog this route serves: entries derived from WorkBuddy's own listing, either
+   * the one just read or the one the cache kept from the last read.
+   *
+   * Undefined means neither source has produced a listing yet, so the seed table
+   * ({@link WORKBUDDY_CATALOG}) is what the picker shows.
+   */
+  private live: readonly CatalogEntry[] | undefined
+  /** Whether the cached listing has been read; it is read at most once per session. */
+  private hydrated = false
 
   constructor(private readonly options: WorkBuddyAdapterOptions) {
     super()
@@ -266,10 +456,69 @@ export class WorkBuddyAdapter extends LlmAdapter {
     return { id: provider, name: WORKBUDDY_PROVIDER_NAME }
   }
 
+  /**
+   * Adopt one listing as this route's catalog.
+   *
+   * Everything the picker shows is derived here from WorkBuddy's own answer: which models
+   * exist (the account's `cli` agent when the listing states one), in the order that
+   * listing states them, each with the name, window, modalities and reasoning rung its row
+   * states. The seed table is consulted only for what a row leaves unsaid, so a live
+   * figure is never overridden by a shipped guess.
+   *
+   * @param payload - the decoded listing, or the `{models, agents}` object a cache kept.
+   * @returns the entries to publish, in picker order.
+   */
+  private adoptListing(payload: unknown): readonly CatalogEntry[] {
+    const data = listingData(payload)
+    const byId = new Map<string, LiveModelFacts>()
+    for (const row of listingRows(payload, data)) {
+      const facts = workbuddyFacts(row)
+      if (facts !== undefined && !byId.has(facts.id)) byId.set(facts.id, facts)
+    }
+    // Membership is the account's own `cli` list when the listing states one, and the
+    // whole model table otherwise: the same rule WorkBuddy's console applies.
+    const membership = cliModelIds(data) ?? [...byId.keys()]
+    const entries: CatalogEntry[] = []
+    const seen = new Set<string>()
+    for (const id of membership) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      entries.push(liveEntry(
+        byId.get(id) ?? { id },
+        WORKBUDDY_CATALOG,
+        WORKBUDDY_FALLBACK_CONTEXT_WINDOW,
+        'Reported by the WorkBuddy model list',
+      ))
+    }
+    return entries
+  }
+
+  /**
+   * Read the cached listing, once, so the picker works without asking the console.
+   *
+   * Called before the first catalog query. A read failure is a cache miss, never a
+   * failure: the route falls back to its seed table until a listing is fetched, so a
+   * broken cache can never empty the picker.
+   */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return
+    this.hydrated = true
+    if (this.live !== undefined || this.options.cachedListing === undefined) return
+    try {
+      const entries = this.adoptListing(await this.options.cachedListing())
+      if (entries.length > 0) this.live = entries
+    } catch (error: unknown) {
+      this.options.onWarn?.(`cached model catalog unavailable (${errorChain(error)})`)
+    }
+  }
+
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    // Nothing to offer without a signed-in account: a model that cannot be called
+    // must not appear in the picker, and Auto must not try it.
     if (await this.options.tokens.session() === undefined) return []
+    await this.hydrate()
     const hidden = await this.hidden()
-    return WORKBUDDY_CATALOG.filter((entry) => !hidden.has(entry.id)).map((entry) => ({
+    return this.shippedCatalog().filter((entry) => !hidden.has(entry.id)).map((entry) => ({
       provider: WORKBUDDY_PROVIDER_ID,
       id: entry.id,
       name: entry.name,
@@ -287,19 +536,62 @@ export class WorkBuddyAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * The catalog to present: the models WorkBuddy's listing named, in the order its own
+   * console states them, each with the metadata that listing stated.
+   *
+   * The seed table is the membership only while no listing has been read, and the metadata
+   * overlay for a row the listing describes partly. It is never allowed to add a row back:
+   * a model the console stopped serving must leave the picker without a plugin update,
+   * which is the whole point of reading the listing instead of shipping a roster.
+   */
+  private shippedCatalog(): readonly CatalogEntry[] {
+    return composeCatalog({
+      curated: WORKBUDDY_CATALOG,
+      ...this.live === undefined ? {} : { live: this.live },
+      fallbackContextWindow: WORKBUDDY_FALLBACK_CONTEXT_WINDOW,
+      liveDescription: 'Reported by the WorkBuddy model list',
+    })
+  }
+
   /** The catalog the Settings list reads. */
   catalogEntries(): readonly CatalogEntry[] {
-    return WORKBUDDY_CATALOG
+    return this.shippedCatalog()
   }
 
   /** The entries the route itself serves, without hand-added extras. */
   ownCatalogEntries(): readonly CatalogEntry[] {
-    return WORKBUDDY_CATALOG
+    return this.shippedCatalog()
+  }
+
+  /**
+   * Adopt the ids a caller reports as the served set, without a listing.
+   *
+   * {@link fetchCatalog} already derived the entries from the listing it read, and the
+   * controller reports those same ids back here; the entries it recorded are kept, so a
+   * live name, window or rung is not replaced by the seed table's. A caller that only has
+   * ids (a test, another discovery path) gets the seed table's metadata where it knows the
+   * id and conservative entries otherwise.
+   *
+   * @param ids - model ids the caller reports.
+   */
+  discover(ids: readonly string[]): void {
+    const known = new Map((this.live ?? []).map((entry) => [entry.id, entry]))
+    this.live = ids.map((id) => known.get(id) ?? liveEntry(
+      { id },
+      WORKBUDDY_CATALOG,
+      WORKBUDDY_FALLBACK_CONTEXT_WINDOW,
+      'Reported by the WorkBuddy model list',
+    ))
   }
 
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const entry = findEntry(WORKBUDDY_CATALOG, model)
+    await this.hydrate()
+    const entry = findEntry(this.shippedCatalog(), model)
     if (entry === undefined) {
+      // An id no source describes is still dispatchable: WorkBuddy is the authority on
+      // what it serves, and a model added after this build should not be refused. It is
+      // advertised conservatively rather than with a guess.
       return {
         provider: WORKBUDDY_PROVIDER_ID,
         id: model,
@@ -308,6 +600,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
         inputModalities: ['text', 'image'],
       }
     }
+    const reasoning = reasoningInfo(entry)
     return {
       provider: WORKBUDDY_PROVIDER_ID,
       id: entry.id,
@@ -315,9 +608,107 @@ export class WorkBuddyAdapter extends LlmAdapter {
       ...entry.description === undefined ? {} : { description: entry.description },
       ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
       context: { contextWindow: entry.contextWindow },
-      ...entry.reasoningEfforts === undefined || entry.reasoningEfforts.length === 0
-        ? {}
-        : { reasoning: { efforts: entry.reasoningEfforts.map((id) => ({ id: ReasoningEffortId(id), name: id })) } },
+      ...reasoning === undefined ? {} : { reasoning },
+    }
+  }
+
+  /**
+   * Read WorkBuddy's own console listing and adopt it as this route's catalog.
+   *
+   * This is the one place a model table is produced, and it is WorkBuddy's own answer: the
+   * account's `cli` agent decides which models are available, and each row states its own
+   * name, window, modalities and reasoning rung (see {@link adoptListing}). The payload is
+   * also handed to {@link WorkBuddyAdapterOptions.saveListing}, so the next session starts
+   * from this table instead of asking again — the Settings "refresh models" action is what
+   * re-reads it, and a picker query never does.
+   *
+   * A failed or empty read keeps the catalog the route already had, and says so once.
+   *
+   * @param accessToken - bearer for the account.
+   * @param enterpriseId - the enterprise to read; taken from the stored session when omitted.
+   * @param signal - optional cancellation.
+   * @returns the model ids now served, or undefined when the listing is unavailable.
+   */
+  async fetchCatalog(
+    accessToken: string,
+    enterpriseId?: string,
+    signal?: AbortSignal,
+  ): Promise<readonly string[] | undefined> {
+    if (!this.options.discovery) return undefined
+    try {
+      // The cached listing is read first, so a read that fails leaves the route on the
+      // table the endpoint itself answered last rather than on the seed this build ships.
+      await this.hydrate()
+      // The console route is attributed by the session's own fields (`X-User-Id`, the
+      // domain, the enterprise), so the session the caller's token belongs to is read back.
+      const held = await this.sessionFor(accessToken)
+      const scope = enterpriseId ?? held?.enterpriseId
+      const token: WorkBuddyTokenSet = {
+        ...held ?? { accessToken, expiresAt: 0 },
+        accessToken,
+        ...scope === undefined ? {} : { enterpriseId: scope },
+      }
+      const response = await this.fetchFn(workbuddyModelsUrl(scope), {
+        headers: {
+          ...workbuddyHeaders(token),
+          // The console route is an XHR endpoint: it states the encodings it accepts and
+          // refuses a request that does not present itself as the console's own.
+          'Accept': 'application/json, text/plain, */*',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        ...signal === undefined ? {} : { signal },
+      })
+      if (!response.ok) {
+        this.options.onWarn?.(`WorkBuddy model list unavailable (HTTP ${response.status}); keeping the last catalog`)
+        return undefined
+      }
+      const payload: unknown = await response.json()
+      const entries = this.adoptListing(payload)
+      if (entries.length === 0) {
+        this.options.onWarn?.('WorkBuddy model discovery returned an empty catalog; keeping the last catalog')
+        return undefined
+      }
+      this.live = entries
+      // The endpoint's own payload is what is kept, so a later build that reads more of it
+      // benefits from a cache this one wrote. A cache failure never fails the read that
+      // produced it.
+      if (this.options.saveListing !== undefined) {
+        try {
+          await this.options.saveListing(payload)
+        } catch (error: unknown) {
+          this.options.onWarn?.(`model catalog cache write failed (${errorChain(error)})`)
+        }
+      }
+      return entries.map((entry) => entry.id)
+    } catch (error: unknown) {
+      if (signal?.aborted === true) return undefined
+      this.options.onWarn?.(`WorkBuddy model list unavailable; keeping the last catalog (${errorChain(error)})`)
+      return undefined
+    }
+  }
+
+  /**
+   * The stored session one access token belongs to.
+   *
+   * Discovery is handed the account's token rather than the session it came from, and the
+   * console route is attributed by that session's own fields, so the session is read back
+   * here. The first account whose stored token matches wins; a token that matches none
+   * falls back to the route's current session. A read failure is never fatal — the listing
+   * is still read with the token the caller passed.
+   *
+   * @param accessToken - the token discovery was called with.
+   * @returns the session's fields as a signable token, or undefined when none was readable.
+   */
+  private async sessionFor(accessToken: string): Promise<WorkBuddyTokenSet | undefined> {
+    try {
+      for (const account of await this.options.tokens.accounts()) {
+        const held = await this.options.tokens.session(account)
+        if (held?.session.accessToken === accessToken) return this.tokenOf(held.session)
+      }
+      const current = await this.options.tokens.session()
+      return current === undefined ? undefined : this.tokenOf(current.session)
+    } catch {
+      return undefined
     }
   }
 
@@ -326,18 +717,21 @@ export class WorkBuddyAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    diag(`stream entered: model=${options.model} provider=${options.provider}`)
     const held = await this.options.tokens.session()
     if (held === undefined) throw new Error('WorkBuddy is not signed in')
     const token = this.tokenOf(held.session)
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     // Capture the tool-call history so unsafe tool names in past turns can be renamed to
     // the safe ones the model now sees, keeping the conversation consistent.
-    this.historyMessages = options.messages.filter((message) => message.role === 'assistant' || message.role === 'tool') as unknown as Record<string, unknown>[]
+    const history = options.messages.filter((message) => message.role === 'assistant' || message.role === 'tool') as unknown as Record<string, unknown>[]
     // The last usage frame carries the turn's real billed credit; record it so the spend
     // total is a sum of real figures, not an estimate.
-    this.turnCredit = 0
+    const turn = { credit: 0 }
+    diag(`stream start: model=${options.model} account=${held.account} expiresAt=${held.session.expiresAt} now=${Date.now()}`)
     try {
-      const body = this.requestBody(options)
+      const { body, names } = this.requestBody(options, history)
+      diag(`body: keys=${Object.keys(body).join(',')} messages=${Array.isArray(body.messages) ? body.messages.length : 0} model=${String(body.model)}`)
       const response = await this.fetchFn(WORKBUDDY_API, {
         method: 'POST',
         headers: {
@@ -355,24 +749,22 @@ export class WorkBuddyAdapter extends LlmAdapter {
         body: JSON.stringify(body),
         signal: watchdog.signal,
       })
+      diag(`response: status=${response.status} ok=${response.ok} ct=${response.headers.get('content-type') ?? ''}`)
       // WorkBuddy refuses a chat mid-stream when the request carries words it filters; a
       // 403/400 here names why, so surface it instead of dying on an empty stream.
       if (!response.ok || response.body === null) {
         throw await this.errorOf(response)
       }
-      yield* this.readStream(response, watchdog)
+      yield* this.readStream(response, watchdog, names, turn)
     } catch (error) {
       throw mapFetchFailure(WORKBUDDY_PROVIDER_NAME, error, watchdog, options.signal)
     } finally {
       watchdog.stop()
-      if (this.turnCredit > 0 && this.options.spendFile !== undefined) {
-        void recordSpend(this.options.spendFile, held.account, this.turnCredit).catch(() => {})
+      if (turn.credit > 0 && this.options.spendFile !== undefined) {
+        void recordSpend(this.options.spendFile, held.account, turn.credit).catch(() => {})
       }
     }
   }
-
-  /** The current turn's billed credit, read off the last usage frame. */
-  private turnCredit = 0
 
   /** The stored session's fields as the token the request signs with. */
   private tokenOf(session: WorkBuddySession): WorkBuddyTokenSet {
@@ -388,7 +780,10 @@ export class WorkBuddyAdapter extends LlmAdapter {
     }
   }
 
-  private requestBody(options: GenerateOptions): Record<string, unknown> {
+  private requestBody(
+    options: GenerateOptions,
+    history: Record<string, unknown>[],
+  ): { body: Record<string, unknown>, names: Map<string, string> } {
     const messages: Record<string, unknown>[] = []
     for (const message of options.messages) {
       messages.push(this.toChatMessage(message))
@@ -398,13 +793,19 @@ export class WorkBuddyAdapter extends LlmAdapter {
     // Claude Code's own) out of every message — WorkBuddy reads them all, whatever role.
     const system = this.systemPrompt(options)
     messages.unshift({ role: 'system', content: system })
-    const tools = this.fittedTools(options.tools)
+    const tools = this.fittedTools(options.tools, history)
     return {
-      model: options.model,
-      messages: unflagMessages(messages),
-      ...tools === undefined ? {} : { tools: tools.tools },
-      ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
-      stream: true,
+      body: {
+        model: options.model,
+        messages: unflagMessages(messages),
+        ...tools === undefined ? {} : { tools: tools.tools },
+        ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      // The names this request mended, handed to the reader that renames the answer back:
+      // a request that declared no tools gets its own empty map, never a neighbour's.
+      names: tools?.names ?? new Map<string, string>(),
     }
   }
 
@@ -413,13 +814,14 @@ export class WorkBuddyAdapter extends LlmAdapter {
    *
    * A tool name may hold only letters, digits, `_`, `-`; another character is refused, and
    * a schema with a union at the parameter root or a `\0` escape is turned away by the
-   * model. Each unsafe name is made safe and the safe→original map kept on the adapter so
-   * the model's calls can be renamed back in the answer. Adapted from magpie's fitTools.
+   * model. Each unsafe name is made safe and the safe→original map returned to the caller
+   * so the model's calls can be renamed back in the answer. Adapted from magpie's fitTools.
    *
    * @param tools - the declared tool schemas, when any.
+   * @param history - the request's assistant/tool turns, renamed in place to the safe names.
    * @returns the mended wire tools, or undefined when there are none.
    */
-  private fittedTools(tools: readonly ToolSchema[] | undefined): { tools: Record<string, unknown>[], names: Map<string, string> } | undefined {
+  private fittedTools(tools: readonly ToolSchema[] | undefined, history: Record<string, unknown>[]): { tools: Record<string, unknown>[], names: Map<string, string> } | undefined {
     if (tools === undefined || tools.length === 0) return undefined
     const wire: Record<string, unknown>[] = tools.map((tool) => ({
       type: 'function',
@@ -454,7 +856,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
     }
     // Rename the calls in the conversation history to the safe names, so a turn that
     // already called a tool matches the name the model now sees.
-    for (const message of this.historyMessages ?? []) {
+    for (const message of history) {
       for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
         const fn = call?.function
         if (fn && typeof fn.name === 'string' && theirs.has(fn.name)) fn.name = theirs.get(fn.name)
@@ -463,23 +865,17 @@ export class WorkBuddyAdapter extends LlmAdapter {
         message.name = theirs.get(message.name)
       }
     }
-    this.safeToolNames = names
     return { tools: wire, names }
   }
-
-  /** The safe→original tool names to restore in the answer. */
-  private safeToolNames: Map<string, string> = new Map()
-
-  /** The assistant/tool history of the request being built, for renaming past calls. */
-  private historyMessages: Record<string, unknown>[] = []
 
   /**
    * Restore the original tool names the model was given, in one parsed chunk.
    *
    * @param value - a decoded SSE payload.
+   * @param names - the safe→original map the request that produced this stream mended.
    * @returns whether any name changed.
    */
-  private namedBack(value: Record<string, unknown>): boolean {
+  private namedBack(value: Record<string, unknown>, names: Map<string, string>): boolean {
     let changed = false
     for (const choice of Array.isArray(value.choices) ? value.choices : []) {
       if (!isSchemaRecord(choice)) continue
@@ -487,7 +883,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
         if (!isSchemaRecord(at)) continue
         for (const call of Array.isArray(at.tool_calls) ? at.tool_calls : []) {
           if (!isSchemaRecord(call) || !isSchemaRecord(call.function)) continue
-          const original = this.safeToolNames.get(String(call.function.name))
+          const original = names.get(String(call.function.name))
           if (original !== undefined) {
             call.function.name = original
             changed = true
@@ -549,16 +945,37 @@ export class WorkBuddyAdapter extends LlmAdapter {
     )
   }
 
-  private async *readStream(response: Response, watchdog: ReturnType<typeof idleWatchdog>): AsyncIterable<StreamChunk> {
+  private async *readStream(
+    response: Response,
+    watchdog: ReturnType<typeof idleWatchdog>,
+    names: Map<string, string>,
+    turn: { credit: number },
+  ): AsyncIterable<StreamChunk> {
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     let started = false
+    // `block-end` carries the *assembled* block, and the harness takes that one as the
+    // block's final content - it does not keep what the deltas accumulated. An empty text
+    // there renders the whole answer as a blank body, whatever streamed before it.
+    let text = ''
+    // One entry per tool call the model streams: its own block index, its identity, and the
+    // argument fragments seen so far. Calls are indexed past the text block so a reply that
+    // both writes and calls assembles as two blocks instead of folding the call into the
+    // text block (where it is silently lost and the harness loops on a call that never ran).
+    const calls = new Map<number, { index: number, id: string, name: string, args: string }>()
+    let framesSeen = 0
+    let bytesSeen = 0
+    let firstBytes = ''
+    let sawToolCall = false
+    diag(`stream open: status=${response.status} content-type=${response.headers.get('content-type') ?? ''}`)
     try {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
         watchdog.pulse()
+        bytesSeen += value.byteLength
+        if (firstBytes.length < 200) firstBytes += decoder.decode(value.slice(0, 200 - firstBytes.length), { stream: false })
         buffer += decoder.decode(value, { stream: true })
         // WorkBuddy's SSE frames are blank-line separated, whatever the platform's line
         // ending (\n, \r\n, or \r alone): split on any blank line so a \r\n stream is not
@@ -571,13 +988,17 @@ export class WorkBuddyAdapter extends LlmAdapter {
             .filter((line) => line.startsWith('data:'))
             .map((line) => line.slice(5).trim())
             .join('\n')
+          framesSeen += 1
+          if (framesSeen <= 6) diag(`f${framesSeen} raw-data=${JSON.stringify(data.slice(0, 100))}`)
           if (data === '' || data === '[DONE]') continue
           let chunk: ChatChunk
           try {
             chunk = JSON.parse(data) as ChatChunk
-          } catch {
+          } catch (error) {
+            if (framesSeen <= 6) diag(`f${framesSeen} PARSE FAIL: ${error instanceof Error ? error.message : String(error)}`)
             continue
           }
+          if (framesSeen <= 6) diag(`f${framesSeen} delta=${JSON.stringify(chunk.choices?.[0]?.delta ?? null).slice(0, 120)}`)
           // WorkBuddy names a refusal mid-stream (an error frame, or a body with a non-zero
           // code): surface it instead of reading the rest as silence, so the turn fails with
           // the reason rather than stopping after a few empty seconds.
@@ -593,23 +1014,35 @@ export class WorkBuddyAdapter extends LlmAdapter {
           }
           // Restore the tool names the model called to the ones the client declared, before
           // the chunk is read as a stream event.
-          this.namedBack(chunk as Record<string, unknown>)
+          this.namedBack(chunk as Record<string, unknown>, names)
           // A tool-call delta: emit it so the harness can run the tool. The id and name ride
           // the first delta of each call; later deltas carry argument fragments.
           const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
           if (Array.isArray(toolCalls)) {
+            if (framesSeen <= 8) diag(`f${framesSeen} tool_calls=${JSON.stringify(toolCalls).slice(0, 160)}`)
             for (const call of toolCalls) {
               const fn = call?.function
               if (fn === undefined || fn === null) continue
-              const index = call.index ?? 0
-              const id = ToolCallId(call.id ?? `wb-tool-${index}`)
-              const name = fn.name
-              const args = fn.arguments
-              if (typeof name === 'string' && name !== '') {
-                yield { type: 'tool-call-delta', index, id, name, argumentsDelta: '' }
+              const name = typeof fn.name === 'string' ? fn.name : ''
+              const args = typeof fn.arguments === 'string' ? fn.arguments : ''
+              const slot = call.index ?? 0
+              let open = calls.get(slot)
+              // A reply ends with an empty function stub that is not a call: opening a block
+              // for it would end the turn as `tool-calls` with nothing for the harness to run.
+              if (open === undefined && name === '' && args === '') continue
+              if (open === undefined) {
+                open = { index: 1 + slot, id: call.id ?? `wb-tool-${slot}`, name: '', args: '' }
+                calls.set(slot, open)
+                sawToolCall = true
+                yield { type: 'block-start', index: open.index, blockType: 'tool-call' }
               }
-              if (typeof args === 'string' && args !== '') {
-                yield { type: 'tool-call-delta', index, id, argumentsDelta: args }
+              if (name !== '' && open.name === '') {
+                open.name = name
+                yield { type: 'tool-call-delta', index: open.index, id: ToolCallId(open.id), name, argumentsDelta: '' }
+              }
+              if (args !== '') {
+                open.args += args
+                yield { type: 'tool-call-delta', index: open.index, id: ToolCallId(open.id), argumentsDelta: args }
               }
             }
           }
@@ -619,6 +1052,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
               yield { type: 'block-start', index: 0, blockType: 'text' }
               started = true
             }
+            text += delta
             yield { type: 'text-delta', index: 0, text: delta }
           }
           const usage = chunk.usage
@@ -628,7 +1062,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
             // The last usage frame carries the real billed credit; keep the latest, so a
             // mid-stream retry does not double-count.
             if (typeof usage.credit === 'number' && Number.isFinite(usage.credit)) {
-              this.turnCredit = usage.credit
+              turn.credit = usage.credit
             }
             yield {
               type: 'usage',
@@ -637,16 +1071,43 @@ export class WorkBuddyAdapter extends LlmAdapter {
           }
         }
       }
-      if (started) yield { type: 'block-end', index: 0, block: { type: 'text', text: '' } }
-      // A stream that produced no text and no error usually means the gateway accepted the
-      // request then closed it: name that in the console so the next F12 shows why the turn
-      // stopped, instead of a silent finish that reads as a clean answer.
-      if (!started) {
-        console.warn(`[subscription-oauth] WorkBuddy stream ended with no text after ${String(this.turnCredit > 0 ? 'some' : 'no')} credit; the gateway likely cut it.`)
+      // Close every open block with its assembled content: `block-end` is the block the
+      // harness keeps, so the text that streamed has to ride it.
+      if (started) yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      for (const open of calls.values()) {
+        yield {
+          type: 'block-end',
+          index: open.index,
+          block: { type: 'tool-call', id: ToolCallId(open.id), name: open.name, arguments: open.args },
+        }
       }
-      yield { type: 'finish', reason: { kind: 'stop' } }
+      diag(`stream done: frames=${framesSeen} bytes=${bytesSeen} started=${started} text=${text.length} calls=${calls.size} sawToolCall=${sawToolCall} firstBytes=${JSON.stringify(firstBytes.slice(0, 80))}`)
+      // A turn that called a tool ends with the tool-call reason, not stop: the harness
+      // runs the tool and feeds the result back. A stop reason here would read as a clean,
+      // complete answer and the tool would never run.
+      yield sawToolCall
+        ? { type: 'finish', reason: { kind: 'tool-calls' } }
+        : { type: 'finish', reason: { kind: 'stop' } }
     } finally {
       reader.cancel().catch(() => {})
     }
+  }
+}
+
+/**
+ * The reasoning block for a catalog entry, or undefined when it supports none.
+ *
+ * The ladder is whatever the entry ended up with: the listing's own rung where it stated
+ * one, the seed table's where it did not.
+ *
+ * @param entry - the catalog row.
+ * @returns the reasoning block to advertise, when the row has a ladder.
+ */
+function reasoningInfo(entry: CatalogEntry) {
+  const efforts = entry.reasoningEfforts
+  if (efforts === undefined || efforts.length === 0) return undefined
+  return {
+    efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: String(effort) })),
+    ...entry.defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(entry.defaultEffort) },
   }
 }

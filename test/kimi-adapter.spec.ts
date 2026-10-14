@@ -24,15 +24,61 @@ function tokenManager(resolve?: TokenManager<KimiSession>['resolve']): TokenMana
   return manager as unknown as TokenManager<KimiSession>
 }
 
-/** Adapter options with a recording fetch. */
+/**
+ * The listing the Kimi Code endpoint answered with, captured from the live service.
+ *
+ * The catalog is derived from this and nothing else, so every test that cares what the
+ * picker shows states the listing it should be derived from. `k3` carries 1M here, which
+ * is the fact the endpoint corrected: it retired the `k3[1m]` selector and folded the
+ * window into the plain id.
+ */
+const LISTING: readonly unknown[] = [
+  {
+    id: 'kimi-for-coding',
+    display_name: 'K2.8 Preview',
+    context_length: 1_048_576,
+    modalities: { input: ['text', 'image', 'video'], output: ['text'] },
+    think_efforts: { support: true, valid_efforts: ['low', 'high', 'max'], default_effort: 'max' },
+  },
+  {
+    id: 'kimi-for-coding-highspeed',
+    display_name: 'K2.7 Code Highspeed',
+    context_length: 262_144,
+    modalities: { input: ['text', 'image'], output: ['text'] },
+  },
+  {
+    id: 'k3',
+    display_name: 'K3',
+    context_length: 1_048_576,
+    modalities: { input: ['text', 'image'], output: ['text'] },
+    think_efforts: { support: true, valid_efforts: ['low', 'high', 'max'], default_effort: 'high' },
+  },
+  {
+    id: 'k3-256k',
+    display_name: 'K3-256k',
+    context_length: 262_144,
+    modalities: { input: ['text', 'image'], output: ['text'] },
+    think_efforts: { support: true, valid_efforts: ['low', 'high', 'max'], default_effort: 'high' },
+  },
+]
+
+/** Adapter options with a recording fetch and one cached listing. */
 function options(overrides: Partial<KimiAdapterOptions> = {}): KimiAdapterOptions {
   return {
     apiBase: 'https://api.kimi.com/coding/v1',
     discovery: false,
     streamIdleTimeoutMs: 5_000,
     tokens: tokenManager(),
+    cachedListing: async () => LISTING,
     ...overrides,
   }
+}
+
+/** Adapter options with no cached listing: a first run that has neither fetched nor cached. */
+function cold(overrides: Partial<KimiAdapterOptions> = {}): KimiAdapterOptions {
+  const base: KimiAdapterOptions = { ...options(), ...overrides }
+  delete (base as { cachedListing?: () => Promise<unknown> }).cachedListing
+  return base
 }
 
 /** A minimal one-turn request. */
@@ -58,6 +104,16 @@ function sseResponse(events: unknown[]): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
 }
 
+/** Capture the body of the next wire request. */
+function recorder(): { fetchFn: typeof fetch, body(): Record<string, unknown> } {
+  let body: Record<string, unknown> = {}
+  const fetchFn: typeof fetch = async (_input, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return sseResponse([{ type: 'response.completed', response: {} }])
+  }
+  return { fetchFn, body: () => body }
+}
+
 describe('KimiAdapter catalog', () => {
   test('describes the route it serves', () => {
     const adapter = new KimiAdapter(options())
@@ -65,28 +121,127 @@ describe('KimiAdapter catalog', () => {
     assert.equal(adapter.providerRetryPolicy(), undefined)
   })
 
-  test('lists the curated models in order', async () => {
+  test('publishes what the endpoint last listed, with the endpoint own metadata', async () => {
     const adapter = new KimiAdapter(options())
     const models = await adapter.listModels('kimi')
-    // The fast variant rides beside its row in the host-facing list: the host validates
-    // a GUI selection against that list and refuses an unknown id, so the variant must
-    // be present even though the picker's model seat shows only the row.
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'])
+    // Membership, names and windows are the listing's, not a table this build ships. Note
+    // that `k3` is 1M here: the endpoint folded the long window into the plain id.
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3-256k'])
+    assert.equal(models[0]?.name, 'K2.8 Preview')
     assert.equal(models[0]?.provider, 'kimi')
+    // `video` is not in the harness vocabulary, so it is not advertised.
     assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
+    assert.equal((await adapter.resolveModel('kimi', 'k3')).context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
+    assert.equal((await adapter.resolveModel('kimi', 'k3-256k')).context?.contextWindow, KIMI_CONTEXT_WINDOW)
   })
 
-  test('resolves a model alias onto its curated entry', async () => {
+  test('a picker query never asks the endpoint', async () => {
+    let calls = 0
+    const fetchFn: typeof fetch = async () => {
+      calls += 1
+      throw new Error('the picker must not fetch')
+    }
+    const adapter = new KimiAdapter(options({ fetchFn }))
+    // The cached listing is the table; a query renders it and nothing else.
+    assert.equal((await adapter.listModels('kimi')).length, 3)
+    await adapter.resolveModel('kimi', 'k3')
+    assert.equal(calls, 0)
+  })
+
+  test('a listing decides both membership and metadata, with no shipped table', async () => {
+    // A listing from a future service: one model this build never heard of, and no `k3`
+    // at all. It is published as the endpoint states it, not as this build remembers it.
+    const adapter = new KimiAdapter(options({
+      cachedListing: async () => [
+        { id: 'k4', display_name: 'K4', context_length: 2_097_152 },
+        { id: 'k3', display_name: 'K3', context_length: 1_048_576 },
+      ],
+    }))
+    const models = await adapter.listModels('kimi')
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k4', 'k3'])
+    const resolved = await adapter.resolveModel('kimi', 'k4')
+    assert.equal(resolved.name, 'K4')
+    assert.equal(resolved.context?.contextWindow, 2_097_152)
+    // A model the listing omits is not offered, however familiar its id is.
+    assert.equal(adapter.catalogEntries().some((entry) => entry.id === 'k3-256k'), false)
+  })
+
+  test('the retired k3[1m] selector is never a row and answers as k3', async () => {
     const adapter = new KimiAdapter(options())
-    const resolved = await adapter.resolveModel('kimi', 'kimi-k2.7-code')
-    assert.equal(resolved.id, 'kimi-for-coding')
+    assert.equal((await adapter.listModels('kimi')).some((model) => model.id === 'k3[1m]'), false)
+    // A session that saved the old spelling answers with the model that replaced it, and
+    // the 1M window the endpoint now folds into `k3`.
+    const resolved = await adapter.resolveModel('kimi', 'k3[1m]')
+    assert.equal(resolved.id, 'k3')
+    assert.equal(resolved.name, 'K3')
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
   })
 
-  test('pairs the fast variant its own aliases name', async () => {
+  test('a model the listing does not name resolves conservatively', async () => {
     const adapter = new KimiAdapter(options())
-    // `kimi-for-coding-highspeed` is listed as an accepted id of the row, which is the
-    // recognition the composer's quick-mode button needs — no discovery run required.
+    // The endpoint is the authority on ids this build has never seen: `k4` may serve even
+    // though no cached listing mentions it yet, so it is not refused here.
+    const resolved = await adapter.resolveModel('kimi', 'k4')
+    assert.equal(resolved.id, 'k4')
+    assert.equal(resolved.context?.contextWindow, KIMI_CONTEXT_WINDOW)
+  })
+
+  test('the endpoint can rename a model mid-session and the next turn follows', async () => {
+    // The endpoint's own refusal names the id to use; that answer is worth more than any
+    // table this build ships, so the turn is retried and later turns go straight there.
+    // The body below is verbatim from the live service.
+    const refusal = JSON.stringify({
+      error: {
+        message: 'Your model id does not exist, recognized as other:k9. Please set model id as `k9-preview`.',
+        type: 'invalid_authentication_error',
+      },
+    })
+    const seen: string[] = []
+    const fetchFn: typeof fetch = async (_input, init) => {
+      const model = (JSON.parse(String(init?.body)) as { model: string }).model
+      seen.push(model)
+      if (model === 'k9') {
+        return new Response(refusal, { status: 401, headers: { 'content-type': 'application/json' } })
+      }
+      return sseResponse([{ type: 'response.completed', response: {} }])
+    }
+    const warnings: string[] = []
+    const adapter = new KimiAdapter(options({ fetchFn, onWarn: (message) => warnings.push(message) }))
+    await collect(adapter.stream(request({ model: 'k9' })))
+    assert.deepEqual(seen, ['k9', 'k9-preview'])
+    assert.match(warnings.join('\n'), /model k9 is retired; using k9-preview/)
+    // The rename is remembered, so the refused request is paid once.
+    await collect(adapter.stream(request({ model: 'k9' })))
+    assert.deepEqual(seen, ['k9', 'k9-preview', 'k9-preview'])
+  })
+
+  test('an unknown model does not mark the account as needing a new login', async () => {
+    // A 401 for a model id is not a credential failure: refreshing the token and flagging
+    // the account would both be wrong, and would hide the real cause.
+    const rejected: string[] = []
+    const forced: boolean[] = []
+    const manager = tokenManager(async (account?, force?) => {
+      forced.push(force === true)
+      return { account: account ?? 'user-1', accessToken: 'token', expiresAt: Date.now() + 60_000 }
+    })
+    const fetchFn: typeof fetch = async () => new Response(JSON.stringify({
+      error: { message: 'Your model id does not exist, recognized as other:k9. Please set model id as `k9-preview`' },
+    }), { status: 401, headers: { 'content-type': 'application/json' } })
+    const adapter = new KimiAdapter(options({
+      fetchFn,
+      tokens: manager,
+      onCredentialRejected: (account) => rejected.push(account),
+    }))
+    await assert.rejects(collect(adapter.stream(request({ model: 'k9' }))))
+    assert.deepEqual(rejected, [])
+    assert.deepEqual(forced, [false])
+  })
+
+  test('pairs the fast variant the listing names', async () => {
+    const adapter = new KimiAdapter(options())
+    await adapter.hydrate()
+    // `kimi-for-coding-highspeed` is a row of the listing; it is recognized as a variant of
+    // the row whose id it extends, which is the recognition the quick-mode button needs.
     assert.deepEqual(adapter.fastPairOf('kimi-for-coding'), {
       baseId: 'kimi-for-coding',
       wireId: 'kimi-for-coding-highspeed',
@@ -105,9 +260,10 @@ describe('KimiAdapter catalog', () => {
     assert.equal(models.some((model) => model.id === 'kimi-for-coding-highspeed'), false)
     assert.equal(models.some((model) => model.id === 'kimi-for-coding'), true)
     const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
-    // An alias resolves onto the row's own id, so a stale fast selection unsticks itself.
+    // A variant is a wire id, not a row, so a stale selection of one resolves onto the row
+    // that owns it — with the row's own name and window, which is what the listing stated.
     assert.equal(resolved.id, 'kimi-for-coding')
-    assert.equal(resolved.name, 'Kimi for Coding')
+    assert.equal(resolved.name, 'K2.8 Preview')
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
     // The row carries the `fast` rung, which is what the quick-mode button selects.
     assert.equal(
@@ -117,26 +273,61 @@ describe('KimiAdapter catalog', () => {
     )
   })
 
-  test('folds a live fast id into the row it belongs to', async () => {
+  test('folds a live variant into the row it belongs to, and caches the listing', async () => {
+    const saved: unknown[] = []
     const fetchFn: typeof fetch = async () =>
       Response.json({ data: [{ id: 'kimi-for-coding' }, { id: 'kimi-for-coding-turbo' }, { id: 'k3' }] })
-    const adapter = new KimiAdapter(options({ discovery: true, fetchFn }))
-    // The live variant is not a row of its own; it rides its row, and being live it
-    // replaces the curated alias for that row.
+    const adapter = new KimiAdapter(cold({
+      discovery: true,
+      fetchFn,
+      saveListing: async (payload) => { saved.push(payload) },
+    }))
+    // The variant is not a row of its own; it rides its row, and the ids the fetch reports
+    // are the rows the picker shows.
     assert.deepEqual(await adapter.fetchCatalog('token'), ['kimi-for-coding', 'k3'])
     assert.deepEqual(adapter.fastPairOf('kimi-for-coding'), {
       baseId: 'kimi-for-coding',
       wireId: 'kimi-for-coding-turbo',
     })
+    // The endpoint's own rows are what is cached, verbatim, so the next session derives
+    // the same table without asking again.
+    assert.deepEqual(saved, [[{ id: 'kimi-for-coding' }, { id: 'kimi-for-coding-turbo' }, { id: 'k3' }]])
+    assert.deepEqual((await adapter.listModels('kimi')).map((model) => model.id), ['kimi-for-coding', 'k3'])
   })
 
-  test('exposes the reasoning ladder with its default', async () => {
+  test('a failed listing keeps the last catalog and says so once', async () => {
+    const warnings: string[] = []
+    const fetchFn: typeof fetch = async () => new Response('nope', { status: 503 })
+    const adapter = new KimiAdapter(cold({
+      discovery: true,
+      fetchFn,
+      onWarn: (message) => warnings.push(message),
+    }))
+    assert.equal(await adapter.fetchCatalog('token'), undefined)
+    assert.match(warnings.join('\n'), /Kimi model discovery failed \(HTTP 503\)/)
+    // The fetch failed, so there is no listing: only the configured default is offered.
+    assert.deepEqual((await adapter.listModels('kimi')).map((model) => model.id), ['kimi-for-coding'])
+  })
+
+  test('exposes the reasoning ladder the listing stated', async () => {
     const adapter = new KimiAdapter(options())
     const resolved = await adapter.resolveModel('kimi', 'k3')
-    assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'medium', 'high', 'max'])
-    assert.equal(String(resolved.reasoning?.defaultEffort), 'max')
-    assert.equal(resolved.context?.contextWindow, KIMI_CONTEXT_WINDOW)
+    // The ladder is the endpoint's (`low`, `high`, `max`), not a shipped ladder, and its
+    // default is the endpoint's too.
+    assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high', 'max'])
+    assert.equal(String(resolved.reasoning?.defaultEffort), 'high')
+    assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
     assert.equal(resolved.defaultMaxTokens, 32_000)
+  })
+
+  test('offers the fast rung beside the ladder for a row that has a variant', async () => {
+    const adapter = new KimiAdapter(options())
+    const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding')
+    assert.deepEqual(
+      resolved.reasoning?.efforts.map((effort) => String(effort.id)),
+      ['low', 'high', 'max', 'highspeed'],
+    )
+    assert.equal(String(resolved.reasoning?.defaultEffort), 'max')
   })
 
   test('resolves an unknown model with the standard window and shared ladder', async () => {
@@ -145,29 +336,35 @@ describe('KimiAdapter catalog', () => {
     assert.equal(resolved.id, 'k3-next')
     assert.equal(resolved.name, 'k3-next')
     assert.equal(resolved.context?.contextWindow, KIMI_CONTEXT_WINDOW)
-    assert.equal(resolved.reasoning?.efforts.length, 4)
+    // The ladder is borrowed from the route's default model, which the listing described.
+    assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high', 'max'])
   })
 
-  test('keeps every shipped model when the live list is narrower', async () => {
-    const adapter = new KimiAdapter(options())
-    adapter.discover(['kimi-for-coding', 'k3', 'k3-256k'])
+  test('appends configured extra models after the listing', async () => {
+    const adapter = new KimiAdapter(options({ extraModels: ['k3-next', 'k3'] }))
     const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'])
-  })
-
-  test('appends live ids this build does not know', async () => {
-    const adapter = new KimiAdapter(options())
-    adapter.discover(['k3', 'k3-next', 'k3-next', 'kimi-k3'])
-    const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
-    assert.match(models.at(-1)?.description ?? '', /model list/)
-  })
-
-  test('appends configured extra models', async () => {
-    const adapter = new KimiAdapter(options({ extraModels: ['k3-next', 'k3'], discovery: true }))
-    const models = await adapter.listModels('kimi')
-    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'])
+    assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3-256k', 'k3-next'])
     assert.match(models.at(-1)?.description ?? '', /plugin configuration/)
+  })
+
+  test('always offers the configured default model', async () => {
+    const adapter = new KimiAdapter(options({
+      defaultModel: 'kimi-for-coding',
+      cachedListing: async () => [{ id: 'k3', display_name: 'K3', context_length: 1_048_576 }],
+    }))
+    // A subscription that re-points its alias at a new release follows the config: the
+    // model the picker preselects stays selectable even when this listing omits it.
+    assert.deepEqual(
+      (await adapter.listModels('kimi')).map((model) => model.id),
+      ['kimi-for-coding', 'k3'],
+    )
+  })
+
+  test('offers only the configured default before any listing exists', async () => {
+    const adapter = new KimiAdapter(cold())
+    // A first run that has neither fetched nor cached anything: the picker can still
+    // select the model the route preselects, and nothing else is invented.
+    assert.deepEqual((await adapter.listModels('kimi')).map((model) => model.id), ['kimi-for-coding'])
   })
 })
 
@@ -411,7 +608,7 @@ describe('KimiAdapter requests', () => {
     const adapter = new KimiAdapter(options({ discovery: true, fetchFn, onWarn: (message) => warnings.push(message) }))
     assert.equal(await adapter.fetchCatalog('token'), undefined)
     assert.equal(warnings.length, 1)
-    assert.match(warnings[0] ?? '', /using the built-in catalog/)
+    assert.match(warnings[0] ?? '', /keeping the last catalog/)
   })
 
   test('does not consult the endpoint when discovery is off', async () => {
@@ -427,16 +624,6 @@ describe('KimiAdapter requests', () => {
 })
 
 describe('KimiAdapter model order', () => {
-  /** Capture the body of the next request. */
-  function recorder(): { fetchFn: typeof fetch, body(): Record<string, unknown> } {
-    let body: Record<string, unknown> = {}
-    const fetchFn: typeof fetch = async (_input, init) => {
-      body = JSON.parse(String(init?.body)) as Record<string, unknown>
-      return sseResponse([{ type: 'response.completed', response: {} }])
-    }
-    return { fetchFn, body: () => body }
-  }
-
   test('a bad request is reported, not retried elsewhere', async () => {
     const seen: string[] = []
     const fetchFn: typeof fetch = async (_input, init) => {
@@ -464,18 +651,18 @@ describe('KimiAdapter model order', () => {
     const adapter = new KimiAdapter(options({ userModels: async () => ['k3-next'] }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k', 'k3-next'],
+      ['kimi-for-coding', 'k3', 'k3-256k', 'k3-next'],
     )
     // It has no shipped metadata, so the standard window is advertised.
     const resolved = await adapter.resolveModel('kimi', 'k3-next')
     assert.equal(resolved.id, 'k3-next')
     assert.equal(resolved.context?.contextWindow, KIMI_CONTEXT_WINDOW)
 
-    // One it already ships is not duplicated by a hand-added copy.
+    // One the listing already names is not duplicated by a hand-added copy.
     const known = new KimiAdapter(options({ userModels: async () => ['k3'] }))
     assert.deepEqual(
       (await known.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'],
+      ['kimi-for-coding', 'k3', 'k3-256k'],
     )
   })
 
@@ -485,21 +672,33 @@ describe('KimiAdapter model order', () => {
       userModels: async () => { throw new Error('disk offline') },
       onWarn: (message) => warnings.push(message),
     }))
-    assert.equal((await adapter.listModels('kimi')).length, 4)
+    assert.equal((await adapter.listModels('kimi')).length, 3)
     assert.equal(warnings.length, 1)
     assert.match(warnings[0] ?? '', /user-added models unavailable/)
   })
 
-  test('a concrete model id still dispatches unchanged', async () => {
+  test('a retired selector dispatches as the model it now names', async () => {
     const { fetchFn, body } = recorder()
     const adapter = new KimiAdapter(options({ fetchFn }))
+    // `k3[1m]` is retired (HTTP 401): the endpoint serves the 1M window as plain
+    // `k3`, so a session that saved the old spelling folds onto it at dispatch.
     await collect(adapter.stream(request({ model: 'k3[1m]' })))
-    assert.equal(body().model, 'k3[1m]')
+    assert.equal(body().model, 'k3')
+  })
+
+  test('a model id this build does not know dispatches unchanged', async () => {
+    const { fetchFn, body } = recorder()
+    const adapter = new KimiAdapter(options({ fetchFn }))
+    await collect(adapter.stream(request({ model: 'k3-next' })))
+    assert.equal(body().model, 'k3-next')
   })
 
   test('the fast rung dispatches the highspeed variant under the row id', async () => {
     const { fetchFn, body } = recorder()
     const adapter = new KimiAdapter(options({ fetchFn }))
+    // The listing is what names the variant, so the table is loaded before dispatch — the
+    // same order the host uses, which resolves the model before it generates.
+    await adapter.hydrate()
     // The selection keeps the row's own id — that is what the host validated — and the
     // request goes to the variant, with no `fast` effort sent as a thinking budget.
     await collect(adapter.stream(request({ model: 'kimi-for-coding', reasoningEffort: ReasoningEffortId('highspeed') })))

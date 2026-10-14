@@ -20,7 +20,7 @@ import type { TokenManager } from '../auth/tokens.js'
 import type { UsageWindow } from '../protocol.js'
 import { allowanceScheduler } from '../auth/allowance-scheduler.js'
 import { streamResponses } from '../translate/responses.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { httpLlmError, idleWatchdog, mapFetchFailure, unknownModelReplacement } from './common.js'
 
 /**
  * Minimum beat between dispatch attempts on one route, so a refused account is not
@@ -116,6 +116,14 @@ export interface ResponsesStreamInput<S extends SessionBase> {
   models?: () => Promise<readonly string[]>
   /** Called when a call proved the stored credential unusable. */
   onCredentialRejected?: (account: string) => void
+  /**
+   * Called when the endpoint answered a request by naming the model id to use instead.
+   *
+   * The request is retried with that id, so the turn still succeeds; the caller records
+   * the rename so the next turn goes straight to the current id instead of learning it
+   * again from a refused request.
+   */
+  onModelRenamed?: (from: string, to: string) => void
   /** Rewrite a thrown failure before it is mapped, e.g. to name the fix. */
   describeFailure?(error: unknown): unknown
   /** Called when a model in the chain was skipped, with the reason. */
@@ -229,10 +237,25 @@ export async function* streamProviderResponses<S extends SessionBase>(
           if (spent.has(token.account)) continue
           let response = await request(options, model, token.accessToken, watchdog.signal)
           if (response.status === 401 || response.status === 403) {
-            token = await tokens.resolve(token.account, true)
-            response = await request(options, model, token.accessToken, watchdog.signal)
-            if (response.status === 401 || response.status === 403) {
-              input.onCredentialRejected?.(token.account)
+            // Two different failures share this status: a credential the provider no
+            // longer accepts, and a model id it does not know. Only the first is answered
+            // by a token refresh — treating a model rename that way would refresh a
+            // healthy token and, worse, mark the account as needing a new sign-in. The
+            // body says which it is, so it is read before deciding, and an unknown model
+            // is retried once under the id the provider named.
+            const refusal = await httpLlmError(response, label)
+            const replacement = unknownModelReplacement(refusal.message)
+            if (replacement !== undefined) {
+              lastError = refusal
+              input.onModelRenamed?.(model, replacement)
+              input.onFallback?.(model, replacement, reasonOf(refusal))
+              response = await request(options, replacement, token.accessToken, watchdog.signal)
+            } else {
+              token = await tokens.resolve(token.account, true)
+              response = await request(options, model, token.accessToken, watchdog.signal)
+              if (response.status === 401 || response.status === 403) {
+                input.onCredentialRejected?.(token.account)
+              }
             }
           }
           // A spent allowance moves to the next account (when the provider supports

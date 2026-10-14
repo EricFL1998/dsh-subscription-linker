@@ -30,7 +30,7 @@ import {
   signArkRequest,
 } from '../src/auth/ark-control.js'
 import type { ArkStsCredentials } from '../src/auth/ark-control.js'
-import { ARK_MODELS, ARK_PROVIDER_ID, ArkAdapter, parseArkSession, readArkUsage } from '../src/providers/ark.js'
+import { ArkAdapter, ARK_DEFAULT_MODEL, ARK_PROVIDER_ID, parseArkSession, readArkUsage } from '../src/providers/ark.js'
 import type { ArkAdapterOptions } from '../src/providers/ark.js'
 
 /** A JSON response the way the services send one. */
@@ -61,6 +61,40 @@ function adapter(options: Partial<ArkAdapterOptions> = {}): ArkAdapter {
     tokens: {} as never,
     ...options,
   })
+}
+
+/** The token manager of an account that is signed in. */
+const signedIn = {
+  session: async () => ({ account: 'a', session: { apiKey: 'k', expiresAt: Date.now() + 3_600_000 } }),
+} as never
+
+/**
+ * One `/models` answer, in the shape the plan's own base sends: the OpenAI-compatible
+ * envelope, whose rows state their own name, window and reasoning ladder.
+ *
+ * `deepseek-v5-thinking` is here to be a model this build has never shipped;
+ * `doubao-image-gen` is agent-called rather than picked, so it is never a row.
+ */
+const ARK_LISTING = {
+  object: 'list',
+  data: [
+    { id: 'ark-code-latest', object: 'model', name: 'Ark Code (latest)', context_window: 262_144 },
+    {
+      id: 'doubao-seed-2.0-code',
+      object: 'model',
+      display_name: 'Doubao Seed 2.0 Code',
+      context_length: 524_288,
+      think_efforts: { valid_efforts: ['low', 'high'], default_effort: 'high' },
+    },
+    {
+      id: 'deepseek-v5-thinking',
+      object: 'model',
+      name: 'DeepSeek V5 Thinking',
+      context_window: 1_000_000,
+      modalities: { input: ['text', 'image'] },
+    },
+    { id: 'doubao-image-gen', object: 'model', name: 'Doubao Image Gen' },
+  ],
 }
 
 describe('Ark sign-in', () => {
@@ -318,26 +352,156 @@ describe('Ark route', () => {
     assert.equal(parseArkSession(null), undefined)
   })
 
-  test('ships the plan roster, with the plan alias recommended', () => {
-    const ids = ARK_MODELS.map((entry) => entry.id)
-    assert.ok(ids.includes('ark-code-latest'))
-    assert.ok(ids.includes('kimi-k2.6'))
-    assert.ok(ids.every((id) => id === id.toLowerCase()))
+  test('offers nothing while signed out', async () => {
+    const signedOut = adapter({ tokens: { session: async () => undefined } as never, cachedListing: async () => ARK_LISTING.data })
+    // A catalog is not an entitlement: a model that cannot be called is not offered.
+    assert.deepEqual(await signedOut.listModels(ARK_PROVIDER_ID), [])
   })
 
-  test('offers nothing while signed out, and its roster once signed in', async () => {
-    const signedOut = adapter({ tokens: { session: async () => undefined } as never })
-    assert.deepEqual(await signedOut.listModels(ARK_PROVIDER_ID), [])
+  test('the cached listing is the whole roster, names and windows included', async () => {
+    const subject = adapter({ tokens: signedIn, cachedListing: async () => ARK_LISTING.data })
+    const models = await subject.listModels(ARK_PROVIDER_ID)
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ['ark-code-latest', 'doubao-seed-2.0-code', 'deepseek-v5-thinking'],
+    )
+    // The plan's own display name and window, not a shipped guess.
+    assert.equal(models[1]?.name, 'Doubao Seed 2.0 Code')
+    const resolved = await subject.resolveModel(ARK_PROVIDER_ID, 'doubao-seed-2.0-code')
+    assert.equal(resolved.context?.contextWindow, 524_288)
+    assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high'])
+    assert.equal(String(resolved.reasoning?.defaultEffort), 'high')
+  })
 
-    const signedIn = adapter({
-      tokens: { session: async () => ({ account: 'a', session: { apiKey: 'k', expiresAt: Date.now() + 3_600_000 } }) } as never,
+  test('a model this build never shipped is published from the listing alone', async () => {
+    const subject = adapter({ tokens: signedIn, cachedListing: async () => ARK_LISTING.data })
+    const entry = (await subject.listModels(ARK_PROVIDER_ID)).find((model) => model.id === 'deepseek-v5-thinking')
+    assert.equal(entry?.name, 'DeepSeek V5 Thinking')
+    assert.ok(subject.ownCatalogEntries().some((own) => own.id === 'deepseek-v5-thinking'))
+  })
+
+  test('an id the listing omits is not published as a row', async () => {
+    const subject = adapter({ tokens: signedIn, cachedListing: async () => ARK_LISTING.data })
+    const ids = (await subject.listModels(ARK_PROVIDER_ID)).map((model) => model.id)
+    // `glm-5.3` was on the table this build used to ship for Ark; the plan no longer
+    // serves it, so it must not be offered on this build's say-so.
+    assert.equal(ids.includes('glm-5.3'), false)
+    // It stays dispatchable — the plan, not this build, is what refuses it.
+    assert.equal((await subject.resolveModel(ARK_PROVIDER_ID, 'glm-5.3')).id, 'glm-5.3')
+  })
+
+  test('an image model is called by an agent, never offered as a row', async () => {
+    const subject = adapter({ tokens: signedIn, cachedListing: async () => ARK_LISTING.data })
+    const ids = (await subject.listModels(ARK_PROVIDER_ID)).map((model) => model.id)
+    assert.equal(ids.includes('doubao-image-gen'), false)
+    await subject.hydrate()
+    assert.equal(subject.imageModelId(), 'doubao-image-gen')
+  })
+
+  test('a picker query never asks the endpoint', async () => {
+    let calls = 0
+    const subject = adapter({
+      tokens: signedIn,
+      cachedListing: async () => ARK_LISTING.data,
+      fetchFn: async () => {
+        calls += 1
+        throw new Error('a picker query must not fetch')
+      },
     })
-    const ids = (await signedIn.listModels(ARK_PROVIDER_ID)).map((model) => model.id)
-    assert.ok(ids.includes('ark-code-latest'))
+    assert.equal((await subject.listModels(ARK_PROVIDER_ID)).length, 3)
+    await subject.resolveModel(ARK_PROVIDER_ID, 'deepseek-v5-thinking')
+    assert.equal(calls, 0)
+  })
+
+  test('the cached listing is read once per session', async () => {
+    let reads = 0
+    const subject = adapter({
+      tokens: signedIn,
+      cachedListing: async () => {
+        reads += 1
+        return ARK_LISTING.data
+      },
+    })
+    await subject.listModels(ARK_PROVIDER_ID)
+    await subject.listModels(ARK_PROVIDER_ID)
+    assert.equal(reads, 1)
+  })
+
+  test('a cache stored as the endpoint envelope is read too', async () => {
+    const subject = adapter({ tokens: signedIn, cachedListing: async () => ARK_LISTING })
+    assert.deepEqual(
+      (await subject.listModels(ARK_PROVIDER_ID)).map((model) => model.id),
+      ['ark-code-latest', 'doubao-seed-2.0-code', 'deepseek-v5-thinking'],
+    )
+  })
+
+  test('an unreadable cache is a warning, and no roster is invented to fill it', async () => {
+    const warnings: string[] = []
+    const subject = adapter({
+      tokens: signedIn,
+      cachedListing: async () => {
+        throw new Error('unreadable')
+      },
+      onWarn: (message) => { warnings.push(message) },
+    })
+    // Only the configured default remains: this build has no table of its own to show.
+    assert.deepEqual(
+      (await subject.listModels(ARK_PROVIDER_ID)).map((model) => model.id),
+      [ARK_DEFAULT_MODEL],
+    )
+    assert.match(warnings.join('\n'), /cached model catalog unavailable \(unreadable\)/)
+  })
+
+  test('fetchCatalog adopts the live rows and caches exactly one payload', async () => {
+    const saved: unknown[] = []
+    const subject = adapter({
+      tokens: signedIn,
+      discovery: true,
+      fetchFn: async () => jsonResponse(ARK_LISTING),
+      saveListing: async (payload) => { saved.push(payload) },
+    })
+    assert.deepEqual(
+      await subject.fetchCatalog('key-1'),
+      ['ark-code-latest', 'doubao-seed-2.0-code', 'deepseek-v5-thinking'],
+    )
+    // The endpoint's own rows are what is kept, so a later build reads more of them.
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0], ARK_LISTING.data)
+    const resolved = await subject.resolveModel(ARK_PROVIDER_ID, 'deepseek-v5-thinking')
+    assert.equal(resolved.context?.contextWindow, 1_000_000)
+  })
+
+  test('a cache write failure is a warning, not a failed read', async () => {
+    const warnings: string[] = []
+    const subject = adapter({
+      tokens: signedIn,
+      discovery: true,
+      fetchFn: async () => jsonResponse(ARK_LISTING),
+      saveListing: async () => { throw new Error('disk full') },
+      onWarn: (message) => { warnings.push(message) },
+    })
+    assert.equal((await subject.fetchCatalog('key-1'))?.length, 3)
+    assert.match(warnings.join('\n'), /model catalog cache write failed \(disk full\)/)
+  })
+
+  test('a refused listing keeps the catalog it already had', async () => {
+    const warnings: string[] = []
+    const subject = adapter({
+      tokens: signedIn,
+      discovery: true,
+      cachedListing: async () => ARK_LISTING.data,
+      fetchFn: async () => jsonResponse({ error: 'nope' }, 503),
+      onWarn: (message) => { warnings.push(message) },
+    })
+    await subject.hydrate()
+    assert.equal(await subject.fetchCatalog('key-1'), undefined)
+    assert.ok(subject.ownCatalogEntries().some((entry) => entry.id === 'deepseek-v5-thinking'))
+    assert.match(warnings.join('\n'), /HTTP 503/)
   })
 
   test('an unknown id is still dispatchable', async () => {
-    const resolved = await adapter().resolveModel(ARK_PROVIDER_ID, 'doubao-new-2027')
+    const resolved = await adapter({ tokens: signedIn, cachedListing: async () => ARK_LISTING.data })
+      .resolveModel(ARK_PROVIDER_ID, 'doubao-new-2027')
     assert.equal(resolved.id, 'doubao-new-2027')
     assert.equal(resolved.context?.contextWindow, 262_144)
   })

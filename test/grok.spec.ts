@@ -84,6 +84,35 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
+/**
+ * A realistic cached payload: the public `/models` rows plus the account's CLI catalog.
+ *
+ * It mirrors what the two live endpoints really answer: the public list enumerates the
+ * models (including an image model and a wide-context variant) and states a display name,
+ * while the CLI catalog — the only surface that names a fast variant — states the window
+ * and reasoning ladder.
+ */
+function cachedPayload() {
+  return {
+    public: [
+      { id: 'grok-4.7', name: 'Grok 4.7', context_length: 256_000, modalities: { input: ['text', 'image'] } },
+      { id: 'grok-4.7@500k', context_length: 500_000 },
+      { id: 'grok-imagine-image' },
+      { id: 'grok-9.9' },
+    ],
+    cli: [
+      {
+        id: 'grok-4.7',
+        context_window: 256_000,
+        supports_reasoning_effort: true,
+        reasoning_effort: 'high',
+        reasoning_efforts: [{ value: 'low' }, { value: 'high' }],
+      },
+      { id: 'grok-4.7-build-fast', context_window: 256_000 },
+    ],
+  }
+}
+
 describe('Grok OAuth constants', () => {
   test('pins the CLI client registration', () => {
     assert.equal(GROK_CLIENT_ID, 'b1a00492-073a-47ea-816f-4c329264a828')
@@ -273,7 +302,7 @@ describe('GrokAdapter catalog', () => {
     assert.equal(resolved.reasoning, undefined)
   })
 
-  test('adds live ids and enriches them from the CLI catalog', async () => {
+  test('the listing decides membership and the CLI catalog states the metadata', async () => {
     const fetchFn: typeof fetch = async (input) => {
       if (String(input).includes('cli-chat-proxy')) {
         return jsonResponse({
@@ -294,8 +323,11 @@ describe('GrokAdapter catalog', () => {
     assert.deepEqual(ids, ['grok-4.6', 'grok-5'])
     adapter.discover(ids ?? [])
     const models = await adapter.listModels('grok')
-    // Seeds first, in curated order, then the live id this build did not know.
-    assert.deepEqual(models.map((model) => model.id), ['grok-4.6', 'grok-4.5', 'grok-4.7', 'grok-5'])
+    // The endpoint's own rows are the whole membership: the seed no longer appends
+    // grok-4.5 or grok-4.7 to a listing that does not serve them.
+    assert.deepEqual(models.map((model) => model.id), ['grok-4.6', 'grok-5'])
+    // A seed still describes a row the listing named but did not describe.
+    assert.equal(models[0]?.name, 'Grok 4.6')
     const resolved = await adapter.resolveModel('grok', 'grok-5')
     assert.equal(resolved.context?.contextWindow, 1_000_000)
     assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high'])
@@ -338,9 +370,10 @@ describe('GrokAdapter catalog', () => {
     const models = await adapter.listModels('grok')
     assert.equal(models.some((model) => model.id === 'grok-4.7-build-fast'), false)
     assert.equal(models.some((model) => model.id === 'grok-4.7'), true)
-    // The CLI catalog states 256k for grok-4.7, which really serves 500k: a live read
-    // may widen what this build ships, never narrow it.
-    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+    // The endpoint's own figure always wins: the old code widened a seed with
+    // `Math.max(seed, live)`, so the shipped 500k for grok-4.7 overrode the 256k the CLI
+    // catalog states. A live window is now the row's window, seed or no seed.
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
     // The row declares the `fast` rung, which is what the quick-mode button selects.
     const base = await adapter.resolveModel('grok', 'grok-4.7')
     assert.equal(base.reasoning?.efforts.some((effort) => String(effort.id) === 'fast'), true)
@@ -349,7 +382,7 @@ describe('GrokAdapter catalog', () => {
     const fast = await adapter.resolveModel('grok', 'grok-4.7-build-fast')
     assert.equal(fast.id, 'grok-4.7-build-fast')
     assert.equal(fast.name, 'Grok 4.7')
-    assert.equal(fast.context?.contextWindow, 500_000)
+    assert.equal(fast.context?.contextWindow, 256_000)
   })
 
   test('honours the hidden-model set', async () => {
@@ -360,7 +393,7 @@ describe('GrokAdapter catalog', () => {
     assert.equal(adapter.catalogEntries().some((entry) => entry.id === 'grok-4.5'), true)
   })
 
-  test('warns but keeps the built-in catalog when discovery fails', async () => {
+  test('warns and keeps the last catalog when discovery fails', async () => {
     const warnings: string[] = []
     const adapter = new GrokAdapter(adapterOptions({
       discovery: true,
@@ -369,7 +402,7 @@ describe('GrokAdapter catalog', () => {
     }))
     assert.equal(await adapter.fetchCatalog('token'), undefined)
     assert.equal(warnings.length, 1)
-    assert.match(warnings[0] ?? '', /using the built-in catalog/)
+    assert.match(warnings[0] ?? '', /keeping the last catalog/)
   })
 
   test('a refused credential is not reported as a discovery failure', async () => {
@@ -381,6 +414,120 @@ describe('GrokAdapter catalog', () => {
     }))
     assert.equal(await adapter.fetchCatalog('token'), undefined)
     assert.deepEqual(warnings, [])
+  })
+})
+
+describe('GrokAdapter cached catalog', () => {
+  test('derives the catalog from the cached listing', async () => {
+    const adapter = new GrokAdapter(adapterOptions({ cachedListing: async () => cachedPayload() }))
+    const models = await adapter.listModels('grok')
+    // Membership and order are the endpoint's own listing: the image model is not a chat
+    // row, the `@500k` variant folds onto its base, and the cold-start seed adds nothing
+    // the listing did not name.
+    assert.deepEqual(models.map((model) => model.id), ['grok-4.7', 'grok-9.9'])
+    assert.equal(models[0]?.name, 'Grok 4.7')
+    assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
+    const resolved = await adapter.resolveModel('grok', 'grok-4.7')
+    // The widest context variant the listing offers is the window the base row serves,
+    // because that is the variant the row dispatches to.
+    assert.equal(resolved.context?.contextWindow, 500_000)
+    assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high', 'fast'])
+    assert.equal(String(resolved.reasoning?.defaultEffort), 'high')
+  })
+
+  test('reads the cached listing once, and a picker query never asks the endpoint', async () => {
+    let reads = 0
+    let requests = 0
+    const adapter = new GrokAdapter(adapterOptions({
+      discovery: true,
+      cachedListing: async () => {
+        reads += 1
+        return cachedPayload()
+      },
+      fetchFn: async () => {
+        requests += 1
+        throw new Error('a picker query must not fetch')
+      },
+    }))
+    await adapter.listModels('grok')
+    await adapter.listModels('grok')
+    await adapter.resolveModel('grok', 'grok-4.7')
+    assert.equal(reads, 1)
+    assert.equal(requests, 0)
+  })
+
+  test('keeps the fast pairing and the context-variant mapping from the cache', async () => {
+    const adapter = new GrokAdapter(adapterOptions({ cachedListing: async () => cachedPayload() }))
+    await adapter.hydrate()
+    // The CLI catalog is the only listing that names `grok-4.7-build-fast`; the cached
+    // payload keeps it, so the button pairs with its base after a restart.
+    assert.deepEqual(adapter.fastPairOf('grok-4.7'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
+    // The `@Nk` context variant never becomes a row of its own: the base row resolves to
+    // the widest variant the listing offered.
+    assert.equal(adapter.resolveModelId('grok-4.7'), 'grok-4.7@500k')
+    assert.equal(adapter.resolveModelId('grok-9.9'), 'grok-9.9')
+    assert.equal(adapter.catalogEntries().some((entry) => entry.id === 'grok-4.7@500k'), false)
+  })
+
+  test('a cache miss is a warning, never a failure', async () => {
+    const warnings: string[] = []
+    const adapter = new GrokAdapter(adapterOptions({
+      cachedListing: async () => { throw new Error('no cache') },
+      onWarn: (message) => warnings.push(message),
+    }))
+    assert.deepEqual(
+      (await adapter.listModels('grok')).map((model) => model.id),
+      GROK_MODELS.map((entry) => entry.id),
+    )
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0] ?? '', /cached model catalog unavailable/)
+  })
+
+  test('fetchCatalog caches exactly one payload holding both listings', async () => {
+    const saved: unknown[] = []
+    const fetchFn: typeof fetch = async (input) => String(input).includes('cli-chat-proxy')
+      ? jsonResponse({ data: [{ id: 'grok-4.7', context_window: 256_000 }, { id: 'grok-4.7-build-fast' }] })
+      : jsonResponse({ data: [{ id: 'grok-4.7' }, { id: 'grok-imagine-image' }] })
+    const adapter = new GrokAdapter(adapterOptions({
+      discovery: true,
+      fetchFn,
+      saveListing: async (payload) => { saved.push(payload) },
+    }))
+    assert.deepEqual(await adapter.fetchCatalog('token'), ['grok-4.7'])
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0], {
+      public: [{ id: 'grok-4.7' }, { id: 'grok-imagine-image' }],
+      cli: [{ id: 'grok-4.7', context_window: 256_000 }, { id: 'grok-4.7-build-fast' }],
+    })
+  })
+
+  test('a cache write failure is a warning, never a failed read', async () => {
+    const warnings: string[] = []
+    const adapter = new GrokAdapter(adapterOptions({
+      discovery: true,
+      onWarn: (message) => warnings.push(message),
+      fetchFn: async () => jsonResponse({ data: [{ id: 'grok-4.7' }] }),
+      saveListing: async () => { throw new Error('disk full') },
+    }))
+    assert.deepEqual(await adapter.fetchCatalog('token'), ['grok-4.7'])
+    assert.match(warnings.join('\n'), /model catalog cache write failed/)
+  })
+
+  test('re-derives the same catalog from what a live read cached', async () => {
+    const saved: unknown[] = []
+    const fetchFn: typeof fetch = async (input) => String(input).includes('cli-chat-proxy')
+      ? jsonResponse({ data: [{ id: 'grok-4.7-build-fast', context_window: 500_000 }] })
+      : jsonResponse({ data: [{ id: 'grok-4.7', context_length: 500_000 }, { id: 'grok-4.7@500k' }] })
+    const live = new GrokAdapter(adapterOptions({
+      discovery: true,
+      fetchFn,
+      saveListing: async (payload) => { saved.push(payload) },
+    }))
+    const ids = await live.fetchCatalog('token')
+    const cached = new GrokAdapter(adapterOptions({ cachedListing: async () => saved[0] }))
+    assert.deepEqual((await cached.listModels('grok')).map((model) => model.id), ids)
+    assert.deepEqual(cached.fastPairOf('grok-4.7'), { baseId: 'grok-4.7', wireId: 'grok-4.7-build-fast' })
+    assert.equal((await cached.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
   })
 })
 

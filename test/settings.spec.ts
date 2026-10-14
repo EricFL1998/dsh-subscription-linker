@@ -31,13 +31,21 @@ function tokenManager(): TokenManager<KimiSession> {
   } as unknown as TokenManager<KimiSession>
 }
 
-/** Adapter options with the given visibility source. */
+/** A listing with three rows, so visibility has something to hide. */
+const LISTING: readonly unknown[] = [
+  { id: 'kimi-for-coding', display_name: 'K2.8 Preview', context_length: 1_048_576 },
+  { id: 'k3', display_name: 'K3', context_length: 1_048_576 },
+  { id: 'k3-256k', display_name: 'K3-256k', context_length: 262_144 },
+]
+
+/** Adapter options with the given visibility source, over one cached listing. */
 function adapterOptions(overrides: Partial<KimiAdapterOptions> = {}): KimiAdapterOptions {
   return {
     apiBase: 'https://api.kimi.com/coding/v1',
     discovery: false,
     streamIdleTimeoutMs: 5_000,
     tokens: tokenManager(),
+    cachedListing: async () => LISTING,
     ...overrides,
   }
 }
@@ -168,40 +176,44 @@ describe('ModelPreferences', () => {
 })
 
 describe('KimiAdapter visibility', () => {
-  test('offers every model when nothing is hidden', async () => {
+  test('offers every model the listing names when nothing is hidden', async () => {
     const adapter = new KimiAdapter(adapterOptions({
       hiddenModels: async () => new Set<string>(),
     }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'k3', 'k3[1m]', 'k3-256k'],
+      ['kimi-for-coding', 'k3', 'k3-256k'],
     )
   })
 
   test('omits only the hidden ids, and re-reads the set per query', async () => {
-    let hidden = new Set(['k3-256k'])
+    let hidden = new Set(['k3'])
     const adapter = new KimiAdapter(adapterOptions({ hiddenModels: async () => hidden }))
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'k3', 'k3[1m]'],
+      ['kimi-for-coding', 'k3-256k'],
     )
     // A settings change takes effect at the next query, with no rebuild.
-    hidden = new Set(['k3', 'k3-256k'])
+    hidden = new Set(['kimi-for-coding', 'k3-256k'])
     assert.deepEqual(
       (await adapter.listModels('kimi')).map((model) => model.id),
-      ['kimi-for-coding', 'k3[1m]'],
+      ['k3'],
     )
   })
 
   test('a hidden model stays resolvable and listed in the settings catalog', async () => {
     const adapter = new KimiAdapter(adapterOptions({
-      hiddenModels: async () => new Set(['k3-256k']),
+      hiddenModels: async () => new Set(['k3']),
     }))
+    // The settings page reads the catalog synchronously, so the route loads its table when
+    // it is built; this is that load.
+    await adapter.hydrate()
     // The settings page must still be able to show it, so it can be re-enabled.
-    assert.equal(adapter.catalogEntries().some((entry) => entry.id === 'k3-256k'), true)
-    const resolved = await adapter.resolveModel('kimi', 'k3-256k')
-    assert.equal(resolved.id, 'k3-256k')
-    assert.equal(resolved.context?.contextWindow, 262_144)
+    assert.equal(adapter.catalogEntries().some((entry) => entry.id === 'k3'), true)
+    const resolved = await adapter.resolveModel('kimi', 'k3')
+    assert.equal(resolved.id, 'k3')
+    // The window is the listing's, which states 1M for `k3`.
+    assert.equal(resolved.context?.contextWindow, 1_048_576)
   })
 
   test('a preferences read failure keeps the full catalog', async () => {
@@ -210,7 +222,7 @@ describe('KimiAdapter visibility', () => {
       hiddenModels: async () => { throw new Error('disk offline') },
       onWarn: (message) => warnings.push(message),
     }))
-    assert.equal((await adapter.listModels('kimi')).length, 4)
+    assert.equal((await adapter.listModels('kimi')).length, 3)
     assert.equal(warnings.length, 1)
     assert.match(warnings[0] ?? '', /model preferences unavailable/)
   })

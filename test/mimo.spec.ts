@@ -14,7 +14,7 @@ import {
   readMimoUsage,
   type MimoCredentials,
 } from '../src/auth/mimo-flow.js'
-import { MimoAdapter, MIMO_MODELS, parseMimoSession } from '../src/providers/mimo.js'
+import { MimoAdapter, MIMO_MODELS, MIMO_MODELS_PATH, MIMO_PUBLIC_API_BASE, parseMimoSession } from '../src/providers/mimo.js'
 import type { MimoSession } from '../src/providers/mimo.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -40,6 +40,26 @@ function recorder(routes: Record<string, () => Response>) {
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
+
+/** A fetch that answers every request with one canned listing response. */
+function listingFetch(answer: () => Response) {
+  const seen: { url: string, authorization: string, userAgent: string }[] = []
+  const fetchFn: typeof fetch = async (input, init) => {
+    const headers = new Headers(init?.headers)
+    seen.push({
+      url: String(input),
+      authorization: headers.get('authorization') ?? '',
+      userAgent: headers.get('user-agent') ?? '',
+    })
+    return answer()
+  }
+  return { fetchFn, seen }
+}
+
+/** One listing body in the shape Xiaomi documents: an OpenAI-style envelope. */
+function documentedListing(rows: readonly Record<string, unknown>[]): Response {
+  return json({ object: 'list', data: rows.map((row) => ({ object: 'model', owned_by: 'xiaomi', ...row })) })
+}
 
 /** One SSE body from chat-completions frames. */
 function sse(frames: string[]): Response {
@@ -133,6 +153,155 @@ test('listModels is empty while signed out', async () => {
     } as unknown as TokenManager<MimoSession>,
   })
   assert.deepEqual(await adapter.listModels('mimo'), [])
+})
+
+test('the built-in roster is what the picker shows before any listing', async () => {
+  const adapter = new MimoAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()) })
+  const models = await adapter.listModels('mimo')
+  assert.deepEqual(models.map((model) => model.id), ['mimo-pro', 'mimo-flash'])
+  assert.equal(models[0]?.name, 'MiMo Pro')
+  assert.deepEqual(adapter.catalogEntries().map((entry) => entry.id), ['mimo-pro', 'mimo-flash'])
+})
+
+test('a cached listing is the catalog, and a picker query asks the network for nothing', async () => {
+  let reads = 0
+  let fetches = 0
+  const adapter = new MimoAdapter({
+    streamIdleTimeoutMs: 1000,
+    tokens: tokens(session()),
+    cachedListing: async () => {
+      reads += 1
+      return {
+        object: 'list',
+        data: [
+          { id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', context_window: 262_144 },
+          { id: 'mimo-v2.5-flash', name: 'MiMo V2.5 Flash', context_window: 131_072 },
+        ],
+      }
+    },
+    fetchFn: (async () => { fetches += 1; return json({}) }) as typeof fetch,
+  })
+  const models = await adapter.listModels('mimo')
+  assert.deepEqual(models.map((model) => model.id), ['mimo-v2.5-pro', 'mimo-v2.5-flash'])
+  assert.equal(models[0]?.name, 'MiMo V2.5 Pro')
+  const resolved = await adapter.resolveModel('mimo', 'mimo-v2.5-flash')
+  assert.equal(resolved.name, 'MiMo V2.5 Flash')
+  assert.equal(resolved.context?.contextWindow, 131_072)
+  // One picker query: no request at all, and the cached table is read once.
+  assert.equal(fetches, 0)
+  assert.equal(reads, 1)
+})
+
+test('a cache read failure is a miss, never an empty picker', async () => {
+  const warnings: string[] = []
+  const adapter = new MimoAdapter({
+    streamIdleTimeoutMs: 1000,
+    tokens: tokens(session()),
+    cachedListing: async () => { throw new Error('cache gone') },
+    onWarn: (message) => { warnings.push(message) },
+  })
+  const models = await adapter.listModels('mimo')
+  assert.deepEqual(models.map((model) => model.id), ['mimo-pro', 'mimo-flash'])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0]!, /cached MiMo model catalog unavailable/)
+})
+
+test('fetchCatalog adopts the documented listing and writes exactly one cache payload', async () => {
+  const saved: unknown[] = []
+  const rows = [{ id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', context_window: 262_144 }]
+  const { fetchFn, seen } = listingFetch(() => documentedListing(rows))
+  const adapter = new MimoAdapter({
+    streamIdleTimeoutMs: 1000,
+    tokens: tokens(session()),
+    fetchFn,
+    saveListing: async (payload) => { saved.push(payload) },
+  })
+  const ids = await adapter.fetchCatalog('session-credential')
+  assert.deepEqual(ids, ['mimo-v2.5-pro'])
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0]?.url, 'https://api.xiaomimimo.com/v1/models')
+  assert.equal(seen[0]?.url, `${MIMO_PUBLIC_API_BASE}${MIMO_MODELS_PATH}`)
+  assert.equal(seen[0]?.authorization, 'Bearer session-credential')
+  assert.match(seen[0]!.userAgent, /^miNative PC\//)
+  // Exactly one write, and it is the listing's own rows.
+  assert.equal(saved.length, 1)
+  assert.deepEqual(saved[0], rows.map((row) => ({ object: 'model', owned_by: 'xiaomi', ...row })))
+  // The listing is the catalog: the app roster it does not name is gone from the picker.
+  const models = await adapter.listModels('mimo')
+  assert.deepEqual(models.map((model) => model.id), ['mimo-v2.5-pro'])
+  assert.equal(models[0]?.name, 'MiMo V2.5 Pro')
+  assert.equal((await adapter.resolveModel('mimo', 'mimo-v2.5-pro')).context?.contextWindow, 262_144)
+})
+
+test('a live row keeps the seed metadata only where the listing is silent', async () => {
+  const { fetchFn } = listingFetch(() => documentedListing([
+    { id: 'mimo-pro' },
+    { id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', context_window: 262_144 },
+  ]))
+  const adapter = new MimoAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  assert.deepEqual(await adapter.fetchCatalog('tok'), ['mimo-pro', 'mimo-v2.5-pro'])
+  // The seed describes this id, so its name and window fill the row's silence.
+  const pro = await adapter.resolveModel('mimo', 'mimo-pro')
+  assert.equal(pro.name, 'MiMo Pro')
+  assert.equal(pro.context?.contextWindow, 1_000_000)
+  // A row the seed does not describe keeps what the listing itself stated.
+  const live = await adapter.resolveModel('mimo', 'mimo-v2.5-pro')
+  assert.equal(live.name, 'MiMo V2.5 Pro')
+  assert.equal(live.context?.contextWindow, 262_144)
+})
+
+test('discover keeps the metadata of an id the listing already described', async () => {
+  const { fetchFn } = listingFetch(() => documentedListing([{ id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', context_window: 262_144 }]))
+  const adapter = new MimoAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  await adapter.fetchCatalog('tok')
+  adapter.discover(['mimo-v2.5-pro'])
+  const entry = adapter.catalogEntries()[0]
+  assert.equal(entry?.name, 'MiMo V2.5 Pro')
+  assert.equal(entry?.contextWindow, 262_144)
+})
+
+test('a listing that does not answer keeps the roster, writes nothing, and warns once', async () => {
+  const answers: (() => Response)[] = [
+    // A non-2xx refusal.
+    () => json({ error: { message: 'not found' } }, 404),
+    // A 2xx body with no rows.
+    () => json({ object: 'list' }),
+    // A 2xx body that is not JSON at all.
+    () => new Response('not json', { status: 200 }),
+  ]
+  for (const answer of answers) {
+    const warnings: string[] = []
+    const saved: unknown[] = []
+    const { fetchFn, seen } = listingFetch(answer)
+    const adapter = new MimoAdapter({
+      streamIdleTimeoutMs: 1000,
+      tokens: tokens(session()),
+      fetchFn,
+      saveListing: async (payload) => { saved.push(payload) },
+      onWarn: (message) => { warnings.push(message) },
+    })
+    assert.equal(await adapter.fetchCatalog('tok'), undefined)
+    assert.equal(seen.length, 1)
+    assert.equal(warnings.length, 1)
+    assert.equal(saved.length, 0)
+    // One failure is stated once, however often the refresh asks.
+    await adapter.fetchCatalog('tok')
+    assert.equal(warnings.length, 1)
+    assert.deepEqual((await adapter.listModels('mimo')).map((model) => model.id), ['mimo-pro', 'mimo-flash'])
+  }
+})
+
+test('discovery switched off leaves the roster alone and asks nothing', async () => {
+  let fetches = 0
+  const adapter = new MimoAdapter({
+    streamIdleTimeoutMs: 1000,
+    tokens: tokens(session()),
+    discovery: false,
+    fetchFn: (async () => { fetches += 1; return json({}) }) as typeof fetch,
+  })
+  assert.equal(await adapter.fetchCatalog('tok'), undefined)
+  assert.equal(fetches, 0)
+  assert.deepEqual((await adapter.listModels('mimo')).map((model) => model.id), ['mimo-pro', 'mimo-flash'])
 })
 
 test('the stream posts chat completions with the session cookies', async () => {

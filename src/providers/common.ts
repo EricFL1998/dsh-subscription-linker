@@ -143,6 +143,31 @@ export function isMissingOrInvalidCredential(error: unknown): boolean {
   return false
 }
 
+/** Body text that says the request named a model the account does not serve. */
+const UNKNOWN_MODEL = /model id does not exist|unknown model|model (?:id )?not found|does not exist, recognized as/i
+
+/** Body text that names the model id to use instead. */
+const MODEL_REPLACEMENT = /set model id as\s*`?([A-Za-z0-9][A-Za-z0-9._:@[\]/-]*)`?/i
+
+/**
+ * The model id a provider's failure names as the one to use instead.
+ *
+ * A 401/403 is not always about the credential: a provider also answers it when the
+ * request names a model id the account does not serve — Kimi says `Your model id does
+ * not exist, recognized as other:k3[1m]. Please set model id as \`k3\``. That message
+ * is the endpoint's own answer to "which id should I have used", so it is worth acting
+ * on rather than reporting: refreshing a healthy token, or marking the account as
+ * needing a new login, would both be wrong answers to a model rename.
+ *
+ * @param message - the failure text.
+ * @returns the replacement id, or undefined when the failure is not about the model id.
+ */
+export function unknownModelReplacement(message: string): string | undefined {
+  if (!UNKNOWN_MODEL.test(message)) return undefined
+  const replacement = MODEL_REPLACEMENT.exec(message)?.[1]
+  return replacement === undefined || replacement === '' ? undefined : replacement
+}
+
 /**
  * Map a thrown transport failure onto a harness error, distinguishing caller
  * cancellation from an idle timeout from a genuine network fault.

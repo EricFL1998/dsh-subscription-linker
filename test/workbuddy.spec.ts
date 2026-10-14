@@ -16,9 +16,15 @@ import {
   type WorkBuddySession,
   type WorkBuddyTokenSet,
 } from '../src/auth/workbuddy-flow.js'
-import { WORKBUDDY_CATALOG, WorkBuddyAdapter, WORKBUDDY_PROVIDER_NAME } from '../src/providers/workbuddy.js'
+import {
+  WORKBUDDY_CATALOG,
+  WorkBuddyAdapter,
+  WORKBUDDY_PROVIDER_NAME,
+  workbuddyModelsUrl,
+} from '../src/providers/workbuddy.js'
+import type { WorkBuddyAdapterOptions } from '../src/providers/workbuddy.js'
 import type { TokenManager } from '../src/auth/tokens.js'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 function session(overrides: Partial<WorkBuddySession> = {}): WorkBuddySession {
@@ -62,6 +68,57 @@ function sse(frames: string[]): Response {
   const body = frames.map((frame) => `data: ${frame}\n\n`).join('') + 'data: [DONE]\n\n'
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
 }
+
+/** A JSON response the way WorkBuddy's console sends one. */
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+/** An adapter with the smallest set of collaborators its methods touch. */
+function adapter(options: Partial<WorkBuddyAdapterOptions> = {}): WorkBuddyAdapter {
+  return new WorkBuddyAdapter({
+    discovery: true,
+    streamIdleTimeoutMs: 1000,
+    tokens: tokens(session()),
+    ...options,
+  })
+}
+
+/**
+ * One listing in the shape WorkBuddy's console answers with: the model table, and the
+ * agents whose `models` lists decide what the account may use.
+ *
+ * The `cli` list is deliberately ordered differently from the table, and narrower than it:
+ * `glm-5.3` and `kimi-k2.8-preview` are rows the account may see but not call. `hy4-preview`,
+ * `space-bunny`, `step-5-preview` and `wb-fresh` are live ids this build never shipped,
+ * while `hy3` and `glm-5.3-flash` are shipped ids the listing describes differently (or not
+ * at all), so the reading rules are visible.
+ */
+const LISTING = {
+  code: 0,
+  data: {
+    models: [
+      { id: 'hy3', name: 'Hy3', maxInputTokens: 300_000, supportsImages: true, descriptionEn: 'Hy3 on the console', vendor: 'tencent' },
+      { id: 'space-bunny', name: 'Space Bunny', contextWindow: 256_000, supportsImages: false, reasoning: { effort: 'medium', summary: 'auto' } },
+      { id: 'auto', name: 'Auto', maxInputTokens: 168_000, supportsImages: false, isDefault: true },
+      { id: 'step-5-preview', name: 'Step 5 Preview', maxAllowedSize: 512_000, supportsImages: false, reasoning: { effort: 'turbo' } },
+      { id: 'hy4-preview', name: 'Hy4 Preview', maxInputTokens: 1_000_000, supportsImages: true, reasoning: { effort: 'high' } },
+      { id: 'glm-5.3-flash' },
+      { id: 'wb-fresh', name: 'WorkBuddy Fresh', supportsImages: true },
+      { id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1_000_000, supportsImages: false },
+      { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', maxInputTokens: 256_000, supportsImages: false },
+    ],
+    agents: [
+      { name: 'chat', models: ['auto', 'glm-5.3'] },
+      { name: 'cli', models: ['auto', 'hy3', 'hy4-preview', 'space-bunny', 'step-5-preview', 'glm-5.3-flash', 'wb-fresh'] },
+    ],
+    endpoint: 'https://copilot.tencent.com',
+    mergeStrategy: 'append',
+  },
+}
+
+/** The ids the listing above makes available, in the order its own `cli` agent states them. */
+const LISTED_IDS = ['auto', 'hy3', 'hy4-preview', 'space-bunny', 'step-5-preview', 'glm-5.3-flash', 'wb-fresh']
 
 test('parseWorkBuddySession keeps a valid shape and drops the rest', () => {
   const good = parseWorkBuddySession(session())
@@ -122,6 +179,7 @@ test('WORKBUDDY_CATALOG ships the China models with their windows and efforts', 
 
 test('listModels offers the catalog and omits hidden ids', async () => {
   const adapter = new WorkBuddyAdapter({
+    discovery: true,
     streamIdleTimeoutMs: 1000,
     tokens: tokens(session()),
     hiddenModels: async () => new Set(['auto']),
@@ -134,6 +192,7 @@ test('listModels offers the catalog and omits hidden ids', async () => {
 
 test('listModels is empty while signed out', async () => {
   const adapter = new WorkBuddyAdapter({
+    discovery: true,
     streamIdleTimeoutMs: 1000,
     tokens: {
       resolve: async () => { throw new Error('signed out') },
@@ -143,6 +202,233 @@ test('listModels is empty while signed out', async () => {
     } as unknown as TokenManager<WorkBuddySession>,
   })
   assert.deepEqual(await adapter.listModels('workbuddy'), [])
+})
+
+test('workbuddyModelsUrl scopes the listing to the enterprise, or to personal', () => {
+  assert.equal(workbuddyModelsUrl('ent-1'), 'https://copilot.tencent.com/console/enterprises/ent-1/models')
+  // An account that states no enterprise reads the personal listing.
+  assert.equal(workbuddyModelsUrl(), 'https://copilot.tencent.com/console/enterprises/personal/models')
+  assert.equal(workbuddyModelsUrl('   '), 'https://copilot.tencent.com/console/enterprises/personal/models')
+})
+
+test('the cached listing is the catalog, and the shipped rows it drops are gone', async () => {
+  const subject = adapter({ cachedListing: async () => LISTING })
+  const models = await subject.listModels('workbuddy')
+  // Membership and order are the account's own `cli` list, not this build's table.
+  assert.deepEqual(models.map((model) => model.id), LISTED_IDS)
+  // A model this build never shipped is published from the listing alone.
+  assert.ok(subject.ownCatalogEntries().some((entry) => entry.id === 'space-bunny'))
+  assert.ok(subject.catalogEntries().some((entry) => entry.id === 'wb-fresh'))
+  // Shipped rows the console does not serve are not offered on this build's say-so.
+  assert.equal(models.some((model) => model.id === 'hy4-preview-f'), false)
+  assert.equal(models.some((model) => model.id === 'hy3-x'), false)
+  // A row the account may see but not call is not offered either.
+  assert.equal(models.some((model) => model.id === 'glm-5.3'), false)
+})
+
+test('each row states its own name, window, modalities and reasoning rung', async () => {
+  const subject = adapter({ cachedListing: async () => LISTING })
+  const hy3 = (await subject.listModels('workbuddy')).find((model) => model.id === 'hy3')
+  assert.equal(hy3?.name, 'Hy3')
+  const described = await subject.resolveModel('workbuddy', 'hy3')
+  // `maxInputTokens` is the first figure the row states, so it wins over the seed table's
+  // 192 000 for this id, and the row's own description is what the picker shows.
+  assert.equal(described.context?.contextWindow, 300_000)
+  assert.deepEqual(described.inputModalities, ['text', 'image'])
+  assert.equal(described.description, 'Hy3 on the console')
+
+  // A few rows state `contextWindow` instead, and some only `maxAllowedSize`.
+  const bunny = await subject.resolveModel('workbuddy', 'space-bunny')
+  assert.equal(bunny.context?.contextWindow, 256_000)
+  assert.deepEqual(bunny.inputModalities, ['text'])
+  assert.deepEqual(bunny.reasoning?.efforts.map((effort) => String(effort.id)), ['medium'])
+  assert.equal(String(bunny.reasoning?.defaultEffort), 'medium')
+  assert.equal((await subject.resolveModel('workbuddy', 'step-5-preview')).context?.contextWindow, 512_000)
+  // `turbo` is not a rung the harness has a word for, so it is dropped, not advertised.
+  assert.equal((await subject.resolveModel('workbuddy', 'step-5-preview')).reasoning, undefined)
+  assert.deepEqual(
+    (await subject.resolveModel('workbuddy', 'hy4-preview')).reasoning?.efforts.map((effort) => String(effort.id)),
+    ['high'],
+  )
+
+  // A row that states no window at all takes the advertised fallback…
+  assert.equal((await subject.resolveModel('workbuddy', 'wb-fresh')).context?.contextWindow, 168_000)
+  // …while one the seed table knows is described by it where the row is silent.
+  const flash = await subject.resolveModel('workbuddy', 'glm-5.3-flash')
+  assert.equal(flash.name, 'GLM-5.3-Flash')
+  assert.equal(flash.context?.contextWindow, 1_000_000)
+  assert.deepEqual(flash.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'high', 'max'])
+})
+
+test('the cli agent decides membership; without one the whole table is served', async () => {
+  const narrowed = adapter({ cachedListing: async () => LISTING })
+  const ids = (await narrowed.listModels('workbuddy')).map((model) => model.id)
+  assert.equal(ids.includes('glm-5.3'), false)
+  assert.equal(ids.includes('kimi-k2.8-preview'), false)
+
+  // No `cli` entry: every model row is available, which is the console's own fallback.
+  const whole = adapter({ cachedListing: async () => ({ data: { models: LISTING.data.models, agents: [{ name: 'chat', models: ['auto'] }] } }) })
+  const every = (await whole.listModels('workbuddy')).map((model) => model.id)
+  assert.equal(every.length, LISTING.data.models.length)
+  assert.ok(every.includes('glm-5.3'))
+
+  // An empty `cli` list is not a membership of none either.
+  const empty = adapter({ cachedListing: async () => ({ data: { models: LISTING.data.models, agents: [{ name: 'cli', models: [] }] } }) })
+  assert.equal((await empty.listModels('workbuddy')).length, LISTING.data.models.length)
+})
+
+test('a picker query asks the console nothing', async () => {
+  let calls = 0
+  const subject = adapter({
+    cachedListing: async () => LISTING,
+    fetchFn: async () => {
+      calls += 1
+      throw new Error('a picker query must not fetch')
+    },
+  })
+  const models = await subject.listModels('workbuddy')
+  assert.equal(models.length, LISTED_IDS.length)
+  await subject.resolveModel('workbuddy', 'hy4-preview')
+  await subject.resolveModel('workbuddy', 'never-shipped')
+  assert.equal(calls, 0)
+})
+
+test('the cached listing is read once, and an unreadable cache falls back to the seed', async () => {
+  let reads = 0
+  const subject = adapter({
+    cachedListing: async () => {
+      reads += 1
+      return LISTING
+    },
+  })
+  await subject.listModels('workbuddy')
+  await subject.listModels('workbuddy')
+  assert.equal(reads, 1)
+
+  const warnings: string[] = []
+  const broken = adapter({
+    cachedListing: async () => { throw new Error('unreadable') },
+    onWarn: (message) => { warnings.push(message) },
+  })
+  const ids = (await broken.listModels('workbuddy')).map((model) => model.id)
+  // A cache miss is never a failure: the seed table is still shown.
+  assert.ok(ids.includes('hy4-preview-f'))
+  assert.match(warnings.join('\n'), /cached model catalog unavailable \(unreadable\)/)
+})
+
+test('fetchCatalog reads the console route for the session enterprise', async () => {
+  const seen: { url: string, headers: Headers }[] = []
+  const saved: unknown[] = []
+  const subject = adapter({
+    tokens: tokens(session({ enterpriseId: 'ent-1' })),
+    fetchFn: async (input, init) => {
+      seen.push({ url: String(input), headers: new Headers(init?.headers) })
+      return jsonResponse(LISTING)
+    },
+    saveListing: async (payload) => { saved.push(payload) },
+  })
+  assert.deepEqual(await subject.fetchCatalog('at-1'), LISTED_IDS)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0]?.url, 'https://copilot.tencent.com/console/enterprises/ent-1/models')
+  const headers = seen[0]!.headers
+  assert.equal(headers.get('authorization'), 'Bearer at-1')
+  assert.equal(headers.get('accept'), 'application/json, text/plain, */*')
+  assert.equal(headers.get('x-requested-with'), 'XMLHttpRequest')
+  assert.equal(headers.get('x-enterprise-id'), 'ent-1')
+  assert.equal(headers.get('x-tenant-id'), 'ent-1')
+  assert.equal(headers.get('x-user-id'), 'u1')
+  // Exactly one cache payload, and it is the console's own answer — enough to rebuild the
+  // same catalog, `cli` membership included.
+  assert.equal(saved.length, 1)
+  assert.deepEqual(saved[0], LISTING)
+  // The listing just read is what the route now serves.
+  assert.deepEqual(subject.ownCatalogEntries().map((entry) => entry.id), LISTED_IDS)
+})
+
+test('fetchCatalog addresses the personal listing when the session states no enterprise', async () => {
+  let url = ''
+  const subject = adapter({
+    fetchFn: async (input) => {
+      url = String(input)
+      return jsonResponse(LISTING)
+    },
+  })
+  assert.deepEqual(await subject.fetchCatalog('at-1'), LISTED_IDS)
+  assert.equal(url, 'https://copilot.tencent.com/console/enterprises/personal/models')
+})
+
+test('discovery switched off reads nothing and keeps the seed table', async () => {
+  let calls = 0
+  const subject = adapter({
+    discovery: false,
+    fetchFn: async () => {
+      calls += 1
+      return jsonResponse(LISTING)
+    },
+  })
+  assert.equal(await subject.fetchCatalog('at-1'), undefined)
+  assert.equal(calls, 0)
+  assert.ok((await subject.listModels('workbuddy')).some((model) => model.id === 'hy4-preview-f'))
+})
+
+test('a refused listing keeps the catalog the route already had, and warns once', async () => {
+  const warnings: string[] = []
+  const subject = adapter({
+    cachedListing: async () => LISTING,
+    fetchFn: async () => new Response('nope', { status: 500 }),
+    onWarn: (message) => { warnings.push(message) },
+  })
+  // No picker query ran first: the read itself has to fall back to the cached listing,
+  // not to the seed table this build ships.
+  assert.equal(await subject.fetchCatalog('at-1'), undefined)
+  assert.deepEqual(subject.ownCatalogEntries().map((entry) => entry.id), LISTED_IDS)
+  assert.equal(warnings.filter((message) => /HTTP 500/.test(message)).length, 1)
+})
+
+test('an unparsable listing keeps the catalog the route already had', async () => {
+  const warnings: string[] = []
+  const subject = adapter({
+    cachedListing: async () => LISTING,
+    fetchFn: async () => new Response('<html>gateway</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+    onWarn: (message) => { warnings.push(message) },
+  })
+  assert.equal(await subject.fetchCatalog('at-1'), undefined)
+  assert.deepEqual(subject.ownCatalogEntries().map((entry) => entry.id), LISTED_IDS)
+  assert.match(warnings.join('\n'), /WorkBuddy model list unavailable; keeping the last catalog/)
+})
+
+test('an empty listing keeps the catalog the route already had', async () => {
+  const warnings: string[] = []
+  const subject = adapter({
+    cachedListing: async () => LISTING,
+    fetchFn: async () => jsonResponse({ code: 0, data: { models: [], agents: [{ name: 'cli', models: [] }] } }),
+    onWarn: (message) => { warnings.push(message) },
+  })
+  assert.equal(await subject.fetchCatalog('at-1'), undefined)
+  assert.deepEqual(subject.ownCatalogEntries().map((entry) => entry.id), LISTED_IDS)
+  assert.match(warnings.join('\n'), /empty catalog; keeping the last catalog/)
+})
+
+test('a failed read with no cache leaves the shipped table in place', async () => {
+  const warnings: string[] = []
+  const subject = adapter({
+    fetchFn: async () => new Response('down', { status: 503 }),
+    onWarn: (message) => { warnings.push(message) },
+  })
+  assert.equal(await subject.fetchCatalog('at-1'), undefined)
+  assert.deepEqual((await subject.listModels('workbuddy')).map((model) => model.id), WORKBUDDY_CATALOG.map((entry) => entry.id))
+  assert.match(warnings.join('\n'), /HTTP 503/)
+})
+
+test('a discovered id joins the catalog without displacing what the listing stated', async () => {
+  const subject = adapter({ cachedListing: async () => LISTING })
+  await subject.hydrate()
+  subject.discover(['auto', 'hy3', 'wb-brand-new'])
+  assert.deepEqual(subject.catalogEntries().map((entry) => entry.id), ['auto', 'hy3', 'wb-brand-new'])
+  // The listing described `hy3`; reporting its id again must not erase that.
+  assert.equal(subject.catalogEntries().find((entry) => entry.id === 'hy3')?.contextWindow, 300_000)
+  // An id only the seed table knows keeps the seed's metadata.
+  assert.equal(subject.catalogEntries().find((entry) => entry.id === 'auto')?.contextWindow, 168_000)
 })
 
 test('the stream posts chat completions with the WorkBuddy headers', async () => {
@@ -156,7 +442,7 @@ test('the stream posts chat completions with the WorkBuddy headers', async () =>
       JSON.stringify({ choices: [{ delta: { content: ' from WorkBuddy' } }], usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } }),
     ])
   }
-  const adapter = new WorkBuddyAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
   const chunks = await collect(adapter.stream(request()))
   assert.equal(seenUa, 'WorkBuddy/5.5.6')
   assert.equal(seenBody.model, 'hy4-preview-f')
@@ -172,6 +458,46 @@ test('the stream posts chat completions with the WorkBuddy headers', async () =>
   assert.equal(chunks.some((chunk) => chunk.type === 'finish'), true)
 })
 
+/** Everything the harness would assemble from a chunk stream. */
+function assemble(chunks: StreamChunk[]): { blocks: unknown[], finish: string } {
+  const assembler = new BlockAssembler()
+  for (const chunk of chunks) assembler.push(chunk)
+  return { blocks: assembler.blocks(), finish: assembler.finish.kind }
+}
+
+test('the answer the reader sees is the text its block-end closes', async () => {
+  // The assembler keeps `block-end`'s block as the block's content and never looks at the
+  // deltas again, so a close that carries an empty text leaves the reader a blank answer
+  // however much streamed in. The gateway's trailing empty function stub must not add
+  // blocks of its own either.
+  const fetchFn: typeof fetch = async () => sse([
+    JSON.stringify({ choices: [{ delta: { role: 'assistant', content: '' } }] }),
+    JSON.stringify({ choices: [{ delta: { content: 'Hello' } }] }),
+    JSON.stringify({ choices: [{ delta: { content: ' from WorkBuddy' } }], usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } }),
+    JSON.stringify({ choices: [{ delta: { role: 'assistant', function_call: { name: '', arguments: '' }, tool_calls: [] } }], finish_reason: 'stop' }),
+  ])
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const seen = assemble(await collect(adapter.stream(request())))
+  assert.deepEqual(seen.blocks, [{ type: 'text', text: 'Hello from WorkBuddy' }])
+  assert.equal(seen.finish, 'stop')
+})
+
+test('a streamed tool call rides its own block instead of folding into the text', async () => {
+  const fetchFn: typeof fetch = async () => sse([
+    JSON.stringify({ choices: [{ delta: { content: 'Reading' } }] }),
+    JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_file', arguments: '{"path"' } }] } }] }),
+    JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ':"/x"}' } }] } }] }),
+    JSON.stringify({ choices: [{ delta: { function_call: { name: '', arguments: '' }, tool_calls: [] } }], finish_reason: 'tool_calls' }),
+  ])
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const seen = assemble(await collect(adapter.stream(request())))
+  assert.deepEqual(seen.blocks, [
+    { type: 'text', text: 'Reading' },
+    { type: 'tool-call', id: 'call_1', name: 'read_file', arguments: '{"path":"/x"}' },
+  ])
+  assert.equal(seen.finish, 'tool-calls')
+})
+
 test('a tool with an unsafe name is made safe for the wire and renamed back in the answer', async () => {
   let seenBody: Record<string, unknown> = {}
   const fetchFn: typeof fetch = async (_input, init) => {
@@ -180,7 +506,7 @@ test('a tool with an unsafe name is made safe for the wire and renamed back in t
       JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_file', arguments: '{"path":"/x"}' } }] } }] }),
     ])
   }
-  const adapter = new WorkBuddyAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
   const withTools = { ...request(), tools: [{ name: 'read.file', description: 'Read', parameters: { type: 'object', properties: { path: { type: 'string' } } } }] }
   const chunks = await collect(adapter.stream(withTools))
   // The unsafe name went out safe: a `.` became `_`.
@@ -194,7 +520,7 @@ test('a tool with an unsafe name is made safe for the wire and renamed back in t
 test('a credits-exhausted 403 names the package fix, not a network fault', async () => {
   const fetchFn: typeof fetch = async () =>
     new Response(JSON.stringify({ code: 14018, msg: 'Credits exhausted' }), { status: 403, headers: { 'content-type': 'application/json' } })
-  const adapter = new WorkBuddyAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
   await assert.rejects(
     () => collect(adapter.stream(request())),
     (error: unknown) => error instanceof Error && /active credit package/i.test(error.message),

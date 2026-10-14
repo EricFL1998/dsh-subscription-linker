@@ -70,7 +70,7 @@ quota, which is read per subscription period and per model's free allowance.
 | --- | --- |
 | `ctx.llm` | the `kimi`, `grok`, `antigravity`, `glm` and `auto` provider routes (models, reasoning efforts, streaming) |
 | Settings | a **Subscriptions** section: one card per provider — sign in, sign out, default account, token refresh, plan quota, model catalog, manage dialog |
-| Model picker | each provider's own models, plus **`auto` as its own route** spanning them — Kimi ships `kimi-for-coding`, `k3`, `k3[1m]`, `k3-256k`; Grok seeds `grok-4.6`, `grok-4.5` and adds whatever its live catalog reports; Antigravity lists the agent-callable subset of what its endpoint reports (`fetchAvailableModels`), filtering out tabs, commit-message and transcription surfaces; GLM ships the `glm-5.3` family (`glm-5.3`, `glm-5.3-flash`, `glm-5.2`, `glm-5.1`, `glm-5`) and adds whatever its coding host lists |
+| Model picker | each provider's own models, plus **`auto` as its own route** spanning them. Membership comes from the provider's own model list, read once and cached as that route's table (`~/.dsh/plugins/kimi-oauth/model-catalog.json`), so the picker never spends a request and a release or retirement server-side needs no plugin update. Kimi serves `kimi-for-coding`, `k3` (1M) and `k3-256k`; Grok adds whatever its live catalog reports on top of `grok-4.6`/`grok-4.5`; Antigravity lists the agent-callable subset of what its endpoint reports (`fetchAvailableModels`), filtering out tabs, commit-message and transcription surfaces; GLM adds whatever its coding host lists on top of the `glm-5.3` family |
 
 Credentials live at `~/.dsh/plugins/kimi-oauth/auth.json` (mode `0600`,
 written atomically, one section per provider). The directory keeps the name this

@@ -6,6 +6,11 @@
  * requests and the model list then go to the coding-plan host, whose
  * `/responses` route answers the same wire the `kimi` and `grok` routes use.
  *
+ * The model table this route publishes is that host's own `/models` answer, read once
+ * and kept in this plugin's cache (see `hydrate` and `fetchCatalog`). Nothing in this
+ * module decides which models exist, so one released, renamed or retired server-side
+ * reaches the picker without a plugin update and without a request per refresh.
+ *
  * @module dsh-plugin-subscription-oauth/providers/glm
  */
 
@@ -26,13 +31,13 @@ import { proxiedFetch } from '../http.js'
 import type { FetchFn } from '../http.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { UsageWindow } from '../protocol.js'
-import type { CatalogEntry } from './catalog.js'
-import { findEntry, resolveCatalog } from './catalog.js'
+import type { CatalogEntry, LiveModelFacts } from './catalog.js'
+import { composeCatalog, fallbackEntry, findEntry, liveEntry, liveModelFacts, resolveCatalog } from './catalog.js'
 import { streamProviderResponses, accountPoolHooks } from './responses-stream.js'
 import { toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ImageResolver } from '../translate/responses.js'
 import type { UsageRead } from './usage.js'
-import { isImageModel } from './grok.js'
+import { baseModelOf, FastVariantIndex, isFastVariant, isImageModel } from './grok.js'
 
 /** Model ids that are clearly not chat models. */
 const NON_CHAT_ID = /(?:^|[-_/])(?:image|video|imagine|embed|embedding|whisper|tts|vision-only)/i
@@ -74,56 +79,6 @@ export const GLM_CONTEXT_WINDOW = 1_048_576
 
 /** Output budget used when the caller sets no cap. */
 export const GLM_DEFAULT_MAX_TOKENS = 131_072
-
-/** Reasoning ladder the GLM 5.3 family accepts. */
-const GLM_53_EFFORTS = ['low', 'high', 'max'] as const
-
-/**
- * The catalog this build ships, so a signed-in route is usable with no discovery.
- *
- * Ids are the wire ids, lowercase: the coding plan answers `glm-5.3`, not the
- * `GLM-5.3` display name its own client shows. `glm-5.3-flash` is the multimodal
- * member of the family; the rest read text only.
- */
-export const GLM_MODELS: readonly CatalogEntry[] = [
-  {
-    id: 'glm-5.3',
-    name: 'GLM-5.3',
-    description: 'Coding plan flagship, text only',
-    contextWindow: GLM_CONTEXT_WINDOW,
-    inputModalities: ['text'],
-    reasoningEfforts: [...GLM_53_EFFORTS],
-  },
-  {
-    id: 'glm-5.3-flash',
-    name: 'GLM-5.3 Flash',
-    description: 'Fast, reads images',
-    contextWindow: GLM_CONTEXT_WINDOW,
-    inputModalities: ['text', 'image'],
-    reasoningEfforts: [...GLM_53_EFFORTS],
-  },
-  {
-    id: 'glm-5.2',
-    name: 'GLM-5.2',
-    description: 'Previous flagship',
-    contextWindow: GLM_CONTEXT_WINDOW,
-    inputModalities: ['text'],
-  },
-  {
-    id: 'glm-5.1',
-    name: 'GLM-5.1',
-    description: 'Earlier 5.x release',
-    contextWindow: GLM_CONTEXT_WINDOW,
-    inputModalities: ['text'],
-  },
-  {
-    id: 'glm-5',
-    name: 'GLM-5',
-    description: 'First 5.x release',
-    contextWindow: GLM_CONTEXT_WINDOW,
-    inputModalities: ['text'],
-  },
-]
 
 /** One signed-in BigModel account. */
 export interface GlmSession extends SessionBase {
@@ -177,6 +132,25 @@ export interface GlmAdapterOptions {
   userModels?: () => Promise<readonly string[]> | readonly string[]
   /** Extra ids published without shipped metadata. */
   extraModels?: readonly string[]
+  /**
+   * Model this route preselects, and therefore always offers.
+   *
+   * Configuration rather than a shipped fact: a subscription that re-points its
+   * alias at a new release follows the config instead of this build's release
+   * cadence. Defaults to {@link GLM_DEFAULT_MODEL}.
+   */
+  defaultModel?: string
+  /**
+   * The endpoint's last live listing, from this plugin's cache.
+   *
+   * Read once per session, before the first catalog query, so the picker offers real
+   * models without asking the endpoint anything. A route that fetched once and cached
+   * the answer has no reason to fetch again on every refresh; the Settings "refresh
+   * models" action is what re-reads it.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
   /** Resolve the attachment service per request. */
   resolveAttachments?: () => AttachmentStore | undefined
   onWarn?: (message: string) => void
@@ -300,13 +274,83 @@ async function httpFailure(response: Response, label: string): Promise<LlmError>
 
 /** The adapter behind the `glm` route. */
 export class GlmAdapter extends LlmAdapter {
-  /** Live catalog ids, once discovery succeeded this session. */
-  private live: readonly string[] | undefined
-  /** Image-generation model id, when discovery reported one. */
+  /**
+   * The catalog this route serves: entries derived from the endpoint's own listing,
+   * either the one just read or the one the cache kept from the last read.
+   *
+   * Undefined means neither source has produced a listing yet, so only the configured
+   * default model is offered until one does.
+   */
+  private live: readonly CatalogEntry[] | undefined
+  /** Whether the cached listing has been read; it is read at most once per session. */
+  private hydrated = false
+  /** Image-generation model id, when the listing reported one. */
   private imageModel: string | undefined
+  /**
+   * Fast-variant wire id per picker row.
+   *
+   * Derived from the listing rather than a curated alias map: a row whose name is a
+   * listed model plus the provider's own fast word rides that row instead of becoming
+   * one of its own. GLM's own `-flash` id is a distinct model, not a variant, and is
+   * left as a row.
+   */
+  private readonly fastVariants = new FastVariantIndex()
 
   constructor(private readonly options: GlmAdapterOptions) {
     super()
+  }
+
+  /**
+   * Adopt the rows of one live listing as this route's catalog.
+   *
+   * Everything the picker shows is derived here from the endpoint's own answer: the
+   * rows that become picker entries and the fast variant that pairs with each row.
+   * Nothing about which models exist, or what each one is, is decided by this build.
+   *
+   * @param rows - decoded rows of the endpoint's listing, in the endpoint's order.
+   * @returns the entries to publish, in picker order.
+   */
+  private adoptListing(rows: readonly unknown[]): readonly CatalogEntry[] {
+    const facts = rows
+      .map((row) => liveModelFacts(row))
+      .filter((fact): fact is LiveModelFacts => fact !== undefined)
+    // Image models are never picker rows: they are agent-called, always on.
+    this.imageModel = facts.find((fact) => isImageModel(fact.id))?.id
+    this.fastVariants.clear()
+    for (const fact of facts) this.fastVariants.noteListed(fact.id)
+    for (const fact of facts) {
+      const base = this.fastVariants.pair(fact.id)
+      this.fastVariants.note(fact.id, () => base ?? baseModelOf(fact.id))
+    }
+    // Fold a variant onto its row and drop the ids that are not chat models, keeping the
+    // endpoint's order. A row's own facts describe the row; a variant's describe the
+    // variant, so a row that is also listed is never overwritten by its variant.
+    const byId = new Map<string, LiveModelFacts>()
+    for (const fact of facts) {
+      if (NON_CHAT_ID.test(fact.id)) continue
+      const id = isFastVariant(fact.id) ? this.fastVariants.pair(fact.id) ?? baseModelOf(fact.id) : fact.id
+      if (id === fact.id || !byId.has(id)) byId.set(id, { ...fact, id })
+    }
+    return [...byId.values()].map((fact) =>
+      liveEntry(fact, [], GLM_CONTEXT_WINDOW, 'Reported by the GLM model list'))
+  }
+
+  /**
+   * Read the cached listing, once, so the picker works without asking the endpoint.
+   *
+   * Called before the first catalog query. A read failure is a cache miss, never a
+   * failure: the route simply has no listing until one is fetched.
+   */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return
+    this.hydrated = true
+    if (this.live !== undefined || this.options.cachedListing === undefined) return
+    try {
+      const rows = listingRows(await this.options.cachedListing())
+      if (rows.length > 0) this.live = this.adoptListing(rows)
+    } catch (error: unknown) {
+      this.options.onWarn?.(`cached model catalog unavailable (${error instanceof Error ? error.message : String(error)})`)
+    }
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -323,6 +367,7 @@ export class GlmAdapter extends LlmAdapter {
     // Nothing to offer without a signed-in account: a model that cannot be called
     // must not appear in the picker, and Auto must not try it.
     if (await this.options.tokens.session() === undefined) return []
+    await this.hydrate()
     const hidden = await this.hidden()
     // Image models are never picker rows: they are agent-called, always on.
     const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
@@ -336,11 +381,12 @@ export class GlmAdapter extends LlmAdapter {
   }
 
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    await this.hydrate()
     const entry = findEntry(this.catalog(), model)
     if (entry === undefined) {
       // An id this build has never heard of is still dispatchable: the endpoint is
       // the authority on what it serves, and a newer model should not be refused.
-      const template = findEntry(this.catalog(), GLM_DEFAULT_MODEL) ?? this.catalog()[0]
+      const template = findEntry(this.catalog(), this.defaultModel()) ?? this.catalog()[0]
       return {
         provider: GLM_PROVIDER_ID,
         id: model,
@@ -393,23 +439,36 @@ export class GlmAdapter extends LlmAdapter {
     return error
   }
 
-  /** The catalog served: the shipped list, the live one, then hand-added ids. */
+  /** The catalog served: the route's own entries, then hand-added ids. */
   private catalog(): readonly CatalogEntry[] {
     return [...this.shippedCatalog(), ...this.addedEntries()]
   }
 
-  /** The route's own catalog, without ids the user added by hand. */
+  /**
+   * The catalog to present: the models the endpoint's listing named, in its own order,
+   * each with the metadata that listing stated, then the configured extras.
+   *
+   * There is no shipped roster. A listing is read once and cached (see {@link hydrate}
+   * and {@link fetchCatalog}), and that cached table is what the picker shows until the
+   * next read, so a model released, renamed or retired server-side is reflected without
+   * a plugin update. Only the configured default is always offered, because the picker
+   * preselects it.
+   */
   private shippedCatalog(): readonly CatalogEntry[] {
-    const shipped = this.options.extraModels === undefined
-      ? [...GLM_MODELS]
-      : [...GLM_MODELS, ...this.options.extraModels.map((id) => extraEntry(id))]
-    const live = this.live
-    if (live === undefined) return shipped
-    const merged = [...shipped]
-    for (const id of live) {
-      if (findEntry(merged, id) === undefined) merged.push(extraEntry(id))
-    }
-    return merged
+    return composeCatalog({
+      curated: [],
+      ...this.live === undefined ? {} : { live: this.live },
+      ...this.options.extraModels === undefined ? {} : { extra: this.options.extraModels },
+      defaultModel: this.defaultModel(),
+      fallbackContextWindow: GLM_CONTEXT_WINDOW,
+      liveDescription: 'Reported by the GLM model list',
+      extraDescription: 'Extra model from the plugin configuration',
+    })
+  }
+
+  /** The model the picker preselects, from configuration. */
+  private defaultModel(): string {
+    return this.options.defaultModel ?? GLM_DEFAULT_MODEL
   }
 
   /** Ids the user published by hand that this route does not already serve. */
@@ -419,7 +478,7 @@ export class GlmAdapter extends LlmAdapter {
     if (added === undefined) return []
     return (Array.isArray(added) ? added : [])
       .filter((id) => findEntry(own, id) === undefined)
-      .map((id) => extraEntry(id))
+      .map((id) => fallbackEntry(id, 'Added by hand in Settings', GLM_CONTEXT_WINDOW))
   }
 
   /** The image-generation model id, when discovery reported one. */
@@ -439,20 +498,34 @@ export class GlmAdapter extends LlmAdapter {
   }
 
   /**
-   * Adopt the endpoint's live catalog.
+   * Adopt the ids a caller reports as the served set, without a listing.
    *
-   * @param ids - model ids the endpoint reported.
+   * {@link fetchCatalog} already derived the entries from the rows it read, and the
+   * controller reports those same ids back here; the entries it recorded are kept. A
+   * caller that only has ids (a test, another discovery path) gets conservative entries
+   * for them.
+   *
+   * @param ids - model ids the caller reports.
    */
   discover(ids: readonly string[]): void {
-    this.live = [...ids]
+    const known = new Map((this.live ?? []).map((entry) => [entry.id, entry]))
+    this.live = ids.map((id) => known.get(id)
+      ?? liveEntry({ id }, [], GLM_CONTEXT_WINDOW, 'Reported by the GLM model list'))
   }
 
   /**
-   * Read the live model list.
+   * Read the endpoint's model listing and adopt it as this route's catalog.
+   *
+   * This is the one place a model table is produced, and it is the endpoint's own
+   * answer: what the listing names is what the picker offers, with the display name,
+   * context window, modalities and reasoning ladder the listing states. The rows are
+   * also handed to {@link GlmAdapterOptions.saveListing}, so the next session starts
+   * from this table instead of asking again — the Settings "refresh models" action is
+   * what re-reads it.
    *
    * @param accessToken - bearer for the account.
    * @param signal - optional cancellation.
-   * @returns the ids the endpoint serves, or undefined when it cannot be read.
+   * @returns the model ids now served, or undefined when the listing is unavailable.
    */
   async fetchCatalog(accessToken: string, signal?: AbortSignal): Promise<readonly string[] | undefined> {
     if (!this.options.discovery) return undefined
@@ -463,20 +536,35 @@ export class GlmAdapter extends LlmAdapter {
         ...signal === undefined ? {} : { signal },
       })
       if (!response.ok) {
-        this.options.onWarn?.(`GLM model list unavailable (HTTP ${response.status})`)
+        this.options.onWarn?.(`GLM model list unavailable (HTTP ${response.status}); keeping the last catalog`)
         return undefined
       }
-      const body = await response.json() as { data?: readonly { id?: unknown }[] }
-      const allIds = (body.data ?? [])
-        .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : ''))
-        .filter((id) => id !== '')
-      // Image models are never picker rows: they are agent-called, always on.
-      this.imageModel = allIds.find((id) => isImageModel(id))
-      const ids = allIds.filter((id) => !NON_CHAT_ID.test(id))
-      return ids.length === 0 ? undefined : ids
+      const payload = await response.json() as { data?: unknown }
+      const rows = Array.isArray(payload.data) ? payload.data : []
+      const entries = this.adoptListing(rows)
+      if (entries.length === 0) {
+        this.options.onWarn?.('GLM model discovery returned an empty catalog; keeping the last catalog')
+        return undefined
+      }
+      this.live = entries
+      // The cached table is the endpoint's answer, kept so the next session does not ask
+      // again. A cache failure never fails the read that produced it.
+      await this.saveListing(rows)
+      return entries.map((entry) => entry.id)
     } catch (error: unknown) {
+      if (signal?.aborted === true) return undefined
       this.options.onWarn?.(`GLM model list unavailable (${error instanceof Error ? error.message : String(error)})`)
       return undefined
+    }
+  }
+
+  /** Persist one live listing, reporting a cache failure without failing the read. */
+  private async saveListing(rows: readonly unknown[]): Promise<void> {
+    if (this.options.saveListing === undefined) return
+    try {
+      await this.options.saveListing(rows)
+    } catch (error: unknown) {
+      this.options.onWarn?.(`model catalog cache write failed (${error instanceof Error ? error.message : String(error)})`)
     }
   }
 
@@ -542,9 +630,21 @@ export class GlmAdapter extends LlmAdapter {
   }
 }
 
-/** An entry for an id this build ships no metadata for. */
-function extraEntry(id: string): CatalogEntry {
-  return { id, name: id, contextWindow: GLM_CONTEXT_WINDOW }
+/**
+ * The rows of one cached listing.
+ *
+ * The cache holds the rows this plugin stored; a payload written as the endpoint's own
+ * envelope is read too, so a differently shaped cache cannot silently empty the picker.
+ *
+ * @param payload - whatever `cachedListing` returned.
+ * @returns the rows to adopt, or an empty list when the payload names none.
+ */
+function listingRows(payload: unknown): readonly unknown[] {
+  if (Array.isArray(payload)) return payload
+  const data = typeof payload === 'object' && payload !== null
+    ? (payload as { data?: unknown }).data
+    : undefined
+  return Array.isArray(data) ? data : []
 }
 
 /** The reasoning block for a catalog entry, or undefined when it supports none. */

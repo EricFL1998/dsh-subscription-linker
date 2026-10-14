@@ -409,8 +409,62 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter(adapterOptions())
     assert.deepEqual(adapter.providerInfo('antigravity'), { id: 'antigravity', name: 'Google Antigravity' })
     // Antigravity ships no curated list: an account's catalog is plan-dependent,
-    // so before discovery the picker has nothing to offer.
+    // so before any read the picker has nothing to offer.
     assert.deepEqual(await adapter.listModels('antigravity'), [])
+    assert.deepEqual(adapter.catalogEntries(), [])
+  })
+
+  test('a cached listing is the catalog, and a query makes no request', async () => {
+    const cached = [
+      { id: 'gemini-3-pro', name: 'Gemini 3 Pro', contextWindow: 1_048_576, inputModalities: ['text', 'image'] },
+      { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', contextWindow: 200_000, inputModalities: ['text'] },
+    ]
+    const adapter = new AntigravityAdapter(adapterOptions({
+      cachedListing: async () => cached,
+      fetchFn: async () => { throw new Error('a picker query must not fetch') },
+      tokens: tokenManager(),
+    }))
+    // The cached table is the last live read, so the picker renders it without asking the
+    // endpoint anything — which is what makes a cold start work offline.
+    await adapter.hydrate()
+    assert.deepEqual(adapter.catalogEntries().map((entry) => entry.id), ['gemini-3-pro', 'claude-sonnet-4'])
+    assert.deepEqual(
+      (await adapter.listModels('antigravity')).map((model) => model.id),
+      ['gemini-3-pro', 'claude-sonnet-4'],
+    )
+    const resolved = await adapter.resolveModel('antigravity', 'gemini-3-pro')
+    assert.equal(resolved.context?.contextWindow, 1_048_576)
+  })
+
+  test('a fresh listing replaces the cached one and is persisted', async () => {
+    const saved: unknown[] = []
+    const fetchFn: typeof fetch = async () => jsonResponse({
+      models: { 'gemini-3-pro': { displayName: 'Gemini 3 Pro', inputTokenLimit: 1_048_576 } },
+      agentModelSorts: [{ groups: [{ modelIds: ['gemini-3-pro'] }] }],
+    })
+    const adapter = new AntigravityAdapter(adapterOptions({
+      discovery: true,
+      fetchFn,
+      tokens: tokenManager(),
+      cachedListing: async () => [
+        { id: 'stale-model', name: 'Stale', contextWindow: 1_000 },
+      ],
+      saveListing: async (payload) => { saved.push(payload) },
+    }))
+    await adapter.hydrate()
+    assert.deepEqual(adapter.catalogEntries().map((entry) => entry.id), ['stale-model'])
+    await adapter.fetchCatalog('token', 'project-1')
+    // A model the endpoint no longer reports is gone; the read is cached for next time.
+    assert.deepEqual(adapter.catalogEntries().map((entry) => entry.id), ['gemini-3-pro'])
+    assert.equal(saved.length, 1)
+  })
+
+  test('an unusable cache payload is a miss, not an empty picker', async () => {
+    const adapter = new AntigravityAdapter(adapterOptions({
+      cachedListing: async () => ({ nope: true }),
+      tokens: tokenManager(),
+    }))
+    await adapter.hydrate()
     assert.deepEqual(adapter.catalogEntries(), [])
   })
 

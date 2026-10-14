@@ -43,7 +43,8 @@ import { idleWatchdog, httpLlmError, isMissingOrInvalidCredential, mapFetchFailu
 import { streamProviderResponses, accountPoolHooks } from './responses-stream.js'
 import type { UsageWindow } from '../protocol.js'
 import type { CatalogEntry } from './catalog.js'
-import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
+import { composeCatalog, fallbackEntry, findEntry, liveEntry, liveModelFacts, resolveCatalog } from './catalog.js'
+import type { LiveModelFacts } from './catalog.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import { prepareMoonshotTool } from '../translate/moonshot-schema.js'
 import type { ImageResolver } from '../translate/responses.js'
@@ -124,52 +125,16 @@ const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
 }
 
 /**
- * Kimi Code's live coding catalog.
+ * Spellings the endpoint has retired, and the model each one became.
  *
- * `kimi-for-coding` is the stable subscription alias Moonshot re-points at each
- * coding release; `k3` is the current flagship, with the `[1m]` suffix selecting
- * its 1M-token window.
+ * A repair table, not a roster: nothing here decides which models exist. Each entry
+ * is consulted only for an id the live listing does not itself serve, so a spelling
+ * the endpoint reintroduces is dispatched exactly as the endpoint names it. The
+ * endpoint's own 401 message (`Please set model id as \`k3\``) is the general case
+ * and needs no table at all; this only saves the first failed round trip for a
+ * spelling already known to be gone.
  */
-export const KIMI_MODELS: readonly KimiModelEntry[] = [
-  {
-    id: 'kimi-for-coding',
-    name: 'Kimi for Coding',
-    description: 'Stable subscription alias — 1M-token window',
-    aliases: ['kimi-for-coding-highspeed', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6', 'kimi-k2.5'],
-    contextWindow: KIMI_LONG_CONTEXT_WINDOW,
-    inputModalities: ['text', 'image'],
-    reasoningEfforts: ['low', 'medium', 'high', 'max'],
-    defaultEffort: 'max',
-  },
-  {
-    id: 'k3',
-    name: 'Kimi K3',
-    description: 'Flagship reasoning model',
-    aliases: ['kimi-k3'],
-    contextWindow: KIMI_CONTEXT_WINDOW,
-    inputModalities: ['text', 'image'],
-    reasoningEfforts: ['low', 'medium', 'high', 'max'],
-    defaultEffort: 'max',
-  },
-  {
-    id: 'k3[1m]',
-    name: 'Kimi K3 (1M)',
-    description: 'Flagship reasoning model with the 1M-token window',
-    contextWindow: KIMI_LONG_CONTEXT_WINDOW,
-    inputModalities: ['text', 'image'],
-    reasoningEfforts: ['low', 'medium', 'high', 'max'],
-    defaultEffort: 'max',
-  },
-  {
-    id: 'k3-256k',
-    name: 'Kimi K3 (256K)',
-    description: 'Flagship reasoning model pinned to the standard window',
-    contextWindow: KIMI_CONTEXT_WINDOW,
-    inputModalities: ['text', 'image'],
-    reasoningEfforts: ['low', 'medium', 'high', 'max'],
-    defaultEffort: 'max',
-  },
-]
+const RETIRED_MODEL_IDS: Readonly<Record<string, string>> = { 'k3[1m]': 'k3' }
 
 /** One `reasoning.efforts` entry for a resolved model. */
 function effortInfo(effort: string) {
@@ -230,6 +195,14 @@ export interface KimiAdapterOptions {
   /** Extra model ids from the plugin configuration, appended to the catalog. */
   extraModels?: readonly string[]
   /**
+   * Model this route preselects, and therefore always offers.
+   *
+   * Configuration rather than a shipped fact: a subscription that re-points its
+   * alias at a new release follows the config instead of this build's release
+   * cadence. Defaults to {@link KIMI_DEFAULT_MODEL}.
+   */
+  defaultModel?: string
+  /**
    * The user's model rank for this route, most preferred first.
    *
    * Read per catalog query, so a drag-and-drop re-order takes effect at the
@@ -252,49 +225,117 @@ export interface KimiAdapterOptions {
    * endpoint is the authority on what it serves, not this build.
    */
   userModels?: () => Promise<readonly string[]>
+  /**
+   * The payload of the endpoint's last live listing, as the cache kept it.
+   *
+   * Read once per session, before the first catalog query, so the picker offers real
+   * models without asking the endpoint anything. A route that fetched once and cached
+   * the answer has no reason to fetch again on every refresh; the Settings "refresh
+   * models" action is what re-reads it.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
 }
 
 /** Kimi Code adapter serving the `kimi` provider route. */
 export class KimiAdapter extends LlmAdapter {
-  /** Live catalog ids seen this session, used to accept renamed models. */
-  private discovered: readonly string[] | undefined
-  /** Image-generation model id, when discovery reported one. */
+  /**
+   * The catalog this route serves: entries derived from the endpoint's own listing,
+   * either the one just read or the one the cache kept from the last read.
+   *
+   * Undefined means neither source has produced a listing yet, so only the configured
+   * default model is offered until one does.
+   */
+  private live: readonly KimiModelEntry[] | undefined
+  /** Whether the cached listing has been read; it is read at most once per session. */
+  private hydrated = false
+  /** Image-generation model id, when the listing reported one. */
   private imageModel: string | undefined
   /**
    * Fast-variant wire id per picker row, for the composer's quick-mode button.
    *
-   * Seeded from the curated aliases — `kimi-for-coding-highspeed` is one — so the button
-   * exists before any discovery run, and then updated from the live catalog, which is
-   * the authority on what this account actually serves.
+   * Derived from the listing: `kimi-for-coding-highspeed` is a row of its own there,
+   * and pairs with `kimi-for-coding` because its name is that of a listed model plus
+   * the provider's own fast word.
    */
   private readonly fastVariants = new FastVariantIndex()
 
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
 
+  /**
+   * Model ids the endpoint renamed during this session, and what each became.
+   *
+   * Learned from the endpoint's own refusal (`Please set model id as \`k3\``), so a
+   * spelling retired after this build shipped is repaired without a plugin update. The
+   * first turn pays one refused request; every later turn goes straight to the current id.
+   */
+  private readonly renamed = new Map<string, string>()
+
   /** Tools already reported as flattened, so each is stated once. */
   private readonly flattenedTools = new Set<string>()
 
   constructor(private readonly options: KimiAdapterOptions) {
     super()
-    this.seedCuratedFastVariants()
   }
 
   /**
-   * Record the fast variants the curated catalog already names as aliases.
+   * Adopt the rows of one live listing as this route's catalog.
    *
-   * The alias is the recognition: `kimi-for-coding-highspeed` is stated as an accepted
-   * id of `kimi-for-coding`, so the route can offer the quick-mode button without
-   * waiting for a live list that may never name it. A row a live catalog already paired
-   * keeps that pairing, so this only fills the gaps.
+   * Everything the picker shows is derived here from the endpoint's own answer: the
+   * rows that become picker entries, the fast variant that pairs with each row, and
+   * the image model that is called by an agent rather than chosen. Nothing about
+   * which models exist, or what each one is, is decided by this build.
+   *
+   * Fast variants ride with their base row instead of becoming rows of their own: they
+   * share the row's visibility switch and are reached by the composer's quick-mode
+   * button. A variant is recognized by its own name — the provider's fast word appended
+   * to a listed model's id — so no curated alias map is needed to pair them.
+   *
+   * @param rows - decoded rows of the endpoint's listing, in the endpoint's order.
+   * @returns the entries to publish, in picker order.
    */
-  private seedCuratedFastVariants(): void {
-    for (const entry of KIMI_MODELS) {
-      for (const alias of entry.aliases ?? []) {
-        // Every alias of one row maps back to that row, so a variant whose own prefix
-        // names another alias (`kimi-k2.7-code-highspeed`) still pairs with the row.
-        this.fastVariants.note(alias, (base) => this.entryFor(base)?.id ?? base)
-      }
+  private adoptListing(rows: readonly unknown[]): readonly KimiModelEntry[] {
+    const facts = rows
+      .map((row) => liveModelFacts(row))
+      .filter((fact): fact is LiveModelFacts => fact !== undefined)
+    // Image models are never picker rows: they are agent-called, always on.
+    this.imageModel = facts.find((fact) => isImageModel(fact.id))?.id
+    this.fastVariants.clear()
+    for (const fact of facts) this.fastVariants.noteListed(fact.id)
+    for (const fact of facts) {
+      const base = this.fastVariants.pair(fact.id)
+      this.fastVariants.note(fact.id, () => base ?? baseModelOf(fact.id))
+    }
+    // Fold a variant onto its row and drop the ids that are not chat models, keeping the
+    // endpoint's order. A row's own facts describe the row; a variant's describe the
+    // variant, so a row that is also listed is never overwritten by its variant.
+    const byId = new Map<string, LiveModelFacts>()
+    for (const fact of facts) {
+      if (NON_CHAT_ID.test(fact.id)) continue
+      const id = isFastVariant(fact.id) ? this.fastVariants.pair(fact.id) ?? baseModelOf(fact.id) : fact.id
+      if (id === fact.id || !byId.has(id)) byId.set(id, { ...fact, id })
+    }
+    return [...byId.values()].map((fact) =>
+      liveEntry(fact, [], KIMI_CONTEXT_WINDOW, 'Reported by the Kimi Code model list'))
+  }
+
+  /**
+   * Read the cached listing, once, so the picker works without asking the endpoint.
+   *
+   * Called before the first catalog query. A read failure is a cache miss, never a
+   * failure: the route simply has no listing until one is fetched.
+   */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return
+    this.hydrated = true
+    if (this.live !== undefined || this.options.cachedListing === undefined) return
+    try {
+      const rows = await this.options.cachedListing()
+      if (Array.isArray(rows) && rows.length > 0) this.live = this.adoptListing(rows)
+    } catch (error: unknown) {
+      this.options.onWarn?.(`cached model catalog unavailable (${errorChain(error)})`)
     }
   }
 
@@ -337,6 +378,7 @@ export class KimiAdapter extends LlmAdapter {
     // Nothing to offer without a signed-in account: a model that cannot be called
     // must not appear in the picker, and Auto must not try it.
     if (await this.options.tokens.session() === undefined) return []
+    await this.hydrate()
     await this.syncUserModels()
     const hidden = await this.hidden()
     // One row per model, always under the model's own id: the host validates every GUI
@@ -344,8 +386,7 @@ export class KimiAdapter extends LlmAdapter {
     // picker with no way back to the standard model. Fast mode is the row's `fast`
     // reasoning rung instead (see `stream`).
     const imageless = this.catalog().filter((entry) => !isImageModel(entry.id))
-    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({
-      provider: KIMI_PROVIDER_ID,
+    return resolveCatalog(imageless, [], hidden).entries.map((entry) => ({      provider: KIMI_PROVIDER_ID,
       id: entry.id,
       name: entry.name,
       ...entry.description === undefined ? {} : { description: entry.description },
@@ -379,8 +420,12 @@ export class KimiAdapter extends LlmAdapter {
   }
 
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    await this.hydrate()
     await this.syncUserModels()
-    const entry = this.entryFor(model)
+    // A retired spelling answers with the model that replaced it, so a session that
+    // saved the old id shows the right name, window and ladder before it dispatches.
+    const repaired = this.repairModelId(model)
+    const entry = this.entryFor(repaired ?? model)
     if (entry === undefined) {
       // An unknown id is still dispatchable: the endpoint accepts the id it
       // reports, and a model added after this build should not be refused. It
@@ -400,8 +445,9 @@ export class KimiAdapter extends LlmAdapter {
     // picker shows the row under its own name and the mode as the effort.
     const fastWireId = this.fastVariants.variantOf(entry.id)
     const reasoning = reasoningInfo(entry, fastWireId)
-    // An alias is just another spelling of the row, so it resolves onto the row's own id:
-    // that is what keeps a selection dispatchable and the picker able to show it.
+    // The listing's own id is what resolves here — a renamed or retired spelling is
+    // reported as the model the endpoint now calls it — which is what keeps a selection
+    // dispatchable and the picker able to show it.
     return {
       provider: KIMI_PROVIDER_ID,
       id: entry.id,
@@ -418,10 +464,18 @@ export class KimiAdapter extends LlmAdapter {
     // Fast mode rides the reasoning channel: the rung is the variant's own fast word, not
     // a model id of its own, so the row the picker selected stays dispatchable and the user
     // can always select the standard model again. Only the wire id changes.
-    const fastWireId = this.fastVariants.variantOf(options.model)
     const effort = String(options.reasoningEffort ?? '')
+    // A request that already names a fast variant keeps that wire id: it is a model id of
+    // its own rather than a spelling of the row. Every other id is sent exactly as the
+    // endpoint's listing names it, except a spelling the endpoint has retired, which goes
+    // out as the model that replaced it — a session that saved `k3[1m]` repairs itself on
+    // the next turn instead of failing with HTTP 401.
+    const selected = isFastVariant(options.model)
+      ? options.model
+      : this.repairModelId(options.model) ?? options.model
+    const fastWireId = this.fastVariants.variantOf(selected)
     const fast = fastWireId !== undefined && effort === fastWordOf(fastWireId)
-    const model = fast ? fastWireId : options.model
+    const model = fast ? fastWireId : selected
     const call = { ...options, model }
     // Kimi has no fast-variant effort; the variant already carries the behaviour.
     if (fast) delete call.reasoningEffort
@@ -436,6 +490,12 @@ export class KimiAdapter extends LlmAdapter {
       ...accountPoolHooks({ provider: KIMI_PROVIDER_ID, tokens: this.options.tokens, readUsage: this.options.readUsage }),
       onAccountSwitch: (from, to, reason) => {
         this.options.onWarn?.(`kimi: account ${from} allowance spent (${reason}); switching to ${to}`)
+      },
+      // The endpoint names the model id to use when a request asks for one it has
+      // retired; remembering it repairs this session rather than failing the turn.
+      onModelRenamed: (from, to) => {
+        this.renamed.set(from, to)
+        this.options.onWarn?.(`kimi: model ${from} is retired; using ${to}`)
       },
       ...this.options.onCredentialRejected === undefined
         ? {}
@@ -469,35 +529,48 @@ export class KimiAdapter extends LlmAdapter {
   }
 
   /**
-   * The catalog to present: the shipped entries in their curated order and with
-   * their curated metadata, then any configured extra id, then any live id this
-   * build does not know.
+   * The catalog to present: the models the endpoint's listing named, in its own order,
+   * each with the metadata that listing stated, then the configured extras.
    *
-   * The live list never removes a shipped entry: the endpoint serves variants
-   * such as `k3[1m]` that its own `/models` listing omits, so absence there is
-   * not evidence of retirement.
+   * There is no shipped roster to fall back to. A listing is read once and cached (see
+   * {@link hydrate} and {@link fetchCatalog}), and that cached table is what the picker
+   * shows until the next read, so a model released, renamed or retired server-side is
+   * reflected without a plugin update or a request per refresh.
    */
   private shippedCatalog(): readonly KimiModelEntry[] {
-    const extra: KimiModelEntry[] = []
-    const seen = new Set<string>()
-    const append = (id: string, description: string): void => {
-      if (seen.has(id) || this.entryFor(id) !== undefined) return
-      seen.add(id)
-      extra.push(fallbackEntry(id, description, KIMI_CONTEXT_WINDOW))
-    }
-    for (const id of this.options.extraModels ?? []) append(id, 'Extra model from the plugin configuration')
-    for (const id of this.discovered ?? []) append(id, 'Reported by the Kimi Code model list')
-    return extra.length === 0 ? KIMI_MODELS : [...KIMI_MODELS, ...extra]
+    return composeCatalog({
+      curated: [],
+      ...this.live === undefined ? {} : { live: this.live },
+      ...this.options.extraModels === undefined ? {} : { extra: this.options.extraModels },
+      defaultModel: this.options.defaultModel ?? KIMI_DEFAULT_MODEL,
+      fallbackContextWindow: KIMI_CONTEXT_WINDOW,
+      extraDescription: 'Extra model from the plugin configuration',
+    })
   }
 
-  /** Whether one shipped entry covers a live model id. */
-  private entryMatches(entry: KimiModelEntry, id: string): boolean {
-    return entry.id === id || entry.aliases?.includes(id) === true
-  }
-
-  /** Resolve a requested model id onto its catalog entry. */
+  /** Resolve a requested model id onto the entry the endpoint's listing described. */
   private entryFor(model: string): KimiModelEntry | undefined {
-    return findEntry(KIMI_MODELS, model)
+    return findEntry(this.live ?? [], model)
+  }
+
+  /**
+   * The model one wire id names, when the endpoint has retired the spelling.
+   *
+   * Consulted only for an id the current listing does not serve, so an id the endpoint
+   * itself reports is always dispatched exactly as reported.
+   *
+   * @param model - the requested model id.
+   * @returns the current spelling, or undefined when the id is not a known retirement.
+   */
+  private repairModelId(model: string): string | undefined {
+    if (this.entryFor(model) !== undefined) return undefined
+    // A fast variant is a wire id rather than a row: a session that saved one belongs on
+    // the row that owns it, where the quick-mode rung is what switches the variant on.
+    const pair = this.fastVariants.pairOf(model)
+    if (pair !== undefined) return pair.baseId
+    // Prefer what this session was actually told over the table this build shipped: the
+    // endpoint's own answer is newer than any release.
+    return this.renamed.get(model) ?? RETIRED_MODEL_IDS[model]
   }
 
   /** Re-read the ids the user added by hand. */
@@ -525,12 +598,23 @@ export class KimiAdapter extends LlmAdapter {
       .map((id) => fallbackEntry(id, 'Added by hand in Settings', KIMI_CONTEXT_WINDOW))
   }
 
-  /** Record the live catalog for the picker; failures keep the shipped list. */
+  /**
+   * Adopt the ids a caller reports as the served set, without a listing.
+   *
+   * {@link fetchCatalog} already derived the entries from the rows it read, and the
+   * controller reports those same ids back here; the entries it recorded are kept. A
+   * caller that only has ids (a test, another discovery path) gets conservative entries
+   * for them.
+   *
+   * @param ids - model ids the caller reports.
+   */
   discover(ids: readonly string[]): void {
-    this.discovered = ids
+    const known = new Map((this.live ?? []).map((entry) => [entry.id, entry]))
+    this.live = ids.map((id) => known.get(id)
+      ?? liveEntry({ id }, [], KIMI_CONTEXT_WINDOW, 'Reported by the Kimi Code model list'))
   }
 
-  /** The curated catalog, for the Settings page's model list. */
+  /** The catalog, for the Settings page's model list. */
   catalogEntries(): readonly KimiModelEntry[] {
     return this.catalog()
   }
@@ -612,7 +696,20 @@ export class KimiAdapter extends LlmAdapter {
     }
   }
 
-  /** Read the live `/models` catalog, or undefined when unavailable. */
+  /**
+   * Read the endpoint's model listing and adopt it as this route's catalog.
+   *
+   * This is the one place a model table is produced, and it is the endpoint's own
+   * answer: what the listing names is what the picker offers, with the display name,
+   * context window, modalities and reasoning ladder the listing states. The rows are
+   * also handed to {@link KimiAdapterOptions.saveListing}, so the next session starts
+   * from this table instead of asking again — the Settings "refresh models" action is
+   * what re-reads it.
+   *
+   * @param accessToken - bearer for the account.
+   * @param signal - optional cancellation.
+   * @returns the model ids now served, or undefined when the listing is unavailable.
+   */
   async fetchCatalog(accessToken: string, signal?: AbortSignal): Promise<readonly string[] | undefined> {
     if (!this.options.discovery) return undefined
     const fetchFn = this.options.fetchFn ?? proxiedFetch
@@ -623,43 +720,31 @@ export class KimiAdapter extends LlmAdapter {
       })
       if (!response.ok) {
         if (!isMissingOrInvalidCredential(await httpLlmError(response, 'Kimi models'))) {
-          this.options.onWarn?.(`Kimi model discovery failed (HTTP ${response.status}); using the built-in catalog`)
+          this.options.onWarn?.(`Kimi model discovery failed (HTTP ${response.status}); keeping the last catalog`)
         }
         return undefined
       }
-      const payload = await response.json() as { data?: { id?: unknown }[] }
-      const allIds = (payload.data ?? [])
-        .map((entry) => entry.id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0)
-      // Image models are never picker rows: they are agent-called, always on.
-      this.imageModel = allIds.find((id) => isImageModel(id))
-      // Fast/lightspeed variants ride with their base row: they share the row's
-      // visibility switch and are reached by the composer's quick-mode button, not a
-      // separate row. The live list is the authority on what this account serves, so
-      // it is recorded first, and each variant pairs with the longest listed prefix
-      // of its own name — a provider that names its variants after the base model
-      // pairs them with no curated map at all.
-      this.fastVariants.clear()
-      for (const id of allIds) {
-        this.fastVariants.noteListed(id)
-      }
-      for (const id of allIds) {
-        const base = this.fastVariants.pair(id)
-        this.fastVariants.note(id, () => base ?? this.entryFor(baseModelOf(id))?.id ?? baseModelOf(id))
-      }
-      this.seedCuratedFastVariants()
-      const ids = allIds
-        .filter((id) => !NON_CHAT_ID.test(id))
-        .map((id) => (isFastVariant(id) ? this.fastVariants.pair(id) ?? baseModelOf(id) : id))
-        .filter((id, index, list) => list.indexOf(id) === index)
-      if (ids.length === 0) {
-        this.options.onWarn?.('Kimi model discovery returned an empty catalog; using the built-in catalog')
+      const payload = await response.json() as { data?: unknown }
+      const rows = Array.isArray(payload.data) ? payload.data : []
+      const entries = this.adoptListing(rows)
+      if (entries.length === 0) {
+        this.options.onWarn?.('Kimi model discovery returned an empty catalog; keeping the last catalog')
         return undefined
       }
-      return ids
+      this.live = entries
+      // The cached table is the endpoint's answer, kept so the next session does not ask
+      // again. A cache failure never fails the read that produced it.
+      if (this.options.saveListing !== undefined) {
+        try {
+          await this.options.saveListing(rows)
+        } catch (error: unknown) {
+          this.options.onWarn?.(`model catalog cache write failed (${errorChain(error)})`)
+        }
+      }
+      return entries.map((entry) => entry.id)
     } catch (error: unknown) {
       if (signal?.aborted === true) return undefined
-      this.options.onWarn?.(`Kimi model discovery failed; using the built-in catalog (${errorChain(error)})`)
+      this.options.onWarn?.(`Kimi model discovery failed; keeping the last catalog (${errorChain(error)})`)
       return undefined
     }
   }

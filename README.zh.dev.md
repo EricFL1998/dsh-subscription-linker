@@ -56,7 +56,7 @@ Antigravity 的流程是 Google 的桌面 OAuth 客户端（`accounts.google.com
 | --- | --- |
 | `ctx.llm` | `kimi`、`grok`、`antigravity`、`glm` 和 `auto` 提供方路由（模型、推理强度、流式输出） |
 | Settings | 一个 **Subscriptions** 区域：每个提供方一张卡片——登录、退出登录、默认账户、令牌刷新、套餐配额、模型目录、管理对话框 |
-| 模型选择器 | 每个提供方自己的模型，外加**作为独立路由的 `auto`**，横跨它们——Kimi 提供 `kimi-for-coding`、`k3`、`k3[1m]`、`k3-256k`；Grok 内置 `grok-4.6`、`grok-4.5`，并加入其实时目录所报告的任何模型；Antigravity 列出其端点所报告内容（`fetchAvailableModels`）中可供 agent 调用的子集，过滤掉 tabs、commit-message 和 transcription 相关层面；GLM 提供 `glm-5.3` 系列（`glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`glm-5.1`、`glm-5`），并加入其编码主机所列出的一切 |
+| 模型选择器 | 每个提供方自己的模型，外加**作为独立路由的 `auto`**，横跨它们。成员资格来自提供方自己的模型列表：每个路由只读取一次并缓存为该路由的目录（`~/.dsh/plugins/kimi-oauth/model-catalog.json`），因此选择器不会发出请求，服务端新增或下线模型也无需插件更新。Kimi 提供 `kimi-for-coding`、`k3`（1M）与 `k3-256k`；Grok 在 `grok-4.6`、`grok-4.5` 之上加入其实时目录所报告的任何模型；Antigravity 列出其端点所报告内容（`fetchAvailableModels`）中可供 agent 调用的子集，过滤掉 tabs、commit-message 和 transcription 相关层面；GLM 在 `glm-5.3` 系列之上加入其编码主机所列出的一切 |
 
 凭证存放在 `~/.dsh/plugins/kimi-oauth/auth.json`（模式 `0600`，原子写入，每个提供方
 一个区段）。该目录保留了本插件在只服务 Kimi Code 时所用的名称：它保存着**活跃的

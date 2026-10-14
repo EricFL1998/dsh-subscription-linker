@@ -49,10 +49,11 @@ function kimiStatus(overrides: Partial<ProviderStatus> = {}): ProviderStatus {
     discovery: true,
     discovered: ['kimi-for-coding', 'k3', 'k3-256k'],
     models: [
-      { id: 'kimi-for-coding', name: 'Kimi for Coding', contextWindow: 1_048_576, defaultEffort: 'max', inputModalities: ['text', 'image'], visible: true },
-      { id: 'k3', name: 'Kimi K3', contextWindow: 262_144, defaultEffort: 'max', inputModalities: ['text', 'image'], visible: true },
-      { id: 'k3[1m]', name: 'Kimi K3 (1M)', contextWindow: 1_048_576, defaultEffort: 'max', inputModalities: ['text', 'image'], visible: true },
-      { id: 'k3-256k', name: 'Kimi K3 (256K)', contextWindow: 262_144, defaultEffort: 'max', inputModalities: ['text', 'image'], visible: true },
+      // The endpoint's own listing: the cached table the picker renders, names and windows
+      // included. `k3` carries 1M because that is what the listing states for it.
+      { id: 'kimi-for-coding', name: 'K2.8 Preview', contextWindow: 1_048_576, defaultEffort: 'max', inputModalities: ['text', 'image'], visible: true },
+      { id: 'k3', name: 'K3', contextWindow: 1_048_576, defaultEffort: 'high', inputModalities: ['text', 'image'], visible: true },
+      { id: 'k3-256k', name: 'K3-256k', contextWindow: 262_144, defaultEffort: 'high', inputModalities: ['text', 'image'], visible: true },
       { id: 'k3-next', name: 'k3-next', description: 'Added by hand in Settings', contextWindow: 262_144, visible: true, userAdded: true },
     ],
     defaultModel: 'kimi-for-coding',
@@ -241,7 +242,7 @@ function currentStatus(): SubscriptionStatus {
     if (kimi !== undefined) {
       providers[1] = {
         ...kimi,
-        models: kimi.models.map((model) => model.id === 'k3[1m]' ? { ...model, visible: false } : model),
+        models: kimi.models.map((model) => model.id === 'k3-256k' ? { ...model, visible: false } : model),
       }
     }
   }

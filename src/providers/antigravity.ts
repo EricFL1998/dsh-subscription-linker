@@ -469,19 +469,6 @@ export async function fetchAntigravityModels(input: {
   if (typeof models !== 'object' || models === null) {
     throw new LlmError('Antigravity models endpoint returned no models object', 'MALFORMED_RESPONSE')
   }
-  // TEMP diagnostics: write the raw model-id list to a file so an over-eager filter is
-  // inspectable after a discovery run, since the node half's stdout is unreachable in
-  // the desktop shell.
-  try {
-    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    const { homedir } = require('node:os') as typeof import('node:os')
-    const { join } = require('node:path') as typeof import('node:path')
-    writeFileSync(
-      join(homedir(), '.dsh', 'antigravity-raw-models.json'),
-      JSON.stringify(Object.keys(models), null, 2),
-      'utf8',
-    )
-  } catch { /* diagnostics never break parsing */ }
   // The response names far more than the agent may call; the filter keeps the
   // callable grouping and reports the per-model quota for the fallback path.
   const entries = parseAntigravityModels(payload)
@@ -508,6 +495,34 @@ function quotaWindow(scope: string, quota: { remainingFraction?: number, resetTi
   }
 }
 
+/** Whether one cached value is a usable catalog entry. */
+function isCachedEntry(value: unknown): value is CatalogEntry {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return typeof record['id'] === 'string' && record['id'] !== ''
+    && typeof record['name'] === 'string'
+    && typeof record['contextWindow'] === 'number' && Number.isFinite(record['contextWindow'])
+}
+
+/**
+ * Read a cached catalog payload.
+ *
+ * The route writes the entries themselves; a whole `{ entries: [...] }` document is
+ * accepted too, so a payload written in either shape cannot silently empty the picker.
+ * Anything unusable is dropped rather than trusted.
+ *
+ * @param payload - whatever the cache returned.
+ * @returns the usable entries, possibly none.
+ */
+function cachedEntries(payload: unknown): readonly CatalogEntry[] {
+  const rows = Array.isArray(payload)
+    ? payload
+    : typeof payload === 'object' && payload !== null && Array.isArray((payload as { entries?: unknown }).entries)
+      ? (payload as { entries: unknown[] }).entries
+      : []
+  return rows.filter(isCachedEntry)
+}
+
 /** Constructor dependencies for {@link AntigravityAdapter}. */
 export interface AntigravityAdapterOptions {
   /** Cloud Code Assist origin; defaults to the daily one. */
@@ -531,6 +546,17 @@ export interface AntigravityAdapterOptions {
   modelOrder?: () => Promise<readonly string[]>
   fetchFn?: FetchFn
   onCredentialRejected?: (account: string) => void
+  /**
+   * The endpoint's last live listing, from this plugin's cache.
+   *
+   * Read once per session, before the first catalog query, so the picker offers real
+   * models without asking the endpoint anything. A route that fetched once and cached
+   * the answer has no reason to fetch again on every refresh; the Settings "refresh
+   * models" action is what re-reads it.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
 }
 
 /** Antigravity wire adapter serving the `antigravity` route. */
@@ -539,6 +565,8 @@ export class AntigravityAdapter extends LlmAdapter {
   private discovered: readonly string[] | undefined
   /** Live catalog entries, so the Settings list matches what the account has. */
   private live: readonly CatalogEntry[] | undefined
+  /** Whether the cached listing has been read; it is read at most once per session. */
+  private hydrated = false
   /** Per-model quota windows from the last catalog read. */
   private quotas = new Map<string, { remainingFraction?: number, resetTime?: string }>()
 
@@ -562,6 +590,7 @@ export class AntigravityAdapter extends LlmAdapter {
     // Nothing to offer without a signed-in account: a model that cannot be called
     // must not appear in the picker, and Auto must not try it.
     if (await this.options.tokens.session() === undefined) return []
+    await this.hydrate()
     await this.syncUserModels()
     const hidden = await this.hidden()
     return resolveCatalog(this.catalog(), [], hidden).entries.map((entry) => ({
@@ -587,20 +616,44 @@ export class AntigravityAdapter extends LlmAdapter {
 
 
   /**
-   * The catalog the route serves: its own entries, then the ids the user added
-   * by hand. The two are built separately so the hand-added check can look at
-   * the shipped list without recursing.
+   * Read the cached listing, once, so the picker works without asking the endpoint.
+   *
+   * The cache is this route's last live catalog — the entries the endpoint reported, which
+   * is also what a fresh read produces — so adopting it is indistinguishable from having
+   * just fetched. A read failure is a cache miss, never a failure.
    */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return
+    this.hydrated = true
+    if (this.live !== undefined || this.options.cachedListing === undefined) return
+    try {
+      const entries = cachedEntries(await this.options.cachedListing())
+      if (entries.length > 0) this.adopt(entries)
+    } catch (error: unknown) {
+      this.options.onWarn?.(`cached model catalog unavailable (${errorChain(error)})`)
+    }
+  }
+
+  /** Publish one listing as this route's catalog. */
+  private adopt(entries: readonly CatalogEntry[]): void {
+    this.live = entries
+    this.discovered = entries.map((entry) => entry.id)
+  }
+
+  /** The catalog the route serves: its own entries, then the ids the user added
+   * by hand. The two are built separately so the hand-added check can look at
+   * the shipped list without recursing. */
   private catalog(): readonly CatalogEntry[] {
     return [...this.shippedCatalog(), ...this.addedEntries()]
   }
 
-  /** Live entries when discovery has run, otherwise an empty catalog. */
+  /** The live entries: the cached listing until a fresh one replaces it. */
   private shippedCatalog(): readonly CatalogEntry[] {
     return this.live ?? []
   }
 
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    await this.hydrate()
     await this.syncUserModels()
     const entries = this.catalog()
     const entry = findEntry(entries, model)
@@ -766,7 +819,12 @@ export class AntigravityAdapter extends LlmAdapter {
     if (Date.now() < session.expiresAt) {
       return { account, accessToken: session.accessToken, expiresAt: session.expiresAt }
     }
-    return await this.options.tokens.resolve(account, true)
+    try {
+      const resolved = await this.options.tokens.resolve(account, true)
+      return resolved
+    } catch (error) {
+      throw error
+    }
   }
 
   /** Translate an auth failure into the message a user can act on. */
@@ -804,17 +862,22 @@ export class AntigravityAdapter extends LlmAdapter {
     )
     const fetchFn = this.options.fetchFn ?? proxiedFetch
     const origin = this.options.baseUrl ?? ANTIGRAVITY_BASE_URL
-    return fetchFn(`${origin}/v1internal:streamGenerateContent?alt=sse`, {
-      method: 'POST',
-      headers: attributedHeaders({
-        'authorization': `Bearer ${accessToken}`,
-        'accept': 'text/event-stream',
-        'content-type': 'application/json',
-        'user-agent': ANTIGRAVITY_USER_AGENT,
-      }),
-      body: JSON.stringify(envelope),
-      signal,
-    })
+    try {
+      const response = await fetchFn(`${origin}/v1internal:streamGenerateContent?alt=sse`, {
+        method: 'POST',
+        headers: attributedHeaders({
+          'authorization': `Bearer ${accessToken}`,
+          'accept': 'text/event-stream',
+          'content-type': 'application/json',
+          'user-agent': ANTIGRAVITY_USER_AGENT,
+        }),
+        body: JSON.stringify(envelope),
+        signal,
+      })
+      return response
+    } catch (error) {
+      throw error
+    }
   }
 
   /** Resolve image blocks through the attachment service, when it is present. */
@@ -855,8 +918,16 @@ export class AntigravityAdapter extends LlmAdapter {
         ...signal === undefined ? {} : { signal },
       })
       this.quotas = quotas
-      this.live = entries
-      this.discovered = entries.map((entry) => entry.id)
+      this.adopt(entries)
+      // The catalog the endpoint just reported is what the next session starts from, so
+      // the picker does not have to ask again. A cache failure never fails this read.
+      if (this.options.saveListing !== undefined) {
+        try {
+          await this.options.saveListing(entries)
+        } catch (error: unknown) {
+          this.options.onWarn?.(`model catalog cache write failed (${errorChain(error)})`)
+        }
+      }
       return this.discovered
     } catch (error: unknown) {
       if (signal?.aborted === true) return undefined
@@ -1061,6 +1132,15 @@ export interface AntigravityProviderOptions {
   fetchFn?: FetchFn
   /** Activate an eligible account when `loadCodeAssist` reports no project. */
   onboard?: boolean
+  /**
+   * The endpoint's last live catalog, from this plugin's cache.
+   *
+   * This route has no curated list — what an account may use is plan-dependent — so the
+   * cache is what makes a cold start (or an unreachable endpoint) still show models.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
 }
 
 /**
@@ -1148,8 +1228,14 @@ export function createAntigravityProvider(options: AntigravityProviderOptions): 
     hiddenModels: () => options.preferences.hiddenIds(ANTIGRAVITY_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(ANTIGRAVITY_PROVIDER_ID),
     modelOrder: () => options.preferences.orderOf(ANTIGRAVITY_PROVIDER_ID),
+    ...options.cachedListing === undefined ? {} : { cachedListing: options.cachedListing },
+    ...options.saveListing === undefined ? {} : { saveListing: options.saveListing },
     fetchFn,
   })
+
+  // Read the cached table now rather than at the first picker query: the Settings page
+  // reads the catalog synchronously, so a request-free start must already have it.
+  void adapter.hydrate().catch(() => undefined)
 
   const spec: ProviderSpec<AntigravitySession> = {
     id: ANTIGRAVITY_PROVIDER_ID,

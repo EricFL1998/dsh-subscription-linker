@@ -44,6 +44,16 @@ export interface KimiProviderOptions {
   defaultModel?: string
   /** Extra model ids published without shipped metadata. */
   extraModels?: readonly string[]
+  /**
+   * The endpoint's last live payload, from this plugin's cache.
+   *
+   * The cached table is what the picker shows before any request: the endpoint's own
+   * answer from the last read, so a release does not need a plugin update and a refresh
+   * does not need a request.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
   /** Shared model-visibility preferences. */
   preferences: ModelPreferences
   /** Resolve the attachment service per request. */
@@ -143,17 +153,23 @@ export function createKimiProvider(options: KimiProviderOptions): ProviderRoute 
     hiddenModels: () => options.preferences.hiddenIds(KIMI_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(KIMI_PROVIDER_ID),
     modelOrder: () => options.preferences.orderOf(KIMI_PROVIDER_ID),
+    defaultModel: options.defaultModel ?? KIMI_DEFAULT_MODEL,
+    ...options.cachedListing === undefined ? {} : { cachedListing: options.cachedListing },
+    ...options.saveListing === undefined ? {} : { saveListing: options.saveListing },
     ...options.extraModels === undefined ? {} : { extraModels: options.extraModels },
     fetchFn,
   })
 
-  const spec: ProviderSpec<KimiSession> = {
-    id: KIMI_PROVIDER_ID,
+  // Read the cached table now rather than at the first picker query: the Settings page
+  // reads the catalog synchronously, so a request-free start must already have it.
+  void adapter.hydrate().catch(() => undefined)
+
+  const spec: ProviderSpec<KimiSession> = {    id: KIMI_PROVIDER_ID,
     displayName: KIMI_PROVIDER_NAME,
     codeUrl: KIMI_CODE_URL,
     credentialFile: options.credentialFile,
     discovery: options.discovery,
-    defaultModel: KIMI_DEFAULT_MODEL,
+    defaultModel: options.defaultModel ?? KIMI_DEFAULT_MODEL,
     catalog: () => adapter.catalogEntries(),
     catalogOwn: () => adapter.ownCatalogEntries(),
     fallbackContextWindow: KIMI_CONTEXT_WINDOW,

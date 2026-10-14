@@ -1,6 +1,7 @@
 /**
  * The `mimo` provider route's wiring: credential store, Xiaomi QR/password
- * login, model catalog, and its Settings card facts.
+ * login, model catalog (MiMo's own listing, read once and cached), and its
+ * Settings card facts.
  *
  * @module dsh-plugin-subscription-oauth/providers/mimo-provider
  */
@@ -24,7 +25,6 @@ import {
   MIMO_CODE_URL,
   MIMO_CONTEXT_WINDOW,
   MIMO_DEFAULT_MODEL,
-  MIMO_MODELS,
   MIMO_PROVIDER_ID,
   MIMO_PROVIDER_NAME,
   parseMimoSession,
@@ -43,10 +43,22 @@ import type { UsageWindow } from '../protocol.js'
 export interface MimoProviderOptions {
   /** Absolute path of `auth.json`. */
   credentialFile: string
+  /** Consult MiMo's own live model listing. Defaults to on. */
+  discovery?: boolean
   /** Abandon a stream after this much silence. */
   streamIdleTimeoutMs: number
   /** Model the picker preselects. */
   defaultModel?: string
+  /**
+   * MiMo's last live listing, from this plugin's cache.
+   *
+   * The cached table is what the picker shows before any request: the endpoint's own
+   * answer from the last read, so a release does not need a plugin update and a refresh
+   * does not need a request. Absent, the built-in roster is what the picker shows.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
   /** Shared model-visibility preferences. */
   preferences: ModelPreferences
   /** Resolve the attachment service per request. */
@@ -163,28 +175,39 @@ export function createMimoProvider(options: MimoProviderOptions): ProviderRoute 
     },
   })
 
+  const discovery = options.discovery ?? true
   const adapter = new MimoAdapter({
+    discovery,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs,
     tokens,
     ...options.onWarn === undefined ? {} : { onWarn: options.onWarn },
     ...options.resolveAttachments === undefined ? {} : { resolveAttachments: options.resolveAttachments },
     hiddenModels: () => options.preferences.hiddenIds(MIMO_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(MIMO_PROVIDER_ID),
+    ...options.cachedListing === undefined ? {} : { cachedListing: options.cachedListing },
+    ...options.saveListing === undefined ? {} : { saveListing: options.saveListing },
     fetchFn,
   })
+
+  // Read the cached table now rather than at the first picker query: the Settings page
+  // reads the catalog synchronously, so a request-free start must already have it.
+  void adapter.hydrate().catch(() => undefined)
 
   const spec: ProviderSpec<MimoSession> = {
     id: MIMO_PROVIDER_ID,
     displayName: MIMO_PROVIDER_NAME,
     codeUrl: MIMO_CODE_URL,
     credentialFile: options.credentialFile,
-    // MiMo ships a fixed two-model catalog; there is no discovery endpoint.
-    discovery: false,
+    // MiMo's own listing is best-effort: it may answer the public API's ids rather than
+    // the app roster's, and it may refuse the session credential. What the picker shows
+    // until (and unless) it answers is the built-in roster, so a failed read can never
+    // empty the picker.
+    discovery,
     defaultModel: options.defaultModel ?? MIMO_DEFAULT_MODEL,
     catalog: () => adapter.catalogEntries(),
     catalogOwn: () => adapter.ownCatalogEntries(),
     fallbackContextWindow: MIMO_CONTEXT_WINDOW,
-    discover: () => Promise.resolve(undefined),
+    discover: (accessToken) => adapter.fetchCatalog(accessToken),
     usage: async (_accessToken, account) => {
       const held = await store.get(account)
       if (held === undefined) return undefined
@@ -203,7 +226,7 @@ export function createMimoProvider(options: MimoProviderOptions): ProviderRoute 
       { key: 'provider', value: MIMO_PROVIDER_NAME },
       { key: 'credentialFile', value: options.credentialFile },
     ],
-    applyDiscovery: () => {},
+    applyDiscovery: (ids) => { adapter.discover(ids) },
   }
 
   const controller = new ProviderController<MimoSession>({

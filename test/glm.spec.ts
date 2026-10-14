@@ -1,5 +1,6 @@
 /**
- * The GLM route: session parsing, the shipped catalog, and the allowance reader.
+ * The GLM route: session parsing, the model catalog it derives from the endpoint's own
+ * listing, and the allowance reader.
  *
  * @module dsh-plugin-subscription-oauth/test/glm
  */
@@ -12,7 +13,6 @@ import { describe, test } from 'node:test'
 
 import {
   GLM_DEFAULT_MODEL,
-  GLM_MODELS,
   GlmAdapter,
   parseGlmQuota,
   parseGlmSession,
@@ -25,6 +25,43 @@ import { ModelPreferences } from '../src/settings.js'
 /** A JSON response the way the coding host sends one. */
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
+}
+
+/**
+ * One `/models` answer, in the shape the coding host sends: the OpenAI-compatible
+ * envelope, whose rows state their own name, window and reasoning ladder.
+ *
+ * `glm-6-ultra` is here to be a model this build has never shipped; `glm-5.3-image` is
+ * agent-called rather than picked, so it is never a row.
+ */
+const GLM_LISTING = {
+  object: 'list',
+  data: [
+    {
+      id: 'glm-5.3',
+      object: 'model',
+      name: 'GLM-5.3',
+      context_length: 1_048_576,
+      modalities: { input: ['text'] },
+      think_efforts: { valid_efforts: ['low', 'high', 'max'], default_effort: 'max' },
+    },
+    {
+      id: 'glm-6-ultra',
+      object: 'model',
+      display_name: 'GLM-6 Ultra',
+      context_window: 2_000_000,
+      modalities: { input: ['text', 'image'] },
+      reasoning: { effort: { valid: ['low', 'medium'], default: 'medium' } },
+    },
+    {
+      id: 'glm-5.3-flash',
+      object: 'model',
+      name: 'GLM-5.3 Flash',
+      context_length: 1_048_576,
+      modalities: { input: ['text', 'image'] },
+    },
+    { id: 'glm-5.3-image', object: 'model', name: 'GLM-5.3 Image' },
+  ],
 }
 
 /** An adapter with the smallest set of collaborators its methods touch. */
@@ -64,53 +101,161 @@ describe('GLM catalog', () => {
     assert.deepEqual(adapter().providerInfo('glm'), { id: 'glm', name: 'GLM (BigModel)' })
   })
 
-  test('ships the coding-plan family, with the flagship recommended', () => {
-    const ids = GLM_MODELS.map((entry) => entry.id)
-    assert.ok(ids.includes(GLM_DEFAULT_MODEL))
-    assert.ok(ids.includes('glm-5.3-flash'))
-    // The wire ids are lowercase; the display name is not what the endpoint takes.
-    assert.ok(ids.every((id) => id === id.toLowerCase()))
+  test('the cached listing is the whole catalog, names and windows included', async () => {
+    const subject = adapter({ cachedListing: async () => GLM_LISTING.data })
+    const models = await subject.listModels('glm')
+    assert.deepEqual(models.map((model) => model.id), ['glm-5.3', 'glm-6-ultra', 'glm-5.3-flash'])
+    // The endpoint's own display name and modalities, not a shipped guess.
+    assert.equal(models[1]?.name, 'GLM-6 Ultra')
+    assert.deepEqual(models[1]?.inputModalities, ['text', 'image'])
+    const resolved = await subject.resolveModel('glm', 'glm-6-ultra')
+    assert.equal(resolved.context?.contextWindow, 2_000_000)
+    assert.deepEqual(resolved.reasoning?.efforts.map((effort) => String(effort.id)), ['low', 'medium'])
+    assert.equal(String(resolved.reasoning?.defaultEffort), 'medium')
   })
 
-  test('resolves a known model with its window and reasoning ladder', async () => {
-    const resolved = await adapter().resolveModel('glm', 'glm-5.3')
-    assert.equal(resolved.context?.contextWindow, 1_048_576)
-    assert.deepEqual(resolved.reasoning?.efforts.map((entry) => String(entry.id)), ['low', 'high', 'max'])
+  test('a model this build never shipped is published from the listing alone', async () => {
+    const subject = adapter({ cachedListing: async () => GLM_LISTING.data })
+    const entry = (await subject.listModels('glm')).find((model) => model.id === 'glm-6-ultra')
+    assert.equal(entry?.name, 'GLM-6 Ultra')
+    // Nothing in this build names that id: membership comes from the endpoint.
+    assert.ok(subject.ownCatalogEntries().some((own) => own.id === 'glm-6-ultra'))
   })
 
-  test('an unknown id is still dispatchable, with the family window', async () => {
-    const resolved = await adapter().resolveModel('glm', 'glm-9-preview')
-    assert.equal(resolved.id, 'glm-9-preview')
-    assert.equal(resolved.context?.contextWindow, 1_048_576)
+  test('an id the listing omits is not published as a row', async () => {
+    const subject = adapter({ cachedListing: async () => GLM_LISTING.data })
+    const ids = (await subject.listModels('glm')).map((model) => model.id)
+    // `glm-5.2` was in the table this build used to ship; the endpoint no longer
+    // serves it, so it must not be offered on this build's say-so.
+    assert.equal(ids.includes('glm-5.2'), false)
+    // It stays dispatchable — the endpoint, not this build, is what refuses it.
+    const resolved = await subject.resolveModel('glm', 'glm-5.2')
+    assert.equal(resolved.id, 'glm-5.2')
     assert.equal(resolved.reasoning, undefined)
   })
 
-  test('flash declares image input; the rest read text', async () => {
-    const flash = await adapter().resolveModel('glm', 'glm-5.3-flash')
-    const flagship = await adapter().resolveModel('glm', 'glm-5.3')
-    assert.deepEqual(flash.inputModalities, ['text', 'image'])
-    assert.deepEqual(flagship.inputModalities, ['text'])
+  test('an image model is called by an agent, never offered as a row', async () => {
+    const subject = adapter({ cachedListing: async () => GLM_LISTING.data })
+    const ids = (await subject.listModels('glm')).map((model) => model.id)
+    assert.equal(ids.includes('glm-5.3-image'), false)
+    await subject.hydrate()
+    assert.equal(subject.imageModelId(), 'glm-5.3-image')
+  })
+
+  test('a picker query never asks the endpoint', async () => {
+    let calls = 0
+    const subject = adapter({
+      cachedListing: async () => GLM_LISTING.data,
+      fetchFn: async () => {
+        calls += 1
+        throw new Error('a picker query must not fetch')
+      },
+    })
+    const models = await subject.listModels('glm')
+    assert.equal(models.length, 3)
+    await subject.resolveModel('glm', 'glm-6-ultra')
+    assert.equal(calls, 0)
+  })
+
+  test('the cached listing is read once per session', async () => {
+    let reads = 0
+    const subject = adapter({
+      cachedListing: async () => {
+        reads += 1
+        return GLM_LISTING.data
+      },
+    })
+    await subject.listModels('glm')
+    await subject.listModels('glm')
+    assert.equal(reads, 1)
+  })
+
+  test('a cache stored as the endpoint envelope is read too', async () => {
+    const subject = adapter({ cachedListing: async () => GLM_LISTING })
+    const ids = (await subject.listModels('glm')).map((model) => model.id)
+    assert.deepEqual(ids, ['glm-5.3', 'glm-6-ultra', 'glm-5.3-flash'])
+  })
+
+  test('an unreadable cache is a warning, and no roster is invented to fill it', async () => {
+    const warnings: string[] = []
+    const subject = adapter({
+      cachedListing: async () => {
+        throw new Error('unreadable')
+      },
+      onWarn: (message) => { warnings.push(message) },
+    })
+    // Only the configured default remains: this build has no table of its own to show.
+    assert.deepEqual((await subject.listModels('glm')).map((model) => model.id), [GLM_DEFAULT_MODEL])
+    assert.match(warnings.join('\n'), /cached model catalog unavailable \(unreadable\)/)
+  })
+
+  test('fetchCatalog adopts the live rows and caches exactly one payload', async () => {
+    const saved: unknown[] = []
+    const subject = adapter({
+      fetchFn: async () => jsonResponse(GLM_LISTING),
+      saveListing: async (payload) => { saved.push(payload) },
+    })
+    assert.deepEqual(
+      await subject.fetchCatalog('token'),
+      ['glm-5.3', 'glm-6-ultra', 'glm-5.3-flash'],
+    )
+    // The endpoint's own rows are what is kept, so a later build reads more of them.
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0], GLM_LISTING.data)
+    // The table just read is what the route now serves, with its stated windows.
+    const resolved = await subject.resolveModel('glm', 'glm-6-ultra')
+    assert.equal(resolved.context?.contextWindow, 2_000_000)
+  })
+
+  test('a cache write failure is a warning, not a failed read', async () => {
+    const warnings: string[] = []
+    const subject = adapter({
+      fetchFn: async () => jsonResponse(GLM_LISTING),
+      saveListing: async () => { throw new Error('disk full') },
+      onWarn: (message) => { warnings.push(message) },
+    })
+    assert.deepEqual(
+      await subject.fetchCatalog('token'),
+      ['glm-5.3', 'glm-6-ultra', 'glm-5.3-flash'],
+    )
+    assert.match(warnings.join('\n'), /model catalog cache write failed \(disk full\)/)
+  })
+
+  test('a refused listing keeps the catalog it already had', async () => {
+    const warnings: string[] = []
+    const subject = adapter({
+      cachedListing: async () => GLM_LISTING.data,
+      fetchFn: async () => jsonResponse({ error: { message: 'nope' } }, 500),
+      onWarn: (message) => { warnings.push(message) },
+    })
+    await subject.hydrate()
+    assert.equal(await subject.fetchCatalog('token'), undefined)
+    assert.ok(subject.ownCatalogEntries().some((entry) => entry.id === 'glm-6-ultra'))
+    assert.match(warnings.join('\n'), /HTTP 500/)
   })
 
   test('the picker omits hidden ids and lists hand-added ones', async () => {
     const subject = adapter({
-      hiddenModels: () => new Set(['glm-5']),
+      cachedListing: async () => GLM_LISTING.data,
+      hiddenModels: () => new Set(['glm-5.3-flash']),
       userModels: () => ['glm-4.6'],
     })
     const ids = (await subject.listModels('glm')).map((model) => model.id)
-    assert.ok(!ids.includes('glm-5'))
+    assert.equal(ids.includes('glm-5.3-flash'), false)
     assert.ok(ids.includes('glm-4.6'))
     // A hand-added id is published, but it is not part of the route's own catalog.
     assert.ok(!subject.ownCatalogEntries().some((entry) => entry.id === 'glm-4.6'))
     assert.ok(subject.catalogEntries().some((entry) => entry.id === 'glm-4.6'))
   })
 
-  test('a discovered id joins the catalog without displacing shipped metadata', async () => {
-    const subject = adapter()
+  test('a discovered id joins the catalog without displacing live metadata', async () => {
+    const subject = adapter({ cachedListing: async () => GLM_LISTING.data })
+    await subject.hydrate()
     subject.discover(['glm-5.3', 'glm-6-preview'])
     const ids = subject.catalogEntries().map((entry) => entry.id)
     assert.ok(ids.includes('glm-6-preview'))
     assert.equal(ids.filter((id) => id === 'glm-5.3').length, 1)
+    // The cached listing described the row; reporting its id again must not erase that.
     assert.equal(subject.catalogEntries().find((entry) => entry.id === 'glm-5.3')?.name, 'GLM-5.3')
   })
 })

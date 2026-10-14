@@ -32,8 +32,8 @@ import {
 import {
   WorkBuddyAdapter,
   WORKBUDDY_CODE_URL,
-  WORKBUDDY_CATALOG,
   WORKBUDDY_DEFAULT_MODEL,
+  WORKBUDDY_FALLBACK_CONTEXT_WINDOW,
   WORKBUDDY_PROVIDER_ID,
   WORKBUDDY_PROVIDER_NAME,
 } from './workbuddy.js'
@@ -50,8 +50,25 @@ export interface WorkBuddyProviderOptions {
   credentialFile: string
   /** Abandon a stream after this much silence. */
   streamIdleTimeoutMs: number
+  /**
+   * Whether WorkBuddy's own console listing is consulted for the catalog.
+   *
+   * The listing is the authority on which models an account serves; switching this off
+   * leaves the seed table in place and reads nothing.
+   */
+  discovery?: boolean
   /** Model the picker preselects. */
   defaultModel?: string
+  /**
+   * WorkBuddy's last listing, from this plugin's cache.
+   *
+   * The cached table is what the picker shows before any request: the console's own answer
+   * from the last read, so a release does not need a plugin update and a refresh does not
+   * need a request.
+   */
+  cachedListing?: () => Promise<unknown>
+  /** Record what a live listing just produced, replacing the cached table. */
+  saveListing?: (payload: unknown) => Promise<void>
   /** Shared model-visibility preferences. */
   preferences: ModelPreferences
   /** Invoked when the catalog or its visibility changed. */
@@ -183,12 +200,17 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
 
   const spendFile = path.join(path.dirname(options.credentialFile), 'workbuddy-spend.json')
   const adapter = new WorkBuddyAdapter({
+    // Consulting the console's listing is what keeps the catalog from going stale: a model
+    // released, renamed or retired server-side appears without a plugin update.
+    discovery: options.discovery ?? true,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs,
     tokens,
     spendFile,
     ...options.onWarn === undefined ? {} : { onWarn: options.onWarn },
     hiddenModels: () => options.preferences.hiddenIds(WORKBUDDY_PROVIDER_ID),
     userModels: () => options.preferences.extraIds(WORKBUDDY_PROVIDER_ID),
+    ...options.cachedListing === undefined ? {} : { cachedListing: options.cachedListing },
+    ...options.saveListing === undefined ? {} : { saveListing: options.saveListing },
     fetchFn,
   })
 
@@ -209,13 +231,17 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
     displayName: WORKBUDDY_PROVIDER_NAME,
     codeUrl: WORKBUDDY_CODE_URL,
     credentialFile: options.credentialFile,
-    // WorkBuddy ships a fixed catalog; there is no discovery endpoint.
-    discovery: false,
+    // WorkBuddy's own console route lists the models an account may use; it is read once
+    // and cached, and a picker query never asks the endpoint.
+    discovery: options.discovery ?? true,
     defaultModel: options.defaultModel ?? WORKBUDDY_DEFAULT_MODEL,
     catalog: () => adapter.catalogEntries(),
     catalogOwn: () => adapter.ownCatalogEntries(),
-    fallbackContextWindow: WORKBUDDY_CATALOG[0]?.contextWindow ?? 0,
-    discover: () => Promise.resolve(undefined),
+    fallbackContextWindow: WORKBUDDY_FALLBACK_CONTEXT_WINDOW,
+    // The token is handed over rather than the session it came from; the adapter reads the
+    // session back, so each account is attributed to its own enterprise.
+    discover: (accessToken) => adapter.fetchCatalog(accessToken),
+    applyDiscovery: (ids) => { adapter.discover(ids) },
     usage: async (_accessToken, account) => {
       const held = await store.get(account)
       if (held === undefined) return undefined
@@ -229,7 +255,6 @@ export function createWorkBuddyProvider(options: WorkBuddyProviderOptions): Prov
       { key: 'endpoint', value: 'https://copilot.tencent.com' },
       { key: 'credentialFile', value: options.credentialFile },
     ],
-    applyDiscovery: () => {},
   }
 
   const controller = new ProviderController<WorkBuddySession>({

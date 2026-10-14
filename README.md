@@ -13,12 +13,12 @@ Sign in once per provider from **Settings → Subscriptions** and that provider'
 
 | Provider | What you get | Sign-in |
 | --- | --- | --- |
-| **Kimi Code** | `kimi-for-coding`, `k3`, `k3[1m]`, `k3-256k` + live catalog | OAuth device flow (show code, confirm in browser) |
-| **Grok (X Premium)** | `grok-4.7`, `grok-4.6`, … + live catalog, **⚡ lightspeed** fast variant | Browser OAuth (auto-redirect) |
-| **Google Antigravity** | Claude Sonnet/Opus, Gemini Flash, GPT-OSS, with reasoning tiers | Google account OAuth |
-| **GLM (BigModel)** | `glm-5.3`, `glm-5.3-flash`, `glm-5.2`, `glm-5.1`, `glm-5` | ZCode browser sign-in (polled) |
-| **Volcengine Ark** | Ark coding models + live catalog | Volcengine SSO |
-| **Xiaomi MiMo** | MiMo Pro, MiMo Flash | Xiaomi account (QR / password) |
+| **Kimi Code** | `kimi-for-coding`, `k3` (1M), `k3-256k` — read from the endpoint's own model list | OAuth device flow (show code, confirm in browser) |
+| **Grok (X Premium)** | whatever the account's own model list reports (e.g. `grok-4.7`), **⚡ lightspeed** fast variant | Browser OAuth (auto-redirect) |
+| **Google Antigravity** | Claude Sonnet/Opus, Gemini Flash, GPT-OSS, with reasoning tiers — read from the account's own list | Google account OAuth |
+| **GLM (BigModel)** | whatever the coding host lists (e.g. `glm-5.3`, `glm-5.3-flash`) | ZCode browser sign-in (polled) |
+| **Volcengine Ark** | the plan's own coding models | Volcengine SSO |
+| **Xiaomi MiMo** | MiMo's own model list, with the app's two-model set as the fallback | Xiaomi account (QR / password) |
 | **WorkBuddy (国内版)** | Hy, GLM, Kimi, DeepSeek, MiniMax models | Browser OAuth (Tencent) |
 
 Every provider also feeds the **`auto`** route, which spans them all: pick `auto` and the harness walks your enabled models in order until one answers.
@@ -28,6 +28,7 @@ Every provider also feeds the **`auto`** route, which spans them all: pick `auto
 - **One sign-in per provider** — no API keys to find, paste, or rotate. The plugin runs the provider's own OAuth/device flow and keeps the token on disk (`~/.dsh/plugins/kimi-oauth/auth.json`, mode `0600`).
 - **Live plan usage** — the Settings card and the composer chip show each account's remaining quota (Kimi's 5-hour / weekly windows + credit, Grok's weekly credit, Antigravity's Gemini + Claude buckets, GLM/Ark/MiMo/WorkBuddy credits), with a meter and reset time.
 - **Model picker integration** — each provider's models appear in the session picker with context windows and reasoning tiers; hide or re-order them per provider.
+- **Catalogs come from the provider, not from this build** — every route reads its own model list once and caches it as the provider's table, so a model released, renamed or retired server-side shows up (or disappears) without a plugin update. Signing in and the Settings **refresh models** action are what re-read it; browsing the picker never spends a request.
 - **⚡ Fast / lightspeed variants** — for models that have one (e.g. Grok 4.7 → `grok-4.7-build-fast`), a bolt button beside the model selector switches to the fast variant; it reads as a reasoning rung so the base model always stays selectable.
 - **Cross-account pool** — sign in to several accounts on one provider; the plugin draws on the next account when one's allowance runs out.
 - **Auto fallback** — `auto` moves to the next enabled model when a provider refuses the preferred one (renamed, rate-limited, out of quota), and stops falling back once a stream has started.
