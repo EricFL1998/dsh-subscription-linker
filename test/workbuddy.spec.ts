@@ -94,7 +94,8 @@ test('workbuddyHeaders carries the account, client, and enterprise attribution',
   assert.equal(headers.Authorization, 'Bearer at')
   assert.equal(headers['X-User-Id'], 'u1')
   assert.equal(headers['X-Enterprise-Id'], 'ent1')
-  assert.equal(headers['User-Agent'], 'CLI/2.63.2 CodeBuddy/2.63.2')
+  assert.equal(headers['X-IDE-Name'], 'WorkBuddy')
+  assert.equal(headers['User-Agent'], 'WorkBuddy/5.5.6')
 })
 
 test('workbuddyStale and workbuddyRefreshable read the token lifetimes', () => {
@@ -157,7 +158,7 @@ test('the stream posts chat completions with the WorkBuddy headers', async () =>
   }
   const adapter = new WorkBuddyAdapter({ streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
   const chunks = await collect(adapter.stream(request()))
-  assert.equal(seenUa, 'CLI/2.63.2 CodeBuddy/2.63.2')
+  assert.equal(seenUa, 'WorkBuddy/5.5.6')
   assert.equal(seenBody.model, 'hy4-preview-f')
   assert.equal(seenBody.stream, true)
   assert.ok(Array.isArray(seenBody.messages))

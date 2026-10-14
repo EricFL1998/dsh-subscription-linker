@@ -144,6 +144,13 @@ function unflagMessages(messages: Record<string, unknown>[]): Record<string, unk
   return messages
 }
 
+/** 32 hex digits, for the chat ids WorkBuddy's own client makes. */
+function randomHex(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 /** A tool's name may hold letters, digits, `_`, `-`; another character is refused. */
 const NAME_OK = /^[A-Za-z0-9_-]+$/
 
@@ -333,7 +340,18 @@ export class WorkBuddyAdapter extends LlmAdapter {
       const body = this.requestBody(options)
       const response = await this.fetchFn(WORKBUDDY_API, {
         method: 'POST',
-        headers: workbuddyHeaders(token),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          ...workbuddyHeaders(token),
+          // Name the chat the way WorkBuddy's own client does: the message, the request,
+          // the turn, and the conversation. Without these the gateway counts the request
+          // under no client and can cut the stream.
+          'X-Conversation-Message-ID': randomHex(),
+          'X-Request-ID': randomHex(),
+          'X-Conversation-Request-ID': randomHex(),
+          'X-Conversation-ID': randomHex(),
+        },
         body: JSON.stringify(body),
         signal: watchdog.signal,
       })
@@ -620,6 +638,12 @@ export class WorkBuddyAdapter extends LlmAdapter {
         }
       }
       if (started) yield { type: 'block-end', index: 0, block: { type: 'text', text: '' } }
+      // A stream that produced no text and no error usually means the gateway accepted the
+      // request then closed it: name that in the console so the next F12 shows why the turn
+      // stopped, instead of a silent finish that reads as a clean answer.
+      if (!started) {
+        console.warn(`[subscription-oauth] WorkBuddy stream ended with no text after ${String(this.turnCredit > 0 ? 'some' : 'no')} credit; the gateway likely cut it.`)
+      }
       yield { type: 'finish', reason: { kind: 'stop' } }
     } finally {
       reader.cancel().catch(() => {})

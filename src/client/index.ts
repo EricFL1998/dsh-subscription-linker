@@ -190,7 +190,15 @@ function modelDirectoryFor(
   sessionId: string | undefined,
 ): FastModeButtonInjected['modelDirectory'] {
   if (sessionId === undefined || modelDirectories?.directoryFor === undefined) return undefined
-  const directory = modelDirectories.directoryFor(sessionId)
+  // The host throws when the session has no directory yet (a fresh session, say); that is
+  // a missing control, not a fault, so the button renders nothing instead of breaking the
+  // whole composer.
+  let directory: { select?: (selection: { provider: string, model: string }) => Promise<unknown> } | undefined
+  try {
+    directory = modelDirectories.directoryFor(sessionId)
+  } catch {
+    return undefined
+  }
   if (directory?.select === undefined) return undefined
   return {
     select: (selection: { provider: string, model: string }) => directory.select?.(selection) ?? Promise.resolve(),

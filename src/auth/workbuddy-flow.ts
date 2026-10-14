@@ -286,20 +286,25 @@ async function workbuddyEnterprise(
   return pick && typeof pick.enterpriseId === 'string' ? pick.enterpriseId.trim() : ''
 }
 
-/** The headers WorkBuddy's chat gateway accepts: its own CLI's, nothing more. */
+/** The headers WorkBuddy's desktop client sends with a chat, as magpie's workbuddy sets. */
 export function workbuddyHeaders(token: WorkBuddyTokenSet): Record<string, string> {
   const headers: Record<string, string> = {
-    'Accept': 'application/json, text/plain, */*',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Origin': 'https://copilot.tencent.com',
-    'Referer': 'https://copilot.tencent.com/',
-    'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
-    'Content-Type': 'application/json',
     'Authorization': `Bearer ${token.accessToken}`,
-    ...token.uid === undefined || token.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': token.uid },
-    ...token.enterpriseId === undefined || token.enterpriseId === '' ? { 'X-No-Enterprise-Id': '1' } : { 'X-Enterprise-Id': token.enterpriseId },
+    'X-User-Id': token.uid ?? '',
     'X-Domain': workbuddyDomain(token),
     'X-Product': 'SaaS',
+    'X-IDE-Type': 'WorkBuddy',
+    'User-Agent': `WorkBuddy/${WORKBUDDY_UA_VERSION}`,
+    'X-Requested-With': 'XMLHttpRequest',
+    'X-Agent-Intent': 'craft',
+    'X-Agent-Purpose': 'conversation',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': WORKBUDDY_UA_VERSION,
+  }
+  const enterprise = typeof token.enterpriseId === 'string' ? token.enterpriseId.trim() : ''
+  if (enterprise !== '') {
+    headers['X-Enterprise-Id'] = enterprise
+    headers['X-Tenant-Id'] = enterprise
   }
   return headers
 }
