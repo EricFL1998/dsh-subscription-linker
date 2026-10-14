@@ -348,8 +348,20 @@ function windowLabel(t: SubscriptionsSectionInjected['t'], window: UsageWindow):
   return key in en ? t(key) : window.label
 }
 
-/** How much of one window is spent, as a display string. */
+/** Credit-like window labels: money, not a share of an allowance. */
+const CREDIT_WINDOW_LABELS = /credit|wallet|balance|token|point|积分|额度/i
+
+/**
+ * How much of one window is spent, as a display string.
+ *
+ * A credit balance (WorkBuddy's Credits) reads as the raw used/limit count; a time
+ * quota reads as the spent percent. Told apart by the label, since both state the
+ * same fields.
+ */
 function windowAmount(window: UsageWindow): string {
+  if (CREDIT_WINDOW_LABELS.test(window.label) && window.used !== undefined && window.limit !== undefined) {
+    return `${String(window.used)}/${String(window.limit)}`
+  }
   if (window.usedPercent !== undefined) return `${String(Math.round(window.usedPercent))}%`
   if (window.used !== undefined && window.limit !== undefined) return `${String(window.used)}/${String(window.limit)}`
   return '—'
