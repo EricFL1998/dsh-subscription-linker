@@ -690,14 +690,10 @@ export class WorkBuddyAdapter extends LlmAdapter {
   /**
    * The stored session one access token belongs to.
    *
-   * Discovery is handed the account's token rather than the session it came from, and the
-   * console route is attributed by that session's own fields, so the session is read back
-   * here. The first account whose stored token matches wins; a token that matches none
-   * falls back to the route's current session. A read failure is never fatal — the listing
-   * is still read with the token the caller passed.
-   *
-   * @param accessToken - the token discovery was called with.
-   * @returns the session's fields as a signable token, or undefined when none was readable.
+   * The chat signs with the resolved token, but the request still needs the session's
+   * attribution fields (`uid`, `enterpriseId`, `domain`). They are read back by matching
+   * the resolved token against each stored account; a token that matches none (already
+   * rotated away) leaves the caller to sign with the bare token.
    */
   private async sessionFor(accessToken: string): Promise<WorkBuddyTokenSet | undefined> {
     try {
@@ -705,8 +701,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
         const held = await this.options.tokens.session(account)
         if (held?.session.accessToken === accessToken) return this.tokenOf(held.session)
       }
-      const current = await this.options.tokens.session()
-      return current === undefined ? undefined : this.tokenOf(current.session)
+      return undefined
     } catch {
       return undefined
     }
@@ -718,9 +713,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     diag(`stream entered: model=${options.model} provider=${options.provider}`)
-    const held = await this.options.tokens.session()
-    if (held === undefined) throw new Error('WorkBuddy is not signed in')
-    const token = this.tokenOf(held.session)
+    // Resolve (not just read) the session so a token close to its end is refreshed
+    // eagerly, the way WorkBuddy's own app does — a bare session can carry an expired
+    // access token into the request, which the gateway refuses with a 403.
+    const held = await this.options.tokens.resolve()
+    const session = await this.sessionFor(held.accessToken)
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     // Capture the tool-call history so unsafe tool names in past turns can be renamed to
     // the safe ones the model now sees, keeping the conversation consistent.
@@ -728,28 +725,23 @@ export class WorkBuddyAdapter extends LlmAdapter {
     // The last usage frame carries the turn's real billed credit; record it so the spend
     // total is a sum of real figures, not an estimate.
     const turn = { credit: 0 }
-    diag(`stream start: model=${options.model} account=${held.account} expiresAt=${held.session.expiresAt} now=${Date.now()}`)
+    diag(`stream start: model=${options.model} account=${held.account} expiresAt=${held.expiresAt} now=${Date.now()}`)
     try {
       const { body, names } = this.requestBody(options, history)
       diag(`body: keys=${Object.keys(body).join(',')} messages=${Array.isArray(body.messages) ? body.messages.length : 0} model=${String(body.model)}`)
-      const response = await this.fetchFn(WORKBUDDY_API, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'text/event-stream',
-          ...workbuddyHeaders(token),
-          // Name the chat the way WorkBuddy's own client does: the message, the request,
-          // the turn, and the conversation. Without these the gateway counts the request
-          // under no client and can cut the stream.
-          'X-Conversation-Message-ID': randomHex(),
-          'X-Request-ID': randomHex(),
-          'X-Conversation-Request-ID': randomHex(),
-          'X-Conversation-ID': randomHex(),
-        },
-        body: JSON.stringify(body),
-        signal: watchdog.signal,
-      })
-      diag(`response: status=${response.status} ok=${response.ok} ct=${response.headers.get('content-type') ?? ''}`)
+      // Post once with the resolved token. A 401/403 can mean the access token lapsed
+      // between resolve() and now: force one refresh and post again, as WorkBuddy's own
+      // client does — a 403 with a genuinely dead credential keeps its meaning below.
+      let response = await this.post(body, session ?? held, watchdog.signal)
+      if (response.status === 401 || response.status === 403) {
+        diag(`response: ${response.status} on resolved token; forcing one refresh and retrying`)
+        const refreshed = await this.options.tokens.resolve(held.account, true)
+        const fresh = await this.sessionFor(refreshed.accessToken)
+        response = await this.post(body, fresh ?? refreshed, watchdog.signal)
+        diag(`response after refresh: status=${response.status} ok=${response.ok} ct=${response.headers.get('content-type') ?? ''}`)
+      } else {
+        diag(`response: status=${response.status} ok=${response.ok} ct=${response.headers.get('content-type') ?? ''}`)
+      }
       // WorkBuddy refuses a chat mid-stream when the request carries words it filters; a
       // 403/400 here names why, so surface it instead of dying on an empty stream.
       if (!response.ok || response.body === null) {
@@ -764,6 +756,28 @@ export class WorkBuddyAdapter extends LlmAdapter {
         void recordSpend(this.options.spendFile, held.account, turn.credit).catch(() => {})
       }
     }
+  }
+
+  /**
+   * One chat-completions POST, named the way WorkBuddy's own client names a chat: the
+   * message, the request, the turn, and the conversation. Without these the gateway
+   * counts the request under no client and can cut the stream.
+   */
+  private post(body: Record<string, unknown>, token: WorkBuddyTokenSet, signal: AbortSignal): Promise<Response> {
+    return this.fetchFn(WORKBUDDY_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
+        ...workbuddyHeaders(token),
+        'X-Conversation-Message-ID': randomHex(),
+        'X-Request-ID': randomHex(),
+        'X-Conversation-Request-ID': randomHex(),
+        'X-Conversation-ID': randomHex(),
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
   }
 
   /** The stored session's fields as the token the request signs with. */

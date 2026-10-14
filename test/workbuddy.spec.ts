@@ -527,6 +527,62 @@ test('a credits-exhausted 403 names the package fix, not a network fault', async
   )
 })
 
+test('a 401 on the resolved token forces one refresh and retries the chat', async () => {
+  let calls = 0
+  const seenTokens: string[] = []
+  const fetchFn: typeof fetch = async (_input, init) => {
+    calls += 1
+    seenTokens.push(new Headers(init?.headers).get('authorization') ?? '')
+    if (calls === 1) return jsonResponse({ code: 401, msg: 'token expired' }, 401)
+    return sse([JSON.stringify({ choices: [{ delta: { content: 'Refreshed' } }] })])
+  }
+  // The first resolve() answers with the stored (now stale) token; the force refresh after
+  // the 401 hands back a new one, and the retry must carry it.
+  let refreshed = false
+  const manager = {
+    resolve: async (_account?: string, force?: boolean) => {
+      if (force === true) refreshed = true
+      return {
+        account: 'coder',
+        accessToken: refreshed ? 'at-fresh' : 'at-stale',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      }
+    },
+    session: async () => ({ account: 'coder', session: session(refreshed ? { accessToken: 'at-fresh' } : { accessToken: 'at-stale' }) }),
+    accounts: async () => ['coder'],
+    defaultAccount: async () => 'coder',
+  } as unknown as TokenManager<WorkBuddySession>
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: manager, fetchFn })
+  const chunks = await collect(adapter.stream(request()))
+  assert.equal(calls, 2)
+  assert.ok(refreshed)
+  assert.equal(seenTokens[0], 'Bearer at-stale')
+  assert.equal(seenTokens[1], 'Bearer at-fresh')
+  assert.ok(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === 'Refreshed'))
+})
+
+test('a 401 that survives the refresh is a plain credential failure', async () => {
+  let calls = 0
+  const fetchFn: typeof fetch = async () => {
+    calls += 1
+    return jsonResponse({ code: 401, msg: 'still expired' }, 401)
+  }
+  let forceCalls = 0
+  const manager = {
+    resolve: async (_account?: string, force?: boolean) => {
+      if (force === true) forceCalls += 1
+      return { account: 'coder', accessToken: 'at', expiresAt: Date.now() + 60 * 60 * 1000 }
+    },
+    session: async () => ({ account: 'coder', session: session() }),
+    accounts: async () => ['coder'],
+    defaultAccount: async () => 'coder',
+  } as unknown as TokenManager<WorkBuddySession>
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: manager, fetchFn })
+  await assert.rejects(() => collect(adapter.stream(request())))
+  assert.equal(calls, 2)
+  assert.equal(forceCalls, 1)
+})
+
 test('readWorkBuddyUsage reads the precise spent against the live packages', async () => {
   const fetchFn: typeof fetch = async (input) => {
     const url = String(input)
