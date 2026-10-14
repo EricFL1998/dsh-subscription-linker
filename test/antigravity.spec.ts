@@ -598,6 +598,43 @@ describe('AntigravityAdapter', () => {
     assert.deepEqual(chunks.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
   })
 
+  test('a stream that closes before a finish chunk is redispatched and then succeeds', async () => {
+    let calls = 0
+    const warnings: string[] = []
+    const fetchFn: typeof fetch = async () => {
+      calls += 1
+      // First answer is cut off mid-stream (no finish chunk); the redispatch completes.
+      if (calls === 1) {
+        return new Response(
+          'data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}}\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        )
+      }
+      return sseResponse([{ response: { candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }] } }])
+    }
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn,
+      tokens: tokenManager({ projectId: 'project-7' }),
+      onWarn: (message) => { warnings.push(message) },
+    }))
+    const chunks = await collect(adapter.stream(request()))
+    assert.equal(calls, 2)
+    assert.ok(warnings.some((message) => /stream closed early/.test(message)))
+    // The first (cut) answer's text already streamed, then the redispatch's: two text
+    // blocks, closed in order, and a single terminal finish.
+    assert.deepEqual(chunks.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-start', 'text-delta', 'block-end', 'finish'])
+  })
+
+  test('a stream cut that never completes exhausts retries and fails the turn', async () => {
+    const fetchFn: typeof fetch = async () => new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}}\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )
+    const adapter = new AntigravityAdapter(adapterOptions({ fetchFn, tokens: tokenManager({ projectId: 'project-7' }) }))
+    await assert.rejects(collect(adapter.stream(request())), (error: unknown) =>
+      error instanceof LlmError && error.failure.code === 'STREAM_CLOSED')
+  })
+
   test('a persistent connect fault exhausts retries and fails the turn', async () => {
     const fetchFn: typeof fetch = async () => { throw new TypeError('fetch failed: Connect Timeout Error') }
     const adapter = new AntigravityAdapter(adapterOptions({ fetchFn, tokens: tokenManager({ projectId: 'project-7' }) }))

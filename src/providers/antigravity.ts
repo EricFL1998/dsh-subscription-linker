@@ -107,6 +107,9 @@ const NETWORK_RETRY_ATTEMPTS = 3
 /** Base delay between network retries; it doubles each attempt. */
 const NETWORK_RETRY_BASE_MS = 800
 
+/** How many times a stream that closes early is retried before the account is skipped. */
+const STREAM_RETRY_ATTEMPTS = 3
+
 /**
  * Whether an error from `fetch` is a transient network fault worth retrying.
  *
@@ -118,6 +121,18 @@ function isTransientNetworkFault(error: unknown): boolean {
   if (error instanceof LlmError) return false
   const text = errorChain(error).toLowerCase()
   return /fetch failed|connect timeout|connection reset|econnreset|etimedout|econnrefused|socket hang up|network error|timed out/.test(text)
+}
+
+/**
+ * Whether an error raised while reading a live stream is a transient cut worth redispatching.
+ *
+ * `streamAntigravity` throws `STREAM_CLOSED` when the SSE body ends before a finish chunk —
+ * a dropped or reset connection mid-answer, not a refusal. The request arrived and the
+ * account is fine; the answer just never completed, so redispatching the same request is
+ * safe. Content refusals (`CONTENT_FILTER`), quota and credential failures are not retried.
+ */
+function isRetryableStreamError(error: unknown): boolean {
+  return error instanceof LlmError && error.failure.code === 'STREAM_CLOSED'
 }
 
 /**
@@ -810,7 +825,29 @@ export class AntigravityAdapter extends LlmAdapter {
         if (response.body === null) {
           throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
         }
-        yield* streamAntigravity(response.body, () => { watchdog.pulse() })
+        // A stream that closes before a finish chunk is a dropped connection, not a
+        // refusal: the account is fine and the request arrived, so redispatch it a few
+        // times with backoff before giving up on the account. Content refusals and quota
+        // failures propagate untouched.
+        let lastStreamError: unknown
+        for (let attempt = 0; attempt < STREAM_RETRY_ATTEMPTS; attempt++) {
+          try {
+            yield* streamAntigravity(response.body, () => { watchdog.pulse() })
+            lastStreamError = undefined
+            break
+          } catch (error) {
+            if (!isRetryableStreamError(error) || watchdog.signal.aborted) throw error
+            lastStreamError = error
+            this.options.onWarn?.(`antigravity: stream closed early (${errorChain(error)}); redispatching`)
+            if (attempt < STREAM_RETRY_ATTEMPTS - 1) {
+              await backoff(NETWORK_RETRY_BASE_MS * 2 ** attempt, watchdog.signal)
+              response = await this.requestWithRetry(options, model, token.account, token.accessToken, watchdog.signal)
+              if (!response.ok) throw await httpLlmError(response, 'Antigravity API')
+              if (response.body === null) throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
+            }
+          }
+        }
+        if (lastStreamError !== undefined) throw lastStreamError
         return
       }
       // Every account was tried and none served. The headline names the most actionable
