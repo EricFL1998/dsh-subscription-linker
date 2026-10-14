@@ -20,6 +20,7 @@ import {
   WORKBUDDY_CATALOG,
   WorkBuddyAdapter,
   WORKBUDDY_PROVIDER_NAME,
+  conversationIdsFor,
   workbuddyModelsUrl,
 } from '../src/providers/workbuddy.js'
 import type { WorkBuddyAdapterOptions } from '../src/providers/workbuddy.js'
@@ -530,9 +531,11 @@ test('a credits-exhausted 403 names the package fix, not a network fault', async
 test('a 401 on the resolved token forces one refresh and retries the chat', async () => {
   let calls = 0
   const seenTokens: string[] = []
+  const seenTurns: string[] = []
   const fetchFn: typeof fetch = async (_input, init) => {
     calls += 1
     seenTokens.push(new Headers(init?.headers).get('authorization') ?? '')
+    seenTurns.push(new Headers(init?.headers).get('x-conversation-request-id') ?? '')
     if (calls === 1) return jsonResponse({ code: 401, msg: 'token expired' }, 401)
     return sse([JSON.stringify({ choices: [{ delta: { content: 'Refreshed' } }] })])
   }
@@ -553,11 +556,14 @@ test('a 401 on the resolved token forces one refresh and retries the chat', asyn
     defaultAccount: async () => 'coder',
   } as unknown as TokenManager<WorkBuddySession>
   const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: manager, fetchFn })
-  const chunks = await collect(adapter.stream(request()))
+  const chunks = await collect(adapter.stream({ ...request(), sessionId: 'sess-retry' as never }))
   assert.equal(calls, 2)
   assert.ok(refreshed)
   assert.equal(seenTokens[0], 'Bearer at-stale')
   assert.equal(seenTokens[1], 'Bearer at-fresh')
+  // The refresh retry is the same user send: same turn id, never a fresh one per attempt.
+  assert.match(seenTurns[0] ?? '', /^[0-9a-f]{32}$/)
+  assert.equal(seenTurns[1], seenTurns[0])
   assert.ok(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === 'Refreshed'))
 })
 
@@ -581,6 +587,65 @@ test('a 401 that survives the refresh is a plain credential failure', async () =
   await assert.rejects(() => collect(adapter.stream(request())))
   assert.equal(calls, 2)
   assert.equal(forceCalls, 1)
+})
+
+test('one send carries a stable turn id across retries and tool steps', async () => {
+  const base = request()
+  // One user send: a request and its tool-result step carry the same turn id, and the
+  // conversation id is the session's, as WorkBuddy's own client keeps them.
+  const first = conversationIdsFor(
+    { model: 'm', messages: [{ role: 'system', content: 's' }, { role: 'user', content: 'hi' }] },
+    { ...base, sessionId: 'sess-1' as never },
+  )
+  const afterTools = conversationIdsFor(
+    { model: 'm', messages: [
+      { role: 'system', content: 's' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 't', arguments: '{}' } }] },
+      { role: 'tool', content: 'out' },
+    ] },
+    { ...base, sessionId: 'sess-1' as never },
+  )
+  assert.equal(typeof first.message, 'string')
+  assert.match(first.message, /^[0-9a-f]{32}$/)
+  assert.match(first.turn, /^[0-9a-f]{32}$/)
+  assert.match(afterTools.turn, /^[0-9a-f]{32}$/)
+  // The message/request id is one request's own; the turn id is one user send's own.
+  assert.notEqual(first.message, afterTools.message)
+  assert.equal(first.turn, afterTools.turn)
+  assert.equal(first.conversation, afterTools.conversation)
+  assert.match(first.conversation ?? '', /^[0-9a-f]{32}$/)
+
+  // The user's next message is another send: another turn id, the same conversation.
+  const second = conversationIdsFor(
+    { model: 'm', messages: [{ role: 'system', content: 's' }, { role: 'user', content: 'next' }] },
+    { ...base, sessionId: 'sess-1' as never },
+  )
+  assert.notEqual(second.turn, first.turn)
+  assert.equal(second.conversation, first.conversation)
+
+  // A different session is another conversation, another turn.
+  const other = conversationIdsFor(
+    { model: 'm', messages: [{ role: 'system', content: 's' }, { role: 'user', content: 'hi' }] },
+    { ...base, sessionId: 'sess-2' as never },
+  )
+  assert.notEqual(other.conversation, first.conversation)
+
+  // No session and no user message: no conversation id is invented, the turn is fresh.
+  const bare = conversationIdsFor({ model: 'm', messages: [{ role: 'system', content: 's' }] }, base)
+  assert.equal(bare.conversation, undefined)
+  assert.match(bare.turn, /^[0-9a-f]{32}$/)
+})
+
+test('a wire finish_reason length reads as max-tokens, not a clean stop', async () => {
+  const fetchFn: typeof fetch = async () => sse([
+    JSON.stringify({ choices: [{ delta: { content: 'part' } }] }),
+    JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+  ])
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const seen = assemble(await collect(adapter.stream(request())))
+  assert.deepEqual(seen.blocks, [{ type: 'text', text: 'part' }])
+  assert.equal(seen.finish, 'max-tokens')
 })
 
 test('readWorkBuddyUsage reads the precise spent against the live packages', async () => {

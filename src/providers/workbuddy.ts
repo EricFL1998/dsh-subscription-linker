@@ -36,6 +36,7 @@ import type { CatalogEntry, LiveModelFacts } from './catalog.js'
 import { composeCatalog, findEntry, liveEntry } from './catalog.js'
 import { WORKBUDDY_ENDPOINT, workbuddyHeaders, type WorkBuddyTokenSet, type WorkBuddySession } from '../auth/workbuddy-flow.js'
 import { recordSpend } from './workbuddy-credits.js'
+import { createHash } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -259,6 +260,7 @@ interface ChatChunk {
         function?: { name?: string, arguments?: string }
       }[]
     }
+    finish_reason?: string | null
     index?: number
   }[]
   usage?: { prompt_tokens?: number, completion_tokens?: number, total_tokens?: number, credit?: number }
@@ -324,6 +326,100 @@ function randomHex(): string {
   const bytes = new Uint8Array(16)
   crypto.getRandomValues(bytes)
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+// ---- the conversation's ids -------------------------------------------------
+//
+// WorkBuddy's own client names each chat to its gateway four ways: the
+// conversation it belongs to, the user send (turn) it answers, the message
+// itself, and the request that carried it. Its backend counts a user send as
+// one request by `X-Conversation-Request-ID`: a chat carrying a new one every
+// time is counted on its own, and — what this adapter exists to fix — a chat
+// that presents a conversation the backend has never seen, under no stable
+// conversation id, is treated as an unaffiliated request and can be cut
+// mid-stream ("夹断"). The ids below are made from what names the conversation
+// and the turn, so every step of one send carries the same turn id and the
+// user's next message carries another, as WorkBuddy's own client does.
+
+/** Salt the ids are derived with, so an id says nothing of the words it was made from. */
+const ID_SALT = randomHex()
+
+/** The 32 hex digits WorkBuddy's own ids are made of. */
+function idFor(kind: string, key: string): string {
+  return createHash('sha256').update(`${ID_SALT}|${kind}|${key}`).digest('hex').slice(0, 32)
+}
+
+/** A message content's signature: its text, and a digest of every part that isn't text. */
+export function signatureOf(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  let out = ''
+  for (const part of content) {
+    if (!isSchemaRecord(part)) continue
+    const type = typeof part['type'] === 'string' ? part['type'] : ''
+    if (type === '' || type === 'text') out += typeof part['text'] === 'string' ? part['text'] : ''
+    else if (type !== 'tool_result' && type !== 'tool-result') out += `[${type}:${createHash('sha256').update(JSON.stringify(part)).digest('hex').slice(0, 8)}]`
+  }
+  return out
+}
+
+/** Whether `messages[index]` answers the message before it (a tool result, or an assistant's calls). */
+function answeredBefore(messages: Record<string, unknown>[], index: number): boolean {
+  const prev = messages[index - 1]
+  if (prev === null || typeof prev !== 'object') return false
+  if (prev['role'] === 'tool') return true
+  return prev['role'] === 'assistant' && Array.isArray(prev['tool_calls']) && (prev['tool_calls'] as unknown[]).length > 0
+}
+
+/** The body of one assistant/tool message's text, for the turn key. */
+function messageText(message: Record<string, unknown>): string {
+  return signatureOf(message['content'])
+}
+
+/** The last user message's signable signature, or '' when none is. */
+function turnKey(messages: Record<string, unknown>[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.['role'] !== 'user' || answeredBefore(messages, index)) continue
+    const signature = messageText(messages[index]!)
+    return signature === '' ? '' : `u${index}:${signature}`
+  }
+  return ''
+}
+
+/** The conversation a chat belongs to: the session the harness names, else the first user message. */
+export function conversationKey(messages: Record<string, unknown>[], session: string | undefined): string {
+  if (session !== undefined && session.trim() !== '') return `session:${session.trim().slice(0, 128)}`
+  for (const message of messages) {
+    if (message['role'] !== 'user') continue
+    const signature = messageText(message)
+    if (signature !== '') return `first:${signature}`
+  }
+  return ''
+}
+
+/** The four ids one chat carries, named as WorkBuddy's own client names them. */
+export interface ConversationIds {
+  message: string
+  turn: string
+  conversation: string | undefined
+}
+
+/** Derive the conversation ids one request's body carries. */
+export function conversationIdsFor(body: Record<string, unknown>, options: GenerateOptions): ConversationIds {
+  const messages = Array.isArray(body['messages']) ? body['messages'] as Record<string, unknown>[] : []
+  const message = randomHex()
+  // The loop names a session per request (one-shot title/compaction calls may not):
+  // one conversation's chats carry one conversation id, never a made-up one.
+  const conversation = conversationKey(messages, options.sessionId === undefined ? undefined : String(options.sessionId))
+  const turn = turnKey(messages)
+  return {
+    message,
+    // A turn is a conversation's own: two conversations whose user message reads the
+    // same are still two sends, not one. An empty turn (no signable user message)
+    // falls back to a fresh id, as WorkBuddy's own client makes one.
+    turn: turn === '' ? randomHex() : idFor('turn', `${conversation}|${turn}`),
+    conversation: conversation === '' ? undefined : idFor('conversation', conversation),
+  }
 }
 
 // DSH runs a turn and a session-title request at the same time on one adapter instance,
@@ -728,16 +824,20 @@ export class WorkBuddyAdapter extends LlmAdapter {
     diag(`stream start: model=${options.model} account=${held.account} expiresAt=${held.expiresAt} now=${Date.now()}`)
     try {
       const { body, names } = this.requestBody(options, history)
+      // The conversation ids one user send carries, stable across this stream's retries
+      // and the tool-result step of one turn, as WorkBuddy's own client keeps them.
+      const ids = conversationIdsFor(body, options)
       diag(`body: keys=${Object.keys(body).join(',')} messages=${Array.isArray(body.messages) ? body.messages.length : 0} model=${String(body.model)}`)
       // Post once with the resolved token. A 401/403 can mean the access token lapsed
       // between resolve() and now: force one refresh and post again, as WorkBuddy's own
       // client does — a 403 with a genuinely dead credential keeps its meaning below.
-      let response = await this.post(body, session ?? held, watchdog.signal)
+      // The retry carries the same turn id (ids.turn), as WorkBuddy's own client does.
+      let response = await this.post(body, session ?? held, watchdog.signal, ids)
       if (response.status === 401 || response.status === 403) {
         diag(`response: ${response.status} on resolved token; forcing one refresh and retrying`)
         const refreshed = await this.options.tokens.resolve(held.account, true)
         const fresh = await this.sessionFor(refreshed.accessToken)
-        response = await this.post(body, fresh ?? refreshed, watchdog.signal)
+        response = await this.post(body, fresh ?? refreshed, watchdog.signal, ids)
         diag(`response after refresh: status=${response.status} ok=${response.ok} ct=${response.headers.get('content-type') ?? ''}`)
       } else {
         diag(`response: status=${response.status} ok=${response.ok} ct=${response.headers.get('content-type') ?? ''}`)
@@ -763,17 +863,17 @@ export class WorkBuddyAdapter extends LlmAdapter {
    * message, the request, the turn, and the conversation. Without these the gateway
    * counts the request under no client and can cut the stream.
    */
-  private post(body: Record<string, unknown>, token: WorkBuddyTokenSet, signal: AbortSignal): Promise<Response> {
+  private post(body: Record<string, unknown>, token: WorkBuddyTokenSet, signal: AbortSignal, ids: ConversationIds): Promise<Response> {
     return this.fetchFn(WORKBUDDY_API, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
         ...workbuddyHeaders(token),
-        'X-Conversation-Message-ID': randomHex(),
-        'X-Request-ID': randomHex(),
-        'X-Conversation-Request-ID': randomHex(),
-        'X-Conversation-ID': randomHex(),
+        'X-Conversation-Message-ID': ids.message,
+        'X-Request-ID': ids.message,
+        'X-Conversation-Request-ID': ids.turn,
+        ...ids.conversation === undefined ? {} : { 'X-Conversation-ID': ids.conversation },
       },
       body: JSON.stringify(body),
       signal,
@@ -982,6 +1082,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
     let bytesSeen = 0
     let firstBytes = ''
     let sawToolCall = false
+    // The wire's own terminal reason, when a frame states one. A real finish_reason is
+    // honoured ('length' reads as max-tokens, an unexpected stop/error reads as an error)
+    // instead of answering every stream with a bare 'stop' that hides a truncated answer
+    // as a clean, complete one. Absent, the shape decides as before.
+    let wireFinish: string | undefined
     diag(`stream open: status=${response.status} content-type=${response.headers.get('content-type') ?? ''}`)
     try {
       while (true) {
@@ -1029,6 +1134,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
           // Restore the tool names the model called to the ones the client declared, before
           // the chunk is read as a stream event.
           this.namedBack(chunk as Record<string, unknown>, names)
+          // The terminal reason a frame states, kept for the finish below.
+          const statedFinish = chunk.choices?.[0]?.finish_reason
+          if (typeof statedFinish === 'string' && statedFinish !== '') wireFinish = statedFinish
           // A tool-call delta: emit it so the harness can run the tool. The id and name ride
           // the first delta of each call; later deltas carry argument fragments.
           const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
@@ -1095,13 +1203,16 @@ export class WorkBuddyAdapter extends LlmAdapter {
           block: { type: 'tool-call', id: ToolCallId(open.id), name: open.name, arguments: open.args },
         }
       }
-      diag(`stream done: frames=${framesSeen} bytes=${bytesSeen} started=${started} text=${text.length} calls=${calls.size} sawToolCall=${sawToolCall} firstBytes=${JSON.stringify(firstBytes.slice(0, 80))}`)
+      diag(`stream done: frames=${framesSeen} bytes=${bytesSeen} started=${started} text=${text.length} calls=${calls.size} sawToolCall=${sawToolCall} finish=${wireFinish ?? ''} firstBytes=${JSON.stringify(firstBytes.slice(0, 80))}`)
       // A turn that called a tool ends with the tool-call reason, not stop: the harness
       // runs the tool and feeds the result back. A stop reason here would read as a clean,
-      // complete answer and the tool would never run.
-      yield sawToolCall
-        ? { type: 'finish', reason: { kind: 'tool-calls' } }
-        : { type: 'finish', reason: { kind: 'stop' } }
+      // complete answer and the tool would never run. Otherwise the wire's own terminal
+      // reason decides, so a length-capped answer is not mistaken for a complete one.
+      if (sawToolCall) yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      else if (wireFinish === 'length') yield { type: 'finish', reason: { kind: 'max-tokens' } }
+      else if (wireFinish !== undefined && wireFinish !== 'stop') {
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: `WorkBuddy stream ended with finish_reason ${wireFinish}`, code: 'STREAM_FINISH' } } }
+      } else yield { type: 'finish', reason: { kind: 'stop' } }
     } finally {
       reader.cancel().catch(() => {})
     }
