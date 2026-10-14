@@ -70,6 +70,18 @@ function sse(frames: string[]): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
 }
 
+/** A chat-completions SSE body delivered as raw network reads (to exercise reassembly). */
+function sseChunked(chunks: string[]): Response {
+  const body = chunks.map((chunk) => new TextEncoder().encode(chunk))
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of body) controller.enqueue(chunk)
+      controller.close()
+    },
+  })
+  return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+
 /** A JSON response the way WorkBuddy's console sends one. */
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -720,4 +732,24 @@ test('readWorkBuddyUsage falls back to the enterprise meter for an enterprise ac
   assert.equal(read.windows[0]?.used, 200)
   assert.equal(read.windows[0]?.limit, 800)
   assert.ok(read.windows[0]?.resetsAt !== undefined)
+})
+
+test('an SSE event split across network reads, and two events in one read, both reassemble', async () => {
+  const frameA = JSON.stringify({ choices: [{ delta: { content: 'Hel' } }] })
+  const frameB = JSON.stringify({ choices: [{ delta: { content: 'lo' } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })
+  // frameA is split mid-value across the first three reads; the fourth read carries frameA's
+  // tail, a whole second event (frameB), and the terminator — the shapes that used to drop a
+  // fragment and leave a block without its block-end.
+  const eventA = `data: ${frameA}\n\n`
+  const eventB = `data: ${frameB}\n\ndata: [DONE]\n\n`
+  const fetchFn: typeof fetch = async () => sseChunked([
+    eventA.slice(0, 20),
+    eventA.slice(20, 30),
+    eventA.slice(30),
+    eventB,
+  ])
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const seen = assemble(await collect(adapter.stream(request())))
+  assert.deepEqual(seen.blocks, [{ type: 'text', text: 'Hello' }])
+  assert.equal(seen.finish, 'stop')
 })

@@ -1059,6 +1059,51 @@ export class WorkBuddyAdapter extends LlmAdapter {
     )
   }
 
+  /**
+   * Reassemble whole SSE `data:` payloads from decoded text.
+   *
+   * The gateway may deliver one SSE event over several network reads, and may also pack
+   * several events (or a heartbeat comment) into a single read. The previous reader split
+   * on blank lines and joined every `data:` line with `\n`, so a frame that straddled a
+   * read boundary was cut in half and dropped by `JSON.parse` — and a dropped tool-call
+   * fragment left its block forever without a `block-end`, so the turn never finished.
+   * DeepSeek streams a tool call's arguments as one-character frames, which made the cut
+   * frequent and the stall look random.
+   *
+   * This keeps the leftover of the previous read and walks complete lines instead. A
+   * frame is yielded only once it parses as one JSON value, so a value split across reads
+   * (and one packed into a single read) both reassemble; `[DONE]` is surfaced verbatim.
+   *
+   * @param chunk - newly decoded text.
+   * @param carry - the leftover partial line, updated in place.
+   * @returns the whole payloads found, in wire order.
+   */
+  private *ssePayloads(chunk: string, carry: { text: string }): Generator<string> {
+    carry.text += chunk
+    for (;;) {
+      const newline = carry.text.indexOf('\n')
+      if (newline < 0) return // no complete line yet; wait for the rest
+      const line = carry.text.slice(0, newline)
+      carry.text = carry.text.slice(newline + 1)
+      if (!line.startsWith('data:')) continue // heartbeat comment or blank separator
+      const payload = line.slice(5).trim()
+      if (payload === '' || payload === '[DONE]') {
+        if (payload === '[DONE]') yield '[DONE]'
+        continue
+      }
+      try {
+        JSON.parse(payload)
+        yield payload
+      } catch {
+        // An incomplete JSON value (the frame was split across reads, or packed several to
+        // a line): hold it and let the next line or read complete it. A value never spans
+        // lines — an embedded newline arrives escaped — so this cannot run past its end.
+        carry.text = `${line}\n${carry.text}`
+        return
+      }
+    }
+  }
+
   private async *readStream(
     response: Response,
     watchdog: ReturnType<typeof idleWatchdog>,
@@ -1067,7 +1112,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
   ): AsyncIterable<StreamChunk> {
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
-    let buffer = ''
+    const carry = { text: '' }
     let started = false
     // `block-end` carries the *assembled* block, and the harness takes that one as the
     // block's final content - it does not keep what the deltas accumulated. An empty text
@@ -1095,51 +1140,42 @@ export class WorkBuddyAdapter extends LlmAdapter {
         watchdog.pulse()
         bytesSeen += value.byteLength
         if (firstBytes.length < 200) firstBytes += decoder.decode(value.slice(0, 200 - firstBytes.length), { stream: false })
-        buffer += decoder.decode(value, { stream: true })
-        // WorkBuddy's SSE frames are blank-line separated, whatever the platform's line
-        // ending (\n, \r\n, or \r alone): split on any blank line so a \r\n stream is not
-        // read as one unending frame.
-        const frames = buffer.split(/\r?\n\r?\n/)
-        buffer = frames.pop() ?? ''
-        for (const frame of frames) {
-          const data = frame
-            .split(/\r?\n/)
-            .filter((line) => line.startsWith('data:'))
-            .map((line) => line.slice(5).trim())
-            .join('\n')
+        // Hand the decoded text to the payload reassembler, which splits off whole JSON
+        // frames however they were packed into this read.
+        for (const payload of this.ssePayloads(decoder.decode(value, { stream: true }), carry)) {
           framesSeen += 1
-          if (framesSeen <= 6) diag(`f${framesSeen} raw-data=${JSON.stringify(data.slice(0, 100))}`)
-          if (data === '' || data === '[DONE]') continue
-          let chunk: ChatChunk
+          if (framesSeen <= 6) diag(`f${framesSeen} raw-data=${JSON.stringify(payload.slice(0, 100))}`)
+          if (payload === '[DONE]') continue
+          let frame: ChatChunk
           try {
-            chunk = JSON.parse(data) as ChatChunk
+            frame = JSON.parse(payload) as ChatChunk
           } catch (error) {
             if (framesSeen <= 6) diag(`f${framesSeen} PARSE FAIL: ${error instanceof Error ? error.message : String(error)}`)
             continue
           }
-          if (framesSeen <= 6) diag(`f${framesSeen} delta=${JSON.stringify(chunk.choices?.[0]?.delta ?? null).slice(0, 120)}`)
+          if (framesSeen <= 6) diag(`f${framesSeen} delta=${JSON.stringify(frame.choices?.[0]?.delta ?? null).slice(0, 120)}`)
           // WorkBuddy names a refusal mid-stream (an error frame, or a body with a non-zero
           // code): surface it instead of reading the rest as silence, so the turn fails with
           // the reason rather than stopping after a few empty seconds.
-          const wireError = (chunk as Record<string, unknown>).error ?? chunk.choices?.[0]?.delta
+          const wireError = (frame as Record<string, unknown>).error ?? frame.choices?.[0]?.delta
           if (wireError !== undefined && wireError !== null && typeof wireError === 'object') {
             const message = (wireError as Record<string, unknown>).message
             if (typeof message === 'string' && message !== '') throw new Error(`WorkBuddy: ${message}`)
           }
-          const wireCode = (chunk as Record<string, unknown>).code
+          const wireCode = (frame as Record<string, unknown>).code
           if (typeof wireCode === 'number' && wireCode !== 0) {
-            const msg = (chunk as Record<string, unknown>).msg
+            const msg = (frame as Record<string, unknown>).msg
             throw new Error(`WorkBuddy: ${typeof msg === 'string' ? msg : `error ${wireCode}`}`)
           }
           // Restore the tool names the model called to the ones the client declared, before
           // the chunk is read as a stream event.
-          this.namedBack(chunk as Record<string, unknown>, names)
+          this.namedBack(frame as Record<string, unknown>, names)
           // The terminal reason a frame states, kept for the finish below.
-          const statedFinish = chunk.choices?.[0]?.finish_reason
+          const statedFinish = frame.choices?.[0]?.finish_reason
           if (typeof statedFinish === 'string' && statedFinish !== '') wireFinish = statedFinish
           // A tool-call delta: emit it so the harness can run the tool. The id and name ride
           // the first delta of each call; later deltas carry argument fragments.
-          const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
+          const toolCalls = frame.choices?.[0]?.delta?.tool_calls
           if (Array.isArray(toolCalls)) {
             if (framesSeen <= 8) diag(`f${framesSeen} tool_calls=${JSON.stringify(toolCalls).slice(0, 160)}`)
             for (const call of toolCalls) {
@@ -1168,7 +1204,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
               }
             }
           }
-          const delta = chunk.choices?.[0]?.delta?.content
+          const delta = frame.choices?.[0]?.delta?.content
           if (typeof delta === 'string' && delta !== '') {
             if (!started) {
               yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -1177,7 +1213,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
             text += delta
             yield { type: 'text-delta', index: 0, text: delta }
           }
-          const usage = chunk.usage
+          const usage = frame.usage
           if (usage !== undefined && usage !== null) {
             const input = usage.prompt_tokens ?? 0
             const output = usage.completion_tokens ?? 0
