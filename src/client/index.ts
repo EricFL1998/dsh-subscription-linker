@@ -21,6 +21,7 @@ import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
 import { FastModeButton } from './FastModeButton.js'
 import type { FastModeButtonInjected } from './FastModeButton.js'
+
 import { UsageChip } from './UsageChip.js'
 import type { UsageChipInjected } from './UsageChip.js'
 import { createSubscriptionsCall, createAccountBalanceCall, createCcSwitchBalanceCall } from './subscriptions-rpc.js'
@@ -178,29 +179,37 @@ export function apply(ctx: ClientContext): void {
 /**
  * The session's model directory, in the shape the quick-mode button writes through.
  *
- * Absent when the host exposes no directory for the session, or exposes one that cannot
- * select — in which case the button renders nothing rather than a dead control.
+ * The lookup is lazy: the returned `select` resolves the host's directory on first use,
+ * not at inject time. The host's `directoryFor` throws while its own `remote.session`
+ * dependency is still starting (observed on desktop), so resolving eagerly at mount hid
+ * the button for the whole session even though the directory became ready a moment later.
  *
  * @param modelDirectories - the host's directory resolver, when it has one.
  * @param sessionId - the session whose directory is wanted.
- * @returns the reader/writer pair, or undefined.
+ * @returns the writer, or undefined when there is no resolver or session at all.
  */
 function modelDirectoryFor(
   modelDirectories: ModelDirectories | undefined,
   sessionId: string | undefined,
 ): FastModeButtonInjected['modelDirectory'] {
   if (sessionId === undefined || modelDirectories?.directoryFor === undefined) return undefined
-  // The host throws when the session has no directory yet (a fresh session, say); that is
-  // a missing control, not a fault, so the button renders nothing instead of breaking the
-  // whole composer.
-  let directory: { select?: (selection: { provider: string, model: string }) => Promise<unknown> } | undefined
-  try {
-    directory = modelDirectories.directoryFor(sessionId)
-  } catch {
-    return undefined
-  }
-  if (directory?.select === undefined) return undefined
+  // A lazily-resolved select: the first call walks the host's directory; a throw there is
+  // a transient startup miss, so it is retried once after a short beat before failing.
   return {
-    select: (selection: { provider: string, model: string }) => directory.select?.(selection) ?? Promise.resolve(),
+    select: async (selection: { provider: string, model: string }) => {
+      const resolve = (): { select?: (s: { provider: string, model: string }) => Promise<unknown> } | undefined =>
+        modelDirectories.directoryFor?.(sessionId)
+      let directory = (() => { try { return resolve() } catch { return undefined } })()
+      if (directory?.select === undefined) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 500))
+        try {
+          directory = resolve()
+        } catch {
+          directory = undefined
+        }
+      }
+      if (directory?.select === undefined) throw new Error('the model directory is not available yet; try again')
+      return directory.select(selection)
+    },
   }
 }

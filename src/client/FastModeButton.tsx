@@ -117,7 +117,11 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
   // A switch that landed clears the reason, so the marker follows the truth on screen.
   useEffect(() => { setFailure(undefined) }, [model])
 
-  if (pair === undefined || provider === undefined || model === undefined || modelDirectory?.select === undefined) return null
+  // The button renders on the fast pair alone. The host's model directory can be a moment
+  // late (its `remote.session` dependency starts after the composer mounts), so gating
+  // rendering on the directory being ready here hid the button for the whole session.
+  // `modelDirectory.select` resolves the directory lazily on click instead.
+  if (pair === undefined || provider === undefined || model === undefined) return null
   // Fast mode is the row's fast reasoning rung, so the model id never changes and the
   // picker always shows the row the user can switch back to.
   const active = (selection?.next ?? selection?.lastUsed)?.reasoningEffort === pair.rung
@@ -150,7 +154,12 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
           // Turning it off drops the rung, which the host then reads as the model's own
           // default. The model id is never swapped, so this cannot strand the selection.
           const next = active ? { provider, model: target } : { provider, model: target, reasoningEffort: pair.rung }
-          void Promise.resolve(modelDirectory.select?.(next))
+          if (modelDirectory?.select === undefined) {
+            setFailure({ message: 'the model directory is unavailable on this host' })
+            setPending(false)
+            return
+          }
+          void Promise.resolve(modelDirectory.select(next))
             .then((result) => {
               // The directory reports its own outcome: a refused selection carries why.
               const outcome = result as { ok?: boolean, error?: { code?: string, message?: string } } | undefined
