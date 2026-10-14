@@ -579,6 +579,31 @@ describe('AntigravityAdapter', () => {
     await assert.rejects(collect(adapter.stream(request())), (error: unknown) => error instanceof LlmError)
   })
 
+  test('a transient connect fault is retried and then succeeds', async () => {
+    let calls = 0
+    const warnings: string[] = []
+    const fetchFn: typeof fetch = async () => {
+      calls += 1
+      if (calls <= 2) throw new TypeError('fetch failed: Connect Timeout Error')
+      return sseResponse([{ response: { candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }] } }])
+    }
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn,
+      tokens: tokenManager({ projectId: 'project-7' }),
+      onWarn: (message) => { warnings.push(message) },
+    }))
+    const chunks = await collect(adapter.stream(request()))
+    assert.equal(calls, 3)
+    assert.ok(warnings.some((message) => /transient network fault/.test(message)))
+    assert.deepEqual(chunks.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
+  })
+
+  test('a persistent connect fault exhausts retries and fails the turn', async () => {
+    const fetchFn: typeof fetch = async () => { throw new TypeError('fetch failed: Connect Timeout Error') }
+    const adapter = new AntigravityAdapter(adapterOptions({ fetchFn, tokens: tokenManager({ projectId: 'project-7' }) }))
+    await assert.rejects(collect(adapter.stream(request())), (error: unknown) => error instanceof LlmError)
+  })
+
   test('an expired login names the fix', async () => {
     const tokens = {
       resolve: async () => { throw new ProviderError('no Antigravity account is signed in', REAUTH_REQUIRED) },

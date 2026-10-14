@@ -101,6 +101,42 @@ async function paceAntigravityAttempt(signal: AbortSignal): Promise<void> {
   })
 }
 
+/** How many times a transient network fault is retried before the account is skipped. */
+const NETWORK_RETRY_ATTEMPTS = 3
+
+/** Base delay between network retries; it doubles each attempt. */
+const NETWORK_RETRY_BASE_MS = 800
+
+/**
+ * Whether an error from `fetch` is a transient network fault worth retrying.
+ *
+ * The Antigravity call is a single long-lived POST: a connect timeout, a reset, or a
+ * dropped socket is a transport hiccup, not a refusal — the account is fine, the request
+ * just never arrived. A thrown HTTP-shaped error or a non-network TypeError is not.
+ */
+function isTransientNetworkFault(error: unknown): boolean {
+  if (error instanceof LlmError) return false
+  const text = errorChain(error).toLowerCase()
+  return /fetch failed|connect timeout|connection reset|econnreset|etimedout|econnrefused|socket hang up|network error|timed out/.test(text)
+}
+
+/**
+ * Sleep for a backoff beat, honouring the caller's abort.
+ * @param ms - how long to wait.
+ * @param signal - the caller's abort signal.
+ */
+function backoff(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve()
+    const onAbort = (): void => { clearTimeout(timer); resolve() }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /** Default Cloud Code Assist origin. */
 export const ANTIGRAVITY_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
 
@@ -721,7 +757,7 @@ export class AntigravityAdapter extends LlmAdapter {
         // beat before each retry. opencodex keeps this discipline with a request pacer;
         // this is the same idea narrowed to one provider.
         await paceAntigravityAttempt(watchdog.signal)
-        let response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
+        let response = await this.requestWithRetry(options, model, token.account, token.accessToken, watchdog.signal)
         if (response.status === 401 || response.status === 403) {
           // The stored token was accepted locally but refused on the wire; force one
           // refresh. A 403 that survives the refresh is Google's "verify your account"
@@ -729,7 +765,7 @@ export class AntigravityAdapter extends LlmAdapter {
           // so the call moves to the next account rather than failing. Only a 401 marks
           // the credential as dead.
           token = await this.options.tokens.resolve(token.account, true)
-          response = await this.request(options, model, token.account, token.accessToken, watchdog.signal)
+          response = await this.requestWithRetry(options, model, token.account, token.accessToken, watchdog.signal)
           if (response.status === 401) {
             this.options.onCredentialRejected?.(token.account)
           }
@@ -840,6 +876,38 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   /** Build and send one streaming request for one model. */
+  /**
+   * One dispatch attempt, retrying transient network faults before giving up on the account.
+   *
+   * A connect timeout or a dropped socket is a transport hiccup, not a refusal — the
+   * account is fine and the request never arrived, so it is worth a few backoff retries
+   * before the sweep moves on. An HTTP response (even a 429/403) is returned as-is: those
+   * drive the account-switch logic in {@link stream}, and must not be swallowed here.
+   * Non-network errors propagate untouched.
+   */
+  private async requestWithRetry(
+    options: GenerateOptions,
+    model: string,
+    account: string,
+    accessToken: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    let lastError: unknown
+    for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt++) {
+      try {
+        return await this.request(options, model, account, accessToken, signal)
+      } catch (error) {
+        if (!isTransientNetworkFault(error) || signal.aborted) throw error
+        lastError = error
+        this.options.onWarn?.(`antigravity: transient network fault (${errorChain(error)}); retrying`)
+        if (attempt < NETWORK_RETRY_ATTEMPTS - 1) {
+          await backoff(NETWORK_RETRY_BASE_MS * 2 ** attempt, signal)
+        }
+      }
+    }
+    throw lastError
+  }
+
   private async request(
     options: GenerateOptions,
     model: string,
