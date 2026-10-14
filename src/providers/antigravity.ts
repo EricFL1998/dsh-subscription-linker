@@ -793,6 +793,13 @@ export class AntigravityAdapter extends LlmAdapter {
           diag.push(`403 on ${token.account}, another account already cooling; stopping the sweep`)
         }
         if (!response.ok) {
+          if (response.status === 400) {
+            // Google's 400 puts the offending field in error.details / fieldViolations, which
+            // the generic errorBodyMessage does not surface; log the whole body so the real
+            // cause is visible, since a bare "invalid argument" gives nothing to act on.
+            const body = await response.clone().text().catch(() => '')
+            this.options.onWarn?.(`antigravity: HTTP 400 body: ${body.slice(0, 600)}`)
+          }
           diag.push(`fail ${response.status} on ${token.account} (no switch)`)
           const error = await httpLlmError(response, 'Antigravity API')
           // The diagnostic rides the message so it surfaces where the user sees the

@@ -100,7 +100,12 @@ async function errorBodyMessage(response: Response): Promise<string | undefined>
         const record = parsed as Record<string, unknown>
         const error = record.error
         if (typeof error === 'object' && error !== null) {
-          const message = (error as Record<string, unknown>).message
+          const errorRecord = error as Record<string, unknown>
+          const message = errorRecord.message
+          // Google puts the offending field in details[].fieldViolations, which the bare
+          // message omits; surface it so a 400 names what to fix instead of "invalid argument".
+          const detail = extractFieldViolations(errorRecord.details)
+          if (detail !== undefined) return `${String(message ?? '').trim()} — ${detail}`
           if (typeof message === 'string' && message.trim() !== '') return message.trim()
         }
         if (typeof record.message === 'string' && record.message.trim() !== '') return record.message.trim()
@@ -113,6 +118,26 @@ async function errorBodyMessage(response: Response): Promise<string | undefined>
   } catch {
     return undefined
   }
+}
+
+/** The offending-field text inside a Google RPC error's `details` list, when present. */
+function extractFieldViolations(details: unknown): string | undefined {
+  if (!Array.isArray(details)) return undefined
+  const out: string[] = []
+  for (const entry of details) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const violations = (entry as Record<string, unknown>).fieldViolations
+    if (!Array.isArray(violations)) continue
+    for (const violation of violations) {
+      if (typeof violation !== 'object' || violation === null) continue
+      const field = (violation as Record<string, unknown>).field
+      const description = (violation as Record<string, unknown>).description
+      if (typeof description === 'string' && description.trim() !== '') {
+        out.push(typeof field === 'string' && field.trim() !== '' ? `${field}: ${description.trim()}` : description.trim())
+      }
+    }
+  }
+  return out.length === 0 ? undefined : out.join('; ')
 }
 
 /**
