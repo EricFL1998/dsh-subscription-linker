@@ -29,8 +29,7 @@ import { providerOf } from './UsageChip.js'
 import { fastModeCss } from './styles.js'
 
 /** Injected props the button is registered with. */
-export interface FastModeButtonInjected {
-  /** The plugin's own RPC caller, for the one `model-variants` read. */
+export interface FastModeButtonInjected {  /** The plugin's own RPC caller, for the one `model-variants` read. */
   call: SubscriptionsCall
   /** Whether the provider is one this plugin serves. */
   isOwnProvider: (provider: string) => boolean
@@ -45,6 +44,16 @@ export interface FastModeButtonInjected {
     select?: (selection: { provider: string, model: string, reasoningEffort?: string }) => Promise<unknown>
   } | undefined
 }
+
+/**
+ * How many times a *loading* route is re-asked, and how long between attempts.
+ *
+ * The route answers `pending` while it has not read its listing, which is the only case
+ * worth asking again: a route that has read its listing and reports no variant means the
+ * model truly has none, and the button stays absent without further reads.
+ */
+const VARIANT_READ_ATTEMPTS = 6
+const VARIANT_READ_INTERVAL_MS = 1_000
 
 /**
  * The quick-mode control, for the composer's row of standard controls.
@@ -68,15 +77,41 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
       return
     }
     let live = true
-    void call('model-variants', { provider, id: model })
-      .then((result) => {
-        if (!live) return
-        // The rung is the provider's own word (xAI `lightspeed`, Kimi `highspeed`), so
-        // the picker reads a name the model's own docs use, not a generic "Fast".
-        setPair(result?.fast === undefined ? undefined : { rung: result.fastRung ?? 'fast' })
-      })
-      .catch(() => { if (live) setPair(undefined) })
-    return () => { live = false }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // A variant is derived from the route's model listing, which is read asynchronously and
+    // may still be in flight when the composer mounts (a cold start, or the first run after
+    // an update). The route says so with `pending`, and only then is it worth asking again:
+    // a route that has read its listing and names no variant has answered for good.
+    let attempts = 0
+    const ask = (): void => {
+      attempts += 1
+      void call('model-variants', { provider, id: model })
+        .then((result) => {
+          if (!live) return
+          if (result?.fast !== undefined) {
+            // The rung is the provider's own word (xAI `lightspeed`, Kimi `highspeed`), so
+            // the picker reads a name the model's own docs use, not a generic "Fast".
+            setPair({ rung: result.fastRung ?? 'fast' })
+            return
+          }
+          setPair(undefined)
+          // Still reading its listing: ask again, up to the cap, then accept the answer.
+          if (result?.pending === true && attempts < VARIANT_READ_ATTEMPTS) {
+            timer = setTimeout(ask, VARIANT_READ_INTERVAL_MS)
+          }
+        })
+        .catch(() => {
+          // A read that failed outright is worth one more try, on the same budget.
+          if (!live) return
+          setPair(undefined)
+          if (attempts < VARIANT_READ_ATTEMPTS) timer = setTimeout(ask, VARIANT_READ_INTERVAL_MS)
+        })
+    }
+    ask()
+    return () => {
+      live = false
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }, [provider, model, isOwnProvider, call])
 
   // A switch that landed clears the reason, so the marker follows the truth on screen.

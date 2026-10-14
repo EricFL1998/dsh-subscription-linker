@@ -486,6 +486,17 @@ export class GlmAdapter extends LlmAdapter {
     return this.imageModel
   }
 
+  /**
+   * Whether this route has read a model listing yet.
+   *
+   * The image model is a row of the listing, so until one has been read "there is no image
+   * model" and "the listing has not arrived" look identical from outside; a caller that asks
+   * once needs to tell them apart.
+   */
+  hasListing(): boolean {
+    return this.live !== undefined
+  }
+
   /** The ids the picker must currently omit. */
   private async hidden(): Promise<ReadonlySet<string>> {
     if (this.options.hiddenModels === undefined) return new Set()

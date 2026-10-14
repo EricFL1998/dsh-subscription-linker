@@ -125,6 +125,36 @@ const EFFORT_LABELS: Record<string, { name: string, description: string }> = {
 }
 
 /**
+ * Stable labels for the ids this route is known for.
+ *
+ * Labels, not a roster: nothing here decides which models exist or what they serve —
+ * membership, windows, ladders and modalities are the endpoint's listing. What it fixes is
+ * the one thing the listing cannot answer, because the id does not name it: `kimi-for-coding`
+ * is the subscription alias the service re-points at each coding release, so its
+ * `display_name` names the release of the moment (`K2.8 Preview` the week K2.8 ships) while
+ * the id the user selected stays the same. Labelling that row by release would rename the
+ * user's saved selection overnight, so the alias keeps its own name — and the endpoint's
+ * release name is deliberately not shown, because the row is the alias, not the version.
+ *
+ * A model the endpoint adds that this map does not name is published exactly as the
+ * endpoint describes it.
+ */
+const STABLE_MODEL_LABELS: Readonly<Record<string, { name: string, description: string }>> = {
+  'kimi-for-coding': {
+    name: 'Kimi for Coding',
+    description: 'Subscription alias — the endpoint re-points it at the current coding release',
+  },
+  'k3': {
+    name: 'Kimi K3',
+    description: 'Flagship reasoning model',
+  },
+  'k3-256k': {
+    name: 'Kimi K3 (256K)',
+    description: 'Flagship reasoning model pinned to the 256K-token window',
+  },
+}
+
+/**
  * Spellings the endpoint has retired, and the model each one became.
  *
  * A repair table, not a roster: nothing here decides which models exist. Each entry
@@ -318,7 +348,21 @@ export class KimiAdapter extends LlmAdapter {
       if (id === fact.id || !byId.has(id)) byId.set(id, { ...fact, id })
     }
     return [...byId.values()].map((fact) =>
-      liveEntry(fact, [], KIMI_CONTEXT_WINDOW, 'Reported by the Kimi Code model list'))
+      this.labelled(liveEntry(fact, [], KIMI_CONTEXT_WINDOW, 'Reported by the Kimi Code model list')))
+  }
+
+  /**
+   * Put this route's stable label on one entry, when the id has one.
+   *
+   * The listing states what the model *is*; the label states what the *id* is, which only
+   * this route knows (see {@link STABLE_MODEL_LABELS}).
+   *
+   * @param entry - the entry built from the listing.
+   * @returns the entry, relabelled when its id has a stable label.
+   */
+  private labelled(entry: KimiModelEntry): KimiModelEntry {
+    const stable = STABLE_MODEL_LABELS[entry.id]
+    return stable === undefined ? entry : { ...entry, name: stable.name, description: stable.description }
   }
 
   /**
@@ -342,6 +386,17 @@ export class KimiAdapter extends LlmAdapter {
   /** The fast pair one picker id belongs to, from either side. */
   fastPairOf(id: string): { baseId: string, wireId: string } | undefined {
     return this.fastVariants.pairOf(id)
+  }
+
+  /**
+   * Whether this route has read a model listing yet.
+   *
+   * A variant is derived from the listing, so until one has been read "this model has no
+   * variant" and "the listing has not arrived" look identical from outside; a caller that
+   * asks once (the composer's quick-mode button) needs to tell them apart.
+   */
+  hasListing(): boolean {
+    return this.live !== undefined
   }
 
   /**
@@ -611,7 +666,7 @@ export class KimiAdapter extends LlmAdapter {
   discover(ids: readonly string[]): void {
     const known = new Map((this.live ?? []).map((entry) => [entry.id, entry]))
     this.live = ids.map((id) => known.get(id)
-      ?? liveEntry({ id }, [], KIMI_CONTEXT_WINDOW, 'Reported by the Kimi Code model list'))
+      ?? this.labelled(liveEntry({ id }, [], KIMI_CONTEXT_WINDOW, 'Reported by the Kimi Code model list')))
   }
 
   /** The catalog, for the Settings page's model list. */

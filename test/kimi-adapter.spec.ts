@@ -124,15 +124,30 @@ describe('KimiAdapter catalog', () => {
   test('publishes what the endpoint last listed, with the endpoint own metadata', async () => {
     const adapter = new KimiAdapter(options())
     const models = await adapter.listModels('kimi')
-    // Membership, names and windows are the listing's, not a table this build ships. Note
+    // Membership and every capability are the listing's, not a table this build ships. Note
     // that `k3` is 1M here: the endpoint folded the long window into the plain id.
     assert.deepEqual(models.map((model) => model.id), ['kimi-for-coding', 'k3', 'k3-256k'])
-    assert.equal(models[0]?.name, 'K2.8 Preview')
     assert.equal(models[0]?.provider, 'kimi')
     // `video` is not in the harness vocabulary, so it is not advertised.
     assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
     assert.equal((await adapter.resolveModel('kimi', 'k3')).context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
     assert.equal((await adapter.resolveModel('kimi', 'k3-256k')).context?.contextWindow, KIMI_CONTEXT_WINDOW)
+  })
+
+  test('names a stable alias by the alias, not by the release it points at', async () => {
+    const adapter = new KimiAdapter(options())
+    // The listing answers `display_name: 'K2.8 Preview'` for `kimi-for-coding` because that
+    // is the release the alias currently points at. The row the user selected is the alias,
+    // so it keeps the alias's name — a picker that renamed itself every release would look
+    // like a different model every few weeks, while the id never changed.
+    const models = await adapter.listModels('kimi')
+    assert.equal(models[0]?.name, 'Kimi for Coding')
+    assert.equal((await adapter.resolveModel('kimi', 'kimi-for-coding')).name, 'Kimi for Coding')
+    // An id this route has no label for is the endpoint's own name, untouched.
+    const future = new KimiAdapter(options({
+      cachedListing: async () => [{ id: 'k4', display_name: 'K4 Turbo', context_length: 2_097_152 }],
+    }))
+    assert.equal((await future.listModels('kimi')).find((model) => model.id === 'k4')?.name, 'K4 Turbo')
   })
 
   test('a picker query never asks the endpoint', async () => {
@@ -173,7 +188,7 @@ describe('KimiAdapter catalog', () => {
     // the 1M window the endpoint now folds into `k3`.
     const resolved = await adapter.resolveModel('kimi', 'k3[1m]')
     assert.equal(resolved.id, 'k3')
-    assert.equal(resolved.name, 'K3')
+    assert.equal(resolved.name, 'Kimi K3')
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
   })
 
@@ -261,9 +276,9 @@ describe('KimiAdapter catalog', () => {
     assert.equal(models.some((model) => model.id === 'kimi-for-coding'), true)
     const resolved = await adapter.resolveModel('kimi', 'kimi-for-coding-highspeed')
     // A variant is a wire id, not a row, so a stale selection of one resolves onto the row
-    // that owns it — with the row's own name and window, which is what the listing stated.
+    // that owns it — with the row's own name and window.
     assert.equal(resolved.id, 'kimi-for-coding')
-    assert.equal(resolved.name, 'K2.8 Preview')
+    assert.equal(resolved.name, 'Kimi for Coding')
     assert.equal(resolved.context?.contextWindow, KIMI_LONG_CONTEXT_WINDOW)
     // The row carries the `fast` rung, which is what the quick-mode button selects.
     assert.equal(

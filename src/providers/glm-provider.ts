@@ -227,9 +227,17 @@ export function createGlmProvider(options: GlmProviderOptions): ProviderRoute {
     removeModel: (id: string) => controller.removeModel(id),
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
-    modelVariants: (id: string) => {
+    modelVariants: async (id: string) => {
+      // The image model is a row of the listing, so the read is awaited before answering:
+      // the composer asks once, and "no image model" must mean there is none.
+      void id
+      await adapter.hydrate()
       const image = adapter.imageModelId()
-      return image === undefined ? undefined : { image }
+      return {
+        ...image === undefined ? {} : { image },
+        // Nothing read yet: the answer above is provisional, and the caller is told so.
+        ...adapter.hasListing() ? {} : { pending: true },
+      }
     },
   }
 }

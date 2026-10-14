@@ -209,7 +209,8 @@ export function liveModelFacts(row: unknown): LiveModelFacts | undefined {
  * What the endpoint stated wins; the curated table fills only what the listing was
  * silent about, so a live figure — the window a model actually serves today — is
  * never overridden by a shipped guess, and a retired figure never survives a live
- * read that contradicts it.
+ * read that contradicts it. A route whose ids are stable aliases the service re-points
+ * per release keeps its own labels instead (see the kimi route's alias labels).
  *
  * @param facts - what the listing stated for this id.
  * @param curated - the curated metadata table.

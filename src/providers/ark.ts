@@ -315,6 +315,17 @@ export class ArkAdapter extends LlmAdapter {
     return this.imageModel
   }
 
+  /**
+   * Whether this route has read a model listing yet.
+   *
+   * The image model is a row of the listing, so until one has been read "there is no image
+   * model" and "the listing has not arrived" look identical from outside; a caller that asks
+   * once needs to tell them apart.
+   */
+  hasListing(): boolean {
+    return this.live !== undefined
+  }
+
   override async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
     await this.hydrate()
     const entry = findEntry(this.catalog(), model)

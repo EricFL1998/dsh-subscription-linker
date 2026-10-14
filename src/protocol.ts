@@ -375,6 +375,15 @@ export interface ModelVariants {
   fastRung?: string
   /** Image-generation model wire id, when the provider reported one. */
   image?: string
+  /**
+   * The route has not read its model listing yet, so "no variant" is not yet an answer.
+   *
+   * A listing is read once per session and its variants are derived from it, so an early
+   * read of this endpoint cannot tell "this model has no fast variant" from "the route has
+   * not looked yet". Saying so lets the caller ask again later instead of hiding a control
+   * that should be there — and, once a listing has been read, lets it stop asking.
+   */
+  pending?: boolean
 }
 
 /** Result of `model-variants`: the variants for one model id. */

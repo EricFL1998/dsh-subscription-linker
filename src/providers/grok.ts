@@ -1026,6 +1026,17 @@ export class GrokAdapter extends LlmAdapter {
     return this.imageModel
   }
 
+  /**
+   * Whether this route has read a model listing yet.
+   *
+   * A variant is derived from the listing, so until one has been read "this model has no
+   * variant" and "the listing has not arrived" look identical from outside; a caller that
+   * asks once (the composer's quick-mode button) needs to tell them apart.
+   */
+  hasListing(): boolean {
+    return this.live !== undefined
+  }
+
   /** The curated catalog, for the Settings page's model list. */
   catalogEntries(): readonly CatalogEntry[] {
     return this.catalog()
@@ -1397,12 +1408,19 @@ export function createGrokProvider(options: GrokProviderOptions): ProviderRoute 
     removeModel: (id: string) => controller.removeModel(id),
     usage: (force?: boolean) => controller.usage(force),
     reload: () => controller.reload(),
-    modelVariants: (id: string) => {
+    modelVariants: async (id: string) => {
+      // A variant is known only once the route has read its listing, whose rows name it.
+      // The composer asks exactly once, so the read is awaited here: "no fast variant"
+      // must mean the route really has none, not that its table was still loading.
+      await adapter.hydrate()
       const pair = adapter.fastPairOf(id)
       const image = adapter.imageModelId()
       return {
         ...pair === undefined ? {} : { fast: pair.wireId, fastBase: pair.baseId, fastRung: fastWordOf(pair.wireId) },
         ...image === undefined ? {} : { image },
+        // Nothing read yet: the answer above is provisional, and the caller is told so
+        // rather than being left to read silence as "this model has no variant".
+        ...adapter.hasListing() ? {} : { pending: true },
       }
     },
   }
