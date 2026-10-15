@@ -51,6 +51,17 @@ function diag(message: string): void {
   }
 }
 
+/** Read a `retry-after` header as an absolute delay in milliseconds. */
+function retryAfterMs(response: Response): number | undefined {
+  const raw = response.headers.get('retry-after')
+  if (raw === null) return undefined
+  const seconds = Number(raw)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000)
+  const at = Date.parse(raw)
+  if (!Number.isNaN(at)) return Math.max(0, at - Date.now())
+  return undefined
+}
+
 /** The `workbuddy` provider route key (China build). */
 export const WORKBUDDY_PROVIDER_ID = 'workbuddy'
 /** Human name for the route and its cards. */
@@ -1050,12 +1061,22 @@ export class WorkBuddyAdapter extends LlmAdapter {
       return new Error(`${message} — WorkBuddy requires an active credit package even for 0-rate free models`)
     }
     const { LlmError } = await import('@deepseek-ai/dsh-llm')
+    const retryAfter = retryAfterMs(response)
+    // A 429 is the model's own queue-full pacing, not a refusal: report it the way the
+    // gateway words it, so the harness reads it as a normal rate-limit wait rather than a
+    // failed request.
+    if (response.status === 429) {
+      return new LlmError(
+        `429: {"code":null,"message":"${message}","param":null,"type":"rate_limit_error"}`,
+        'RATE_LIMIT',
+        { status: response.status, ...retryAfter === undefined ? {} : { providerRetryAfterMs: retryAfter } },
+      )
+    }
     return new LlmError(
       `${WORKBUDDY_PROVIDER_NAME} request failed (HTTP ${response.status}): ${message}`,
       response.status === 401 || response.status === 403 ? 'INVALID_CREDENTIAL'
-        : response.status === 429 ? 'RATE_LIMIT'
-          : response.status >= 500 ? 'SERVER' : 'HTTP_ERROR',
-      { status: response.status },
+        : response.status >= 500 ? 'SERVER' : 'HTTP_ERROR',
+      { status: response.status, ...retryAfter === undefined ? {} : { providerRetryAfterMs: retryAfter } },
     )
   }
 
