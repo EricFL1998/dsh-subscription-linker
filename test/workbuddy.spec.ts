@@ -495,6 +495,20 @@ test('the answer the reader sees is the text its block-end closes', async () => 
   assert.equal(seen.finish, 'stop')
 })
 
+test('an empty answer (a bare role then [DONE]) is an empty response, not a clean stop', async () => {
+  // WorkBuddy answers a request whose context outgrows the model with one empty frame (a bare
+  // role, then `[DONE]`): the model generated nothing, but the wire reads as a clean `stop`,
+  // which would render a blank "completed" turn. Surface it as an empty response so the caller
+  // retries or falls back instead.
+  const fetchFn: typeof fetch = async () => sse([
+    JSON.stringify({ choices: [{ delta: { role: 'assistant', content: '', function_call: { name: '', arguments: '' }, tool_calls: [] } }] }),
+  ])
+  const adapter = new WorkBuddyAdapter({ discovery: true, streamIdleTimeoutMs: 1000, tokens: tokens(session()), fetchFn })
+  const seen = assemble(await collect(adapter.stream(request())))
+  assert.deepEqual(seen.blocks, [])
+  assert.equal(seen.finish, 'error')
+})
+
 test('a streamed tool call rides its own block instead of folding into the text', async () => {
   const fetchFn: typeof fetch = async () => sse([
     JSON.stringify({ choices: [{ delta: { content: 'Reading' } }] }),

@@ -62,6 +62,16 @@ function retryAfterMs(response: Response): number | undefined {
   return undefined
 }
 
+/**
+ * Code for a turn that produced no content and no tool call.
+ *
+ * WorkBuddy answers a request whose context has grown past what the model serves with a
+ * single empty frame (a bare role, then `[DONE]`): the model generated nothing, but the
+ * wire reads as a clean `stop`, so the turn "completes" blank. That is not a real answer;
+ * surfacing it lets the harness retry or fall back instead of showing an empty reply.
+ */
+export const WORKBUDDY_EMPTY_RESPONSE_CODE = 'WORKBUDDY_EMPTY_RESPONSE'
+
 /** The `workbuddy` provider route key (China build). */
 export const WORKBUDDY_PROVIDER_ID = 'workbuddy'
 /** Human name for the route and its cards. */
@@ -1266,6 +1276,13 @@ export class WorkBuddyAdapter extends LlmAdapter {
       // complete answer and the tool would never run. Otherwise the wire's own terminal
       // reason decides, so a length-capped answer is not mistaken for a complete one.
       if (sawToolCall) yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      else if (!started && calls.size === 0) {
+        // Nothing was generated at all: the model answered a single empty frame (a bare role,
+        // then `[DONE]`) — what WorkBuddy returns once the context outgrows the model. A clean
+        // `stop` here reads as a completed blank turn; surface it as an empty response so the
+        // caller retries or falls back rather than showing nothing.
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: 'WorkBuddy returned no content', code: WORKBUDDY_EMPTY_RESPONSE_CODE } } }
+      }
       else if (wireFinish === 'length') yield { type: 'finish', reason: { kind: 'max-tokens' } }
       else if (wireFinish !== undefined && wireFinish !== 'stop') {
         yield { type: 'finish', reason: { kind: 'error', failure: { message: `WorkBuddy stream ended with finish_reason ${wireFinish}`, code: 'STREAM_FINISH' } } }
