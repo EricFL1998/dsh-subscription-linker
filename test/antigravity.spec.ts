@@ -60,6 +60,56 @@ function tokenManager(session?: Partial<AntigravitySession>): TokenManager<Antig
   } as unknown as TokenManager<AntigravitySession>
 }
 
+/** A token manager that answers for a pool of accounts, keyed by account name. */
+function poolTokenManager(accounts: string[], defaultAccount = accounts[0] ?? 'user-1'): TokenManager<AntigravitySession> {
+  const sessions = new Map(accounts.map((account) => [account, {
+    accessToken: `${account}-token`,
+    expiresAt: Date.now() + 60_000,
+    projectId: 'project-1',
+  } as AntigravitySession]))
+  return {
+    resolve: async (account?: string) => {
+      const key = account ?? defaultAccount
+      const held = sessions.get(key)
+      if (held === undefined) throw new Error(`no session for ${key}`)
+      return { account: key, accessToken: held.accessToken, expiresAt: held.expiresAt }
+    },
+    session: async (account?: string) => {
+      const key = account ?? defaultAccount
+      const held = sessions.get(key)
+      return held === undefined ? undefined : { account: key, session: held }
+    },
+    accounts: async () => accounts,
+    defaultAccount: async () => defaultAccount,
+  } as unknown as TokenManager<AntigravitySession>
+}
+
+/** Google's verification gate: a 403 whose details name the link that clears it. */
+function gateResponse(url = GATE_URL): Response {
+  return jsonResponse({
+    error: {
+      code: 403,
+      message: 'Verify your account to continue.',
+      status: 'PERMISSION_DENIED',
+      details: [
+        {
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'VALIDATION_REQUIRED',
+          domain: 'cloudcode-pa.googleapis.com',
+          metadata: { validation_url: url, validation_error_message: 'Verify your account to continue.' },
+        },
+        {
+          '@type': 'type.googleapis.com/google.rpc.Help',
+          links: [{ description: 'Verify your account', url }],
+        },
+      ],
+    },
+  }, 403)
+}
+
+/** The link shape Google returns; asserted on, never opened. */
+const GATE_URL = 'https://accounts.google.com/signin/continue?sarp=1&continue=https://developers.google.com/gemini-code-assist/auth/auth_success_gemini'
+
 /** Adapter options with a recording fetch. */
 function adapterOptions(overrides: Partial<AntigravityAdapterOptions> = {}): AntigravityAdapterOptions {
   return {
@@ -568,6 +618,68 @@ describe('AntigravityAdapter', () => {
     assert.equal(seenHeaders.get('authorization'), 'Bearer token')
     assert.match(seenHeaders.get('user-agent') ?? '', /^antigravity\//)
     assert.deepEqual(chunks.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
+  })
+
+  test('a verification-gated account is set aside for one that can serve', async () => {
+    const gatedAccount = 'gated-1@example.com'
+    const healthyAccount = 'ok-1@example.com'
+    const seen: string[] = []
+    const fetchFn: typeof fetch = async (_input, init) => {
+      const auth = new Headers(init?.headers).get('authorization') ?? ''
+      seen.push(auth)
+      if (auth === 'Bearer ' + gatedAccount + '-token') return gateResponse()
+      return sseResponse([{ response: { candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }] } }])
+    }
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn,
+      tokens: poolTokenManager([gatedAccount, healthyAccount]),
+    }))
+
+    const first = await collect(adapter.stream(request({ model: 'gemini-3-flash' })))
+    assert.deepEqual(first.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
+    // The gate is read off the first answer, so it costs one probe and not the forced
+    // refresh the plugin would otherwise spend on a credential that is perfectly good.
+    assert.equal(seen.filter((auth) => auth === 'Bearer ' + gatedAccount + '-token').length, 1)
+
+    // The gate is remembered: the next turn goes straight to the account that serves.
+    const before = seen.length
+    await collect(adapter.stream(request({ model: 'gemini-3-flash' })))
+    assert.equal(seen.slice(before).some((auth) => auth.includes(gatedAccount)), false)
+    assert.equal(seen.slice(before).length, 1)
+  })
+
+  test('an all-gated pool names the verification link', async () => {
+    const fetchFn: typeof fetch = async () => gateResponse()
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn,
+      tokens: poolTokenManager(['gated-2@example.com', 'gated-3@example.com']),
+    }))
+    await assert.rejects(collect(adapter.stream(request({ model: 'gemini-3-flash' }))), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.match(error.message, /Google requires verification for gated-2@example\.com/)
+      assert.match(error.message, /verify here: https:\/\/accounts\.google\.com\/signin\/continue/)
+      // Both accounts are named, but the long URL is printed once.
+      assert.match(error.message, /verification required for gated-3@example\.com/)
+      assert.equal(error.message.split('https://accounts.google.com').length - 1, 1)
+      // The wall clears in the browser, so a retry of the same request cannot help.
+      assert.equal(error.code, 'ACCOUNT_VERIFICATION_REQUIRED')
+      return true
+    })
+  })
+
+  test('a lone gated account names the link instead of a bare refusal', async () => {
+    const fetchFn: typeof fetch = async () => gateResponse()
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn,
+      tokens: poolTokenManager(['gated-4@example.com']),
+    }))
+    await assert.rejects(collect(adapter.stream(request({ model: 'gemini-3-flash' }))), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.match(error.message, /Google requires verification for gated-4@example\.com/)
+      assert.match(error.message, /verify here: https:\/\/accounts\.google\.com\/signin\/continue/)
+      assert.equal(error.code, 'ACCOUNT_VERIFICATION_REQUIRED')
+      return true
+    })
   })
 
   test('a context-window failure is reported as such', async () => {

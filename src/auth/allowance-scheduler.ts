@@ -20,12 +20,23 @@ export interface AllowanceState {
   resetsAt?: number
   /** Epoch milliseconds until which the account is cooling after a refused request. */
   cooldownUntil?: number
+  /** Epoch milliseconds until which the provider has gated the account behind verification. */
+  gatedUntil?: number
   /** Epoch milliseconds at which this state was last learned. */
   learnedAt: number
 }
 
 /** Default cooldown after a refused request, so the provider's gate is not re-hit at once. */
 export const DEFAULT_REFUSAL_COOLDOWN_MS = 2 * 60 * 1000
+
+/**
+ * How long a verification gate is remembered.
+ *
+ * The gate clears in the user's browser, not here, so this is only long enough to keep
+ * a gated account from being re-hit every turn; once it lapses the account is probed
+ * again, which is how a freshly verified account returns to the pool by itself.
+ */
+export const DEFAULT_GATE_TTL_MS = 30 * 60 * 1000
 
 /** In-memory, per-provider memory of account reset times. */
 export class AllowanceScheduler {
@@ -89,6 +100,40 @@ export class AllowanceScheduler {
   isCooling(provider: string, account: string): boolean {
     const state = this.byProvider.get(provider)?.get(account)
     return state?.cooldownUntil !== undefined && Date.now() < state.cooldownUntil
+  }
+
+  /**
+   * Remember one account as gated behind the provider's own verification wall.
+   *
+   * A gated account is neither a dead credential nor a spent allowance: the provider
+   * wants its owner to verify it, so until that happens in the browser — or this memory
+   * lapses — requests belong on another account instead of on another refusal. Recording
+   * it is also what keeps a cooldown from being mistaken for the gate: a cooled account
+   * is retried by design, a gated one is skipped.
+   *
+   * @param provider - the provider route id.
+   * @param account - the account key.
+   * @param until - epoch milliseconds to remember the gate until; defaults to a long beat.
+   */
+  markGated(provider: string, account: string, until = Date.now() + DEFAULT_GATE_TTL_MS): void {
+    const existing = this.byProvider.get(provider)?.get(account)
+    this.provider(provider).set(account, {
+      ...existing,
+      gatedUntil: until,
+      learnedAt: Date.now(),
+    })
+  }
+
+  /**
+   * Whether one account is remembered as gated by the provider.
+   *
+   * @param provider - the provider route id.
+   * @param account - the account key.
+   * @returns whether the account is mid-gate.
+   */
+  isGated(provider: string, account: string): boolean {
+    const state = this.byProvider.get(provider)?.get(account)
+    return state?.gatedUntil !== undefined && Date.now() < state.gatedUntil
   }
 
   /**

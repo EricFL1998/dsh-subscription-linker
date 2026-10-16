@@ -90,4 +90,29 @@ describe('AllowanceScheduler', () => {
     s.noteReset('antigravity', 'a', undefined)
     assert.equal(s.isSpentUntilReset('antigravity', 'a'), true)
   })
+
+  test('a gated account is gated until the memory lapses, and is not a cooldown', () => {
+    const s = new AllowanceScheduler()
+    s.markGated('antigravity', 'a', Date.now() + 60_000)
+    assert.equal(s.isGated('antigravity', 'a'), true)
+    // Gating is its own state: the account is skipped rather than retried after a beat.
+    assert.equal(s.isCooling('antigravity', 'a'), false)
+    assert.equal(s.isGated('antigravity', 'b'), false)
+    assert.equal(s.isGated('grok', 'a'), false)
+  })
+
+  test('a gate whose memory has passed is probed again', () => {
+    const s = new AllowanceScheduler()
+    s.markGated('antigravity', 'a', Date.now() - 1000)
+    assert.equal(s.isGated('antigravity', 'a'), false)
+  })
+
+  test('a gate keeps the allowance state it was learned beside', () => {
+    const s = new AllowanceScheduler()
+    const future = Date.now() + 60 * 60 * 1000
+    s.noteReset('antigravity', 'a', future)
+    s.markGated('antigravity', 'a', Date.now() + 60_000)
+    assert.equal(s.resetAt('antigravity', 'a'), future)
+    assert.equal(s.isGated('antigravity', 'a'), true)
+  })
 })

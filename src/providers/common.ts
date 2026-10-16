@@ -101,12 +101,16 @@ async function errorBodyMessage(response: Response): Promise<string | undefined>
         const error = record.error
         if (typeof error === 'object' && error !== null) {
           const errorRecord = error as Record<string, unknown>
-          const message = errorRecord.message
+          const message = String(errorRecord.message ?? '').trim()
           // Google puts the offending field in details[].fieldViolations, which the bare
           // message omits; surface it so a 400 names what to fix instead of "invalid argument".
           const detail = extractFieldViolations(errorRecord.details)
-          if (detail !== undefined) return `${String(message ?? '').trim()} — ${detail}`
-          if (typeof message === 'string' && message.trim() !== '') return message.trim()
+          // A blocked account's message names the gate but not the way through it, so the
+          // link Google attached rides with the message, labelled as what to do with it.
+          const action = extractActionUrl(errorRecord.details)
+          const suffix = action === undefined ? '' : ` — verify here: ${action}`
+          if (detail !== undefined) return `${message} — ${detail}${suffix}`
+          if (message !== '') return `${message}${suffix}`
         }
         if (typeof record.message === 'string' && record.message.trim() !== '') return record.message.trim()
         if (typeof error === 'string' && error.trim() !== '') return error.trim()
@@ -118,6 +122,39 @@ async function errorBodyMessage(response: Response): Promise<string | undefined>
   } catch {
     return undefined
   }
+}
+
+/**
+ * The action URL inside a Google RPC error's `details` list, when present.
+ *
+ * Google answers a blocked account with an `ErrorInfo` whose metadata carries the link
+ * the user has to open (and mirrors it as a `Help` entry). The bare message — "Verify
+ * your account to continue." — is not actionable on its own: the user cannot tell what
+ * to verify or where, so the link travels with the message.
+ */
+function extractActionUrl(details: unknown): string | undefined {
+  if (!Array.isArray(details)) return undefined
+  let help: string | undefined
+  for (const entry of details) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    const metadata = record.metadata
+    if (typeof metadata === 'object' && metadata !== null) {
+      const url = (metadata as Record<string, unknown>).validation_url
+      if (typeof url === 'string' && url.trim() !== '') return url.trim()
+    }
+    const links = record.links
+    if (!Array.isArray(links)) continue
+    for (const link of links) {
+      if (typeof link !== 'object' || link === null) continue
+      const linkRecord = link as Record<string, unknown>
+      const url = linkRecord.url
+      const description = linkRecord.description
+      const verifying = typeof description === 'string' && /verif/i.test(description)
+      if (verifying && typeof url === 'string' && url.trim() !== '' && help === undefined) help = url.trim()
+    }
+  }
+  return help
 }
 
 /** The offending-field text inside a Google RPC error's `details` list, when present. */

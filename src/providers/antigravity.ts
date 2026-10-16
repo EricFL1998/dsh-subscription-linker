@@ -360,6 +360,60 @@ const ANTIGRAVITY_METADATA = {
 }
 
 /**
+ * Failure code for Google's account verification gate.
+ *
+ * Machine-routable and deliberately outside the harness's retryable set: the wall clears
+ * in the user's browser, so repeating the request only re-hits it — unlike an empty
+ * response or a rate limit, which are worth another attempt.
+ */
+export const ANTIGRAVITY_VERIFICATION_REQUIRED_CODE = 'ACCOUNT_VERIFICATION_REQUIRED'
+
+/**
+ * The verification link Google attaches when it gates an account.
+ *
+ * A 403 carrying `reason: VALIDATION_REQUIRED` is an account-level wall, not a dead
+ * credential: Google asks the account's owner to open a link and verify. The reason and
+ * the link live in `error.details`, which the bare message ("Verify your account to
+ * continue.") does not carry — and the refresh path would otherwise spend a token
+ * refresh and a second request on a wall that a fresh token cannot move.
+ *
+ * @param response - a candidate response; its body is left unread for the caller.
+ * @returns the link to show the user, or undefined when this is not that gate.
+ */
+async function verificationGateUrl(response: Response): Promise<string | undefined> {
+  if (response.status !== 403) return undefined
+  try {
+    const payload = await response.clone().json() as { error?: { details?: unknown } }
+    const details = payload.error?.details
+    if (!Array.isArray(details)) return undefined
+    let help: string | undefined
+    for (const entry of details) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const record = entry as Record<string, unknown>
+      const metadata = record.metadata
+      if (typeof metadata === 'object' && metadata !== null) {
+        const url = (metadata as Record<string, unknown>).validation_url
+        if (typeof url === 'string' && url.trim() !== '') return url.trim()
+      }
+      const links = record.links
+      if (!Array.isArray(links)) continue
+      for (const link of links) {
+        if (typeof link !== 'object' || link === null) continue
+        const linkRecord = link as Record<string, unknown>
+        const url = linkRecord.url
+        const description = linkRecord.description
+        if (help === undefined && typeof description === 'string' && /verif/i.test(description) && typeof url === 'string' && url.trim() !== '') {
+          help = url.trim()
+        }
+      }
+    }
+    return help
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * POST one `v1internal` method, falling back to the production origin.
  *
  * @param method - method name, e.g. `loadCodeAssist`.
@@ -754,6 +808,9 @@ export class AntigravityAdapter extends LlmAdapter {
       // diagnosable from the browser where the node stdout is hidden.
       const diag: string[] = [`pool=${accounts.join(',') || '(none)'}`]
       const tried = new Set<string>()
+      // The first gate the sweep met, kept for the headline: the user has to sign in as
+      // this account and open this link, so both belong in the failure they read.
+      let firstGate: { account: string, url: string } | undefined
       // Resolve without preempt: use the stored token if it is still within its life,
       // refresh only when it has actually expired. The 5-minute preempt was causing
       // a refresh on every stream, which made Google show the consent page.
@@ -761,8 +818,12 @@ export class AntigravityAdapter extends LlmAdapter {
       // Stay on the default account until it refuses. opencodex keeps account affinity —
       // a request stays on one account and only moves after a 429 — because switching
       // accounts on every request is what reads to Google as two accounts in play at once
-      // and trips the verify gate. Reordering here caused exactly that.
+      // and trips the verify gate. Reordering here caused exactly that. An account already
+      // remembered as gated is different: it cannot serve until its owner verifies, so it
+      // goes last and a healthy account is not blocked behind it.
+      const gated = (account: string): number => Number(allowanceScheduler.isGated(ANTIGRAVITY_PROVIDER_ID, account))
       const order = [token.account, ...accounts.filter((a) => a !== token.account)]
+        .sort((a, b) => gated(a) - gated(b))
       for (const accountKey of order) {
         if (tried.has(accountKey)) continue
         tried.add(accountKey)
@@ -773,7 +834,11 @@ export class AntigravityAdapter extends LlmAdapter {
         // this is the same idea narrowed to one provider.
         await paceAntigravityAttempt(watchdog.signal)
         let response = await this.requestWithRetry(options, model, token.account, token.accessToken, watchdog.signal)
-        if (response.status === 401 || response.status === 403) {
+        // Read Google's gate before the refresh path: a verification wall is not a token
+        // problem, so refreshing first would only add a wasted refresh and a wasted request
+        // to every turn spent on a gated account.
+        let gateUrl = await verificationGateUrl(response)
+        if (response.status === 401 || (response.status === 403 && gateUrl === undefined)) {
           // The stored token was accepted locally but refused on the wire; force one
           // refresh. A 403 that survives the refresh is Google's "verify your account"
           // gate, not a dead credential — the account is fine, it just cannot serve now —
@@ -781,6 +846,7 @@ export class AntigravityAdapter extends LlmAdapter {
           // the credential as dead.
           token = await this.options.tokens.resolve(token.account, true)
           response = await this.requestWithRetry(options, model, token.account, token.accessToken, watchdog.signal)
+          gateUrl = await verificationGateUrl(response)
           if (response.status === 401) {
             this.options.onCredentialRejected?.(token.account)
           }
@@ -794,18 +860,28 @@ export class AntigravityAdapter extends LlmAdapter {
           allowanceScheduler.noteReset(ANTIGRAVITY_PROVIDER_ID, token.account, resetAt)
           continue
         }
-        // A 403 "verify your account" is Google's safety gate, not a dead credential.
-        // Cool the account (so the gate is not re-hit at once) and move to the next —
-        // but only if one has not been cooled already this pass, else the loop would
-        // sweep every account and trip the gate on all of them at once.
+        // A 403 "verify your account" is Google's safety gate, not a dead credential. The
+        // gate names the link that clears it, so the account is remembered as gated and the
+        // sweep moves on with that link in hand — for a whole gate TTL, not a cooldown,
+        // since a cooldown would let the next turn hit the same wall and stop the sweep
+        // before the accounts that can serve were tried.
+        if (!response.ok && response.status === 403 && gateUrl !== undefined) {
+          allowanceScheduler.markGated(ANTIGRAVITY_PROVIDER_ID, token.account)
+          firstGate ??= { account: token.account, url: gateUrl }
+          // The link itself is named once, in the headline: repeating a 300-character URL
+          // per refused account buries the instruction it exists to deliver.
+          diag.push(`verification required for ${token.account}`)
+          continue
+        }
+        // A 403 that names no gate is a transient safety check: cool the account (so the
+        // gate is not re-hit at once) and move to the next — but only cool one account per
+        // pass, and keep sweeping. Stopping the sweep here is what stranded a pool whose
+        // other account was ready to serve.
         if (!response.ok && response.status === 403 && order.length > 1) {
-          const alreadyCooled = [...tried].some((account) => allowanceScheduler.isCooling(ANTIGRAVITY_PROVIDER_ID, account))
-          if (!alreadyCooled) {
-            diag.push(`403 on ${token.account}, cooling and moving to next`)
-            allowanceScheduler.coolDown(ANTIGRAVITY_PROVIDER_ID, token.account)
-            continue
-          }
-          diag.push(`403 on ${token.account}, another account already cooling; stopping the sweep`)
+          const otherCooling = [...tried].some((account) => account !== token.account && allowanceScheduler.isCooling(ANTIGRAVITY_PROVIDER_ID, account))
+          if (!otherCooling) allowanceScheduler.coolDown(ANTIGRAVITY_PROVIDER_ID, token.account)
+          diag.push(`403 on ${token.account}, ${otherCooling ? 'another account already cooling; moving to next' : 'cooling and moving to next'}`)
+          continue
         }
         if (!response.ok) {
           if (response.status === 400) {
@@ -850,15 +926,18 @@ export class AntigravityAdapter extends LlmAdapter {
         if (lastStreamError !== undefined) throw lastStreamError
         return
       }
-      // Every account was tried and none served. The headline names the most actionable
-      // refusal — a 403 "verify your account" is something the user can fix in the browser;
-      // a 429 "allowance spent" just means wait for the reset. The diagnostic lists each
-      // account and the status it returned.
+      // Every account was tried and none served. A verification gate outranks the other
+      // refusals: it names the account to sign in as and the link that clears it, which is
+      // the whole fix, so that is the headline. Otherwise the most actionable refusal names
+      // itself — a 403 "verify your account" without a link, or a 429 "allowance spent" that
+      // just means waiting for the reset. The diagnostic lists each account and its status.
       const last403 = diag.reduce<string | undefined>((acc, line) => (line.startsWith('403 on') ? line : acc), undefined)
-      const message = last403 === undefined
-        ? `Antigravity API: every account's allowance is spent [${diag.join(' | ')}]`
-        : `Antigravity API request failed: ${last403.replace(/^403 on /, 'account ')} refused (HTTP 403: Verify your account to continue) [${diag.join(' | ')}]`
-      throw new LlmError(message, EMPTY_RESPONSE_CODE)
+      const message = firstGate !== undefined
+        ? `Antigravity: Google requires verification for ${firstGate.account} before it can serve requests — verify here: ${firstGate.url} [${diag.join(' | ')}]`
+        : last403 === undefined
+          ? `Antigravity API: every account's allowance is spent [${diag.join(' | ')}]`
+          : `Antigravity API request failed: ${last403.replace(/^403 on /, 'account ')} refused (HTTP 403: Verify your account to continue) [${diag.join(' | ')}]`
+      throw new LlmError(message, firstGate === undefined ? EMPTY_RESPONSE_CODE : ANTIGRAVITY_VERIFICATION_REQUIRED_CODE)
     } catch (error: unknown) {
       throw mapFetchFailure('Antigravity API', this.refreshHint(error), watchdog, options.signal)
     } finally {
