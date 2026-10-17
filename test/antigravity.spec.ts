@@ -10,8 +10,10 @@ import { REAUTH_REQUIRED, ProviderError } from '../src/errors.js'
 import type { TokenManager } from '../src/auth/tokens.js'
 import {
   ANTIGRAVITY_AUTHORIZE_URL,
+  ANTIGRAVITY_BASE_URL,
   ANTIGRAVITY_CALLBACK_PORT,
   ANTIGRAVITY_CLIENT_ID,
+  ANTIGRAVITY_PROD_URL,
   ANTIGRAVITY_SCOPES,
   AntigravityAdapter,
   callInternal,
@@ -793,12 +795,52 @@ describe('the quota probe', () => {
     }))
 
     const read = await adapter.usage('token', 'proj')
-    // Google's own host answers, so the proxy is never even asked.
-    assert.equal(urls.every((url) => url.startsWith('https://daily-cloudcode-pa.googleapis.com')), true)
+    // Google's own host answers, so the proxy is never even asked — and the complete answer
+    // means the second Google host is not asked either.
+    assert.deepEqual(urls, [`${ANTIGRAVITY_PROD_URL}/v1internal:retrieveUserQuotaSummary`])
     assert.deepEqual(read.windows.map((window) => window.label), ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'])
     assert.equal(read.windows[0]?.usedPercent, 75)
     assert.equal(read.windows[1]?.usedPercent, 60)
     assert.equal(read.usageError, undefined)
+  })
+
+  test('a host that names only some allowance groups is completed by the next one', async () => {
+    const urls: string[] = []
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn: (async (input: RequestInfo | URL) => {
+        const url = String(input instanceof Request ? input.url : input)
+        urls.push(url)
+        // The production host states the Gemini group; the daily host stopped stating it.
+        if (url.startsWith(ANTIGRAVITY_PROD_URL)) {
+          return new Response(JSON.stringify({ groups: [
+            { displayName: 'Gemini Models', buckets: [
+              { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.4 },
+              { bucketId: 'gemini-5h', window: '5h', remainingFraction: 1 },
+            ] },
+            { displayName: 'Claude and GPT models', buckets: [
+              { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.25 },
+            ] },
+          ] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ groups: [
+          { displayName: 'Claude and GPT models', buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.25 },
+            { bucketId: '3p-5h', window: '5h', remainingFraction: 0.5 },
+          ] },
+        ] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as never,
+    }))
+
+    const read = await adapter.usage('token', 'proj')
+    // Both hosts were asked, and the union carries all four rows: the Gemini weekly figure
+    // the daily host had dropped is back, and the group both hosts state is not double-listed.
+    assert.deepEqual(read.windows.map((window) => window.label), ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'])
+    assert.equal(read.windows[0]?.usedPercent, 0)
+    assert.equal(read.windows[1]?.usedPercent, 60)
+    assert.equal(read.windows[2]?.usedPercent, 50)
+    assert.equal(read.windows[3]?.usedPercent, 75)
+    assert.equal(read.usageError, undefined)
+    assert.equal(urls.length, 2)
   })
 
   test('falls back to the configured base for the summary when Google is unreachable', async () => {
@@ -818,8 +860,9 @@ describe('the quota probe', () => {
     }))
 
     const read = await adapter.usage('token', 'proj')
-    // Google was tried first and refused, then the configured base answered.
-    assert.equal(urls[0]?.startsWith('https://daily-cloudcode-pa.googleapis.com'), true)
+    // Both Google hosts were tried and refused, then the configured base answered.
+    assert.equal(urls[0]?.startsWith(ANTIGRAVITY_PROD_URL), true)
+    assert.equal(urls.some((url) => url.startsWith(ANTIGRAVITY_BASE_URL)), true)
     assert.equal(urls.some((url) => url.startsWith('https://proxy.example')), true)
     assert.deepEqual(read.windows.map((window) => window.label), ['gemini_weekly'])
   })

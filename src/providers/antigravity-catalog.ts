@@ -412,6 +412,14 @@ function resetOf(raw: unknown): number | undefined {
 }
 
 /**
+ * Every allowance window the usage card can show, in the order it shows them.
+ *
+ * A summary response names some of these and not others — no host is guaranteed to state
+ * all four — so the list is also what a union of several responses is ordered by.
+ */
+export const QUOTA_WINDOW_LABELS = ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'] as const
+
+/**
  * Read the two allowances from a `retrieveUserQuotaSummary` response.
  *
  * The summary groups models by family and reports a rolling and a weekly bucket per
@@ -445,7 +453,7 @@ export function parseAntigravityQuotaSummary(payload: unknown): UsageWindow[] {
       found.set(key, { label: key, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
     }
   }
-  return ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'].flatMap((key) => {
+  return QUOTA_WINDOW_LABELS.flatMap((key) => {
     const window = found.get(key)
     return window === undefined ? [] : [window]
   })
@@ -488,7 +496,7 @@ export function parseAntigravityModelQuota(payload: unknown): UsageWindow[] {
       worst.set(key, { label: key, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
     }
   }
-  return ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'].flatMap((key) => {
+  return QUOTA_WINDOW_LABELS.flatMap((key) => {
     const window = worst.get(key)
     return window === undefined ? [] : [window]
   })

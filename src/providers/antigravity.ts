@@ -44,6 +44,7 @@ import type { CatalogEntry } from './catalog.js'
 import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { idleWatchdog, mapFetchFailure, httpLlmError } from './common.js'
 import {
+  QUOTA_WINDOW_LABELS,
   parseAntigravityModelQuota,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
@@ -1183,13 +1184,15 @@ export class AntigravityAdapter extends LlmAdapter {
    */
   async usage(accessToken: string, projectId: string, plan?: string): Promise<UsageRead> {
     const fetchFn = this.options.fetchFn ?? proxiedFetch
-    // Google's accounting lives on its own hosts. A configured request base is a
-    // routing choice for completions — often a proxy — and need not implement
-    // `v1internal:retrieveUserQuotaSummary`, so the accounting hosts come first and
-    // the configured base is the last resort rather than the only attempt.
+    // Google's accounting lives on its own hosts. The production host comes first because
+    // it is the one that states every allowance group: the daily host answers 200 with only
+    // some of them (the Gemini group went missing there), which silently dropped a row from
+    // the card. A configured request base is a routing choice for completions — often a
+    // proxy — and need not implement `v1internal:retrieveUserQuotaSummary`, so it is the
+    // last resort rather than the only attempt.
     const origins = [
-      ANTIGRAVITY_BASE_URL,
       ANTIGRAVITY_PROD_URL,
+      ANTIGRAVITY_BASE_URL,
       ...this.options.baseUrl === undefined ? [] : [this.options.baseUrl],
     ]
     const runtime = { fetchFn, origins }
@@ -1216,8 +1219,7 @@ export class AntigravityAdapter extends LlmAdapter {
   ): Promise<{ windows: UsageWindow[], usageError?: string }> {
     let summaryError: string | undefined
     try {
-      const summary = await this.summary(accessToken, projectId, runtime)
-      const windows = parseAntigravityQuotaSummary(summary)
+      const windows = await this.summaryWindows(accessToken, projectId, runtime)
       // The summary is the authoritative accounting; per-model figures are only a
       // substitute, so they are not merged into a summary that answered.
       if (windows.length > 0) return { windows }
@@ -1243,6 +1245,44 @@ export class AntigravityAdapter extends LlmAdapter {
   /** The windows the last catalog read reported, if any. */
   private antigravityWindowsFromCache(): UsageWindow[] {
     return antigravityWindows(this.quotas)
+  }
+
+  /**
+   * Read the allowance summary from every accounting host and union the groups.
+   *
+   * The hosts do not agree on what the summary contains: one answers 200 while naming only
+   * some of the groups — the daily host stopped stating the Gemini group, which left the
+   * card showing Claude alone and hid a nearly spent Gemini weekly allowance. A 200 is
+   * therefore not proof of a complete answer, so each host is asked until every window the
+   * card can show has been named; the first host to state a given window keeps it, and a
+   * host that refuses or is down is skipped rather than failing the read.
+   *
+   * @param accessToken - bearer for the account.
+   * @param projectId - the account's project.
+   * @param runtime - fetch plus the origins to try, most authoritative first.
+   * @returns the union of the windows the hosts stated, in card order.
+   */
+  private async summaryWindows(
+    accessToken: string,
+    projectId: string,
+    runtime: { fetchFn: FetchFn, origins: readonly string[] },
+  ): Promise<UsageWindow[]> {
+    const found = new Map<string, UsageWindow>()
+    for (const origin of runtime.origins) {
+      if (found.size >= QUOTA_WINDOW_LABELS.length) break
+      try {
+        const payload = await this.summary(accessToken, projectId, { fetchFn: runtime.fetchFn, origins: [origin] })
+        for (const window of parseAntigravityQuotaSummary(payload)) {
+          if (!found.has(window.label)) found.set(window.label, window)
+        }
+      } catch {
+        // This host had nothing to say; the ones after it still might.
+      }
+    }
+    return QUOTA_WINDOW_LABELS.flatMap((label) => {
+      const window = found.get(label)
+      return window === undefined ? [] : [window]
+    })
   }
 
   /**
