@@ -8,7 +8,9 @@
  * complete `low`/`medium`/`high` families belong to one picker row.
  *
  * The account's allowance is stated by `v1internal:retrieveUserQuotaSummary` in
- * groups (Gemini and Claude/3P), each with a rolling and a weekly bucket.
+ * groups (Gemini and Claude/3P), each with a rolling and a weekly bucket — except that
+ * the Gemini group's rolling bucket never moves, so the rolling figure also comes from
+ * the per-model quota the same catalog publishes.
  *
  * @module dsh-plugin-subscription-oauth/providers/antigravity-catalog
  */
@@ -498,6 +500,83 @@ export function parseAntigravityModelQuota(payload: unknown): UsageWindow[] {
   }
   return QUOTA_WINDOW_LABELS.flatMap((key) => {
     const window = worst.get(key)
+    return window === undefined ? [] : [window]
+  })
+}
+
+/** The two families whose rolling figure is metered per model. */
+const ROLLING_LABELS = new Set<string>(['gemini', 'claude'])
+
+/** How far ahead a rolling window may reset and still be the rolling bucket. */
+const ROLLING_RESET_MAX_MS = 8 * 60 * 60 * 1000
+
+/**
+ * Reduce the per-model quota to each family's live rolling window.
+ *
+ * A per-model entry states whichever bucket the service is enforcing right now: while the
+ * five-hour window binds it carries that figure (a reset a few hours out), and once the
+ * weekly one binds the same entry carries the weekly figure instead (a reset a week out).
+ * Only the first kind is a rolling reading, so an entry whose reset is far away is left
+ * out — the summary already owns the weekly row, and counting a weekly figure as the
+ * rolling one would print the same number twice under two names.
+ *
+ * @param quotas - quota per model id, as the catalog stated it.
+ * @param now - the instant the reset is measured from.
+ * @returns one rolling window per family that stated one, Gemini first.
+ */
+export function antigravityRollingFromModels(
+  quotas: ReadonlyMap<string, { remainingFraction?: number, resetTime?: string }>,
+  now: number = Date.now(),
+): UsageWindow[] {
+  const worst = new Map<string, UsageWindow>()
+  for (const [id, quota] of quotas) {
+    const haystack = id.toLowerCase()
+    const family = haystack.includes('gemini') ? 'gemini'
+      : /claude|opus|sonnet|gpt-oss|gpt_oss/.test(haystack) ? 'claude'
+        : undefined
+    if (family === undefined) continue
+    const resetsAt = typeof quota.resetTime === 'string' ? Date.parse(quota.resetTime) : Number.NaN
+    // A reset a week out is the weekly bucket, which is the summary's to report.
+    if (Number.isFinite(resetsAt) && resetsAt - now > ROLLING_RESET_MAX_MS) continue
+    const usedPercent = usedPercentOf({ remaining: quota })
+    if (usedPercent === undefined) continue
+    const seen = worst.get(family)
+    if (seen !== undefined && (seen.usedPercent ?? 0) >= usedPercent) continue
+    worst.set(family, { label: family, usedPercent, ...Number.isFinite(resetsAt) ? { resetsAt } : {} })
+  }
+  return [...worst.values()].sort((left, right) => left.label === 'gemini' ? -1 : right.label === 'gemini' ? 1 : 0)
+}
+
+/**
+ * Take a family's rolling figure from the per-model quota when it reports more spent.
+ *
+ * The summary's Gemini group states a five-hour bucket that never moves: it answers
+ * `remainingFraction: 1` no matter how much the account has spent, so a card fed only by
+ * the summary pins the Gemini rolling row — and the figures never change however long the
+ * user works. The same family's rolling quota is metered per model (`fetchAvailableModels`
+ * states it per model id), which is the live number, so a rolling row takes whichever
+ * source reports more spent. Weekly buckets stay the summary's: the per-model catalog names
+ * no window, so it can only ever speak for the rolling one.
+ *
+ * @param summary - windows from `retrieveUserQuotaSummary`, in card order.
+ * @param perModel - windows reduced from the catalog's per-model quota.
+ * @returns the summary's windows with each rolling figure raised to the per-model one.
+ */
+export function mergeRollingWindows(
+  summary: readonly UsageWindow[],
+  perModel: readonly UsageWindow[],
+): UsageWindow[] {
+  const found = new Map<string, UsageWindow>()
+  for (const window of summary) found.set(window.label, window)
+  for (const window of perModel) {
+    // Only a rolling row merges: a weekly figure from the catalog would be a guess.
+    if (!ROLLING_LABELS.has(window.label)) continue
+    const stated = found.get(window.label)
+    if (stated !== undefined && (stated.usedPercent ?? 0) >= (window.usedPercent ?? 0)) continue
+    found.set(window.label, window)
+  }
+  return QUOTA_WINDOW_LABELS.flatMap((label) => {
+    const window = found.get(label)
     return window === undefined ? [] : [window]
   })
 }

@@ -5,6 +5,8 @@ import { describe, test } from 'node:test'
 
 import {
   antigravityEffortsFor,
+  antigravityRollingFromModels,
+  mergeRollingWindows,
   parseAntigravityModelQuota,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
@@ -200,5 +202,71 @@ describe('parseAntigravityModelQuota', () => {
       },
     })
     assert.deepEqual(windows.map((window) => window.label), ['claude'])
+  })
+})
+
+describe('antigravityRollingFromModels', () => {
+  test('keeps a five-hour figure and ignores a weekly one', () => {
+    const now = Date.parse('2026-10-17T03:00:00Z')
+    const windows = antigravityRollingFromModels(new Map([
+      // A reset two hours out is the rolling window.
+      ['gemini-3.8-flash-tiered', { remainingFraction: 0.4, resetTime: '2026-10-17T05:00:00Z' }],
+      // A reset a week out is the weekly bucket, which the summary already reports.
+      ['claude-sonnet-4-6', { remainingFraction: 0.9, resetTime: '2026-10-24T03:00:00Z' }],
+    ]), now)
+    assert.deepEqual(windows.map((window) => window.label), ['gemini'])
+    assert.equal(windows[0]?.usedPercent, 60)
+  })
+
+  test('takes the worst model of a family and skips one that states nothing', () => {
+    const now = Date.parse('2026-10-17T03:00:00Z')
+    const windows = antigravityRollingFromModels(new Map([
+      ['gemini-3-flash', { remainingFraction: 0.8, resetTime: '2026-10-17T06:00:00Z' }],
+      ['gemini-2.5-pro', { remainingFraction: 0.35, resetTime: '2026-10-17T06:00:00Z' }],
+      ['gemini-3.1-flash-lite', { resetTime: '2026-10-17T06:00:00Z' }],
+      ['claude-opus-4-6-thinking', { resetTime: '2026-10-17T05:00:00Z' }],
+    ]), now)
+    assert.deepEqual(windows.map((window) => window.label), ['gemini'])
+    assert.equal(Math.round(windows[0]?.usedPercent ?? 0), 65)
+  })
+})
+
+describe('mergeRollingWindows', () => {
+  test('raises a rolling row to the per-model figure and keeps the weekly one', () => {
+    const windows = mergeRollingWindows(
+      [
+        { label: 'gemini', usedPercent: 0, resetsAt: 1 },
+        { label: 'gemini_weekly', usedPercent: 99.5 },
+        { label: 'claude_weekly', usedPercent: 100 },
+      ],
+      [
+        { label: 'gemini', usedPercent: 60.4, resetsAt: 2 },
+        { label: 'claude', usedPercent: 100 },
+      ],
+    )
+    assert.deepEqual(windows.map((window) => window.label), ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'])
+    // The live rolling figure wins, and it carries its own reset.
+    assert.equal(windows[0]?.usedPercent, 60.4)
+    assert.equal(windows[0]?.resetsAt, 2)
+    // A weekly row is never taken from the catalog: it names no window.
+    assert.equal(windows[1]?.usedPercent, 99.5)
+    // A rolling row the summary omitted is added rather than dropped.
+    assert.equal(windows[2]?.usedPercent, 100)
+    assert.equal(windows[3]?.usedPercent, 100)
+  })
+
+  test('a summary figure higher than the per-model one is kept', () => {
+    const windows = mergeRollingWindows(
+      [{ label: 'gemini', usedPercent: 75 }],
+      [{ label: 'gemini', usedPercent: 40 }, { label: 'gemini_weekly', usedPercent: 10 }],
+    )
+    assert.deepEqual(windows.map((window) => window.label), ['gemini'])
+    assert.equal(windows[0]?.usedPercent, 75)
+  })
+
+  test('an empty summary is just the per-model windows', () => {
+    assert.deepEqual(mergeRollingWindows([], []), [])
+    const windows = mergeRollingWindows([], [{ label: 'gemini', usedPercent: 70 }])
+    assert.deepEqual(windows, [{ label: 'gemini', usedPercent: 70 }])
   })
 })

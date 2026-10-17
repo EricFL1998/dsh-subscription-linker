@@ -45,6 +45,8 @@ import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { idleWatchdog, mapFetchFailure, httpLlmError } from './common.js'
 import {
   QUOTA_WINDOW_LABELS,
+  antigravityRollingFromModels,
+  mergeRollingWindows,
   parseAntigravityModelQuota,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
@@ -52,6 +54,7 @@ import {
   wireIdFor,
 } from './antigravity-catalog.js'
 import { toAntigravityRequest, streamAntigravity, antigravityReasoning } from '../translate/antigravity.js'
+import type { AntigravityRequest } from '../translate/antigravity.js'
 import type { ImageResolver } from '../translate/responses.js'
 
 /** Route key this module registers. */
@@ -110,6 +113,55 @@ const NETWORK_RETRY_BASE_MS = 800
 
 /** How many times a stream that closes early is retried before the account is skipped. */
 const STREAM_RETRY_ATTEMPTS = 3
+
+/**
+ * What an HTTP 400 "invalid argument" is redispatched as, in order.
+ *
+ * Google refuses a request whose *shape* it dislikes — a thinking budget the model does
+ * not implement, a tool config it rejects, an inline image a text-only variant cannot
+ * take — and it names no field for most of them, so the body gives nothing to act on.
+ * A plain retry is not the same bytes either: `requestId` and `sessionId` are minted per
+ * attempt, so the first pass already differs from the refused one. When that does not
+ * clear it, the optional knobs are dropped one group at a time, so a turn that only
+ * tripped over a thinking budget or an image still finishes instead of dying.
+ */
+const INVALID_ARGUMENT_REPAIRS = ['again', 'without the thinking budget', 'without tools and images'] as const
+
+/** Base delay between those redispatches; a 400 is not a rate limit, so the beat is short. */
+const INVALID_ARGUMENT_RETRY_BASE_MS = 200
+
+/**
+ * Drop the optional parts of an envelope for one 400 repair pass.
+ *
+ * Nothing the turn depends on is removed at the first pass: the request goes out whole,
+ * with fresh ids, because that alone clears a refusal that was about the ids or about a
+ * stale selection. The later passes trade a feature for a finished turn — a thinking
+ * budget the model rejects, then tools and inline images which a text-only variant
+ * refuses outright. Text is never removed, and a turn that was images only is left with a
+ * placeholder so the contents stay non-empty.
+ *
+ * @param envelope - the translated request, edited in place.
+ * @param repair - 0 sends it whole; 1 drops the thinking budget; 2 also drops tools and images.
+ */
+function repairEnvelope(envelope: AntigravityRequest, repair: number): void {
+  if (repair <= 0) return
+  const request = envelope.request
+  if (repair >= 1) {
+    const config = request.generationConfig
+    if (config !== undefined) {
+      delete config.thinkingConfig
+      if (Object.keys(config).length === 0) delete request.generationConfig
+    }
+  }
+  if (repair >= 2) {
+    delete request.tools
+    delete request.toolConfig
+    for (const content of request.contents) {
+      const kept = content.parts.filter((part) => part.inlineData === undefined)
+      content.parts = kept.length === 0 ? [{ text: '.' }] : kept
+    }
+  }
+}
 
 /**
  * Whether an error from `fetch` is a transient network fault worth retrying.
@@ -529,6 +581,9 @@ export async function discoverAntigravityAccount(
   }
 }
 
+/** One account's per-model quota, keyed by model id. */
+export type QuotaMap = Map<string, { remainingFraction?: number, resetTime?: string }>
+
 /** The `fetchAvailableModels` response subset. */
 interface AntigravityModelsResponse {
   models?: Record<string, {
@@ -673,8 +728,13 @@ export class AntigravityAdapter extends LlmAdapter {
   private live: readonly CatalogEntry[] | undefined
   /** Whether the cached listing has been read; it is read at most once per session. */
   private hydrated = false
-  /** Per-model quota windows from the last catalog read. */
-  private quotas = new Map<string, { remainingFraction?: number, resetTime?: string }>()
+  /**
+   * Per-model quota windows from the last catalog read, per account project.
+   *
+   * The route holds several accounts at once, and each one's quota belongs to its own
+   * project: one shared map would let a second account inherit the first one's figures.
+   */
+  private quotasByProject = new Map<string, QuotaMap>()
 
   /** Ids the user added by hand, cached so the sync catalog can name them. */
   private userAddedIds: readonly string[] = []
@@ -852,6 +912,22 @@ export class AntigravityAdapter extends LlmAdapter {
             this.options.onCredentialRejected?.(token.account)
           }
         }
+        // A 400 "invalid argument" is the one refusal worth another dispatch: Google is
+        // judging the request's shape, not the account, and the envelope mints a fresh
+        // requestId and sessionId per attempt — so the retry already differs, and a shape
+        // it disliked only because of the thinking budget or an image can be repaired.
+        if (response.status === 400) {
+          const refused = response
+          // The field Google blames lives in error.details / fieldViolations, which the
+          // bare message omits; keep the whole body in the log so a 400 that survives the
+          // repairs still says what it refused.
+          const body = await refused.clone().text().catch(() => '')
+          this.options.onWarn?.(`antigravity: HTTP 400 body: ${body.slice(0, 600)}`)
+          diag.push(`400 on ${token.account}`)
+          response = await this.retryInvalidArgument(options, model, token.account, token.accessToken, watchdog.signal, diag) ?? refused
+          // A gate can ride a redispatch too, so the link is read off whichever answer stands.
+          gateUrl = await verificationGateUrl(response)
+        }
         // A spent allowance (402/429) moves to the next account, remembering when a spent
         // one refills so later requests skip it until then.
         if (!response.ok && (response.status === 402 || response.status === 429) && order.length > 1) {
@@ -885,13 +961,6 @@ export class AntigravityAdapter extends LlmAdapter {
           continue
         }
         if (!response.ok) {
-          if (response.status === 400) {
-            // Google's 400 puts the offending field in error.details / fieldViolations, which
-            // the generic errorBodyMessage does not surface; log the whole body so the real
-            // cause is visible, since a bare "invalid argument" gives nothing to act on.
-            const body = await response.clone().text().catch(() => '')
-            this.options.onWarn?.(`antigravity: HTTP 400 body: ${body.slice(0, 600)}`)
-          }
           diag.push(`fail ${response.status} on ${token.account} (no switch)`)
           const error = await httpLlmError(response, 'Antigravity API')
           // The diagnostic rides the message so it surfaces where the user sees the
@@ -999,6 +1068,41 @@ export class AntigravityAdapter extends LlmAdapter {
     return error
   }
 
+  /**
+   * Redispatch a request Google refused as an invalid argument.
+   *
+   * The refusal names no field for most shapes, so the retries are a ladder rather than a
+   * guess: the same request with fresh ids, then without the thinking budget, then without
+   * tools and inline images. The first answer that is not a 400 is returned — it may be a
+   * quota or credential refusal, which the sweep below already knows how to act on.
+   *
+   * @param options - the call's options.
+   * @param model - the wire model id being dispatched.
+   * @param account - the account the request is scoped to.
+   * @param accessToken - that account's bearer.
+   * @param signal - caller cancellation.
+   * @param diag - the per-turn diagnostic trail.
+   * @returns the response to act on; the refused one when no retry changed the verdict.
+   */
+  private async retryInvalidArgument(
+    options: GenerateOptions,
+    model: string,
+    account: string,
+    accessToken: string,
+    signal: AbortSignal,
+    diag: string[],
+  ): Promise<Response | undefined> {
+    for (const [level, note] of INVALID_ARGUMENT_REPAIRS.entries()) {
+      if (signal.aborted) return undefined
+      await backoff(INVALID_ARGUMENT_RETRY_BASE_MS * 2 ** level, signal)
+      if (signal.aborted) return undefined
+      const response = await this.request(options, model, account, accessToken, signal, level)
+      diag.push(`400 retried ${note}: ${response.status}`)
+      if (response.status !== 400) return response
+    }
+    return undefined
+  }
+
   /** Build and send one streaming request for one model. */
   /**
    * One dispatch attempt, retrying transient network faults before giving up on the account.
@@ -1038,6 +1142,7 @@ export class AntigravityAdapter extends LlmAdapter {
     account: string,
     accessToken: string,
     signal: AbortSignal,
+    repair = 0,
   ): Promise<Response> {
     // Every call is scoped to the account's Cloud AI Companion project.
     const held = await this.options.tokens.session(account)
@@ -1052,6 +1157,7 @@ export class AntigravityAdapter extends LlmAdapter {
       this.imageResolver(signal),
       true,
     )
+    repairEnvelope(envelope, repair)
     const fetchFn = this.options.fetchFn ?? proxiedFetch
     const origin = this.options.baseUrl ?? ANTIGRAVITY_BASE_URL
     try {
@@ -1109,7 +1215,7 @@ export class AntigravityAdapter extends LlmAdapter {
         ...this.options.baseUrl === undefined ? {} : { baseUrl: this.options.baseUrl },
         ...signal === undefined ? {} : { signal },
       })
-      this.quotas = quotas
+      this.quotasByProject.set(project, quotas)
       this.adopt(entries)
       // The catalog the endpoint just reported is what the next session starts from, so
       // the picker does not have to ask again. A cache failure never fails this read.
@@ -1205,7 +1311,13 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   /**
-   * Read the account summary, then the per-model figures.
+   * Read the account summary and the per-model figures, then merge them.
+   *
+   * Both are read on every call: the summary owns the weekly buckets, but its Gemini
+   * rolling bucket is a fixture (`remainingFraction: 1` however much the account has
+   * spent), so a summary-only read leaves that row frozen at zero. The per-model catalog
+   * is where the rolling figure actually lives, which is why it is always consulted and
+   * its rolling rows are merged in rather than used only as a substitute.
    *
    * @param accessToken - bearer for the account.
    * @param projectId - the account's project.
@@ -1218,15 +1330,41 @@ export class AntigravityAdapter extends LlmAdapter {
     runtime: { fetchFn: FetchFn, origins: readonly string[] },
   ): Promise<{ windows: UsageWindow[], usageError?: string }> {
     let summaryError: string | undefined
+    let summaryWindows: UsageWindow[] = []
     try {
-      const windows = await this.summaryWindows(accessToken, projectId, runtime)
-      // The summary is the authoritative accounting; per-model figures are only a
-      // substitute, so they are not merged into a summary that answered.
-      if (windows.length > 0) return { windows }
-      summaryError = 'the account summary stated no quota bucket'
+      summaryWindows = await this.summaryWindows(accessToken, projectId, runtime)
+      if (summaryWindows.length === 0) summaryError = 'the account summary stated no quota bucket'
     } catch (error: unknown) {
       summaryError = errorChain(error)
     }
+    const perModel = await this.perModelWindows(accessToken, projectId, runtime)
+    const windows = mergeRollingWindows(summaryWindows, perModel)
+    if (windows.length === 0) {
+      this.options.onWarn?.(`Antigravity usage unavailable: summary ${summaryError ?? 'no bucket'}; no per-model figure`)
+      return { windows: this.antigravityWindowsFromCache(projectId), ...summaryError === undefined ? {} : { usageError: summaryError } }
+    }
+    // A complete summary is the accounting; when it answered only in part, say that the
+    // rolling rows came from the per-model substitute.
+    return { windows, ...summaryError === undefined ? {} : { usageError: `per-model figures (${summaryError})` } }
+  }
+
+  /**
+   * Reduce the catalog's per-model quota to the rolling windows it can state.
+   *
+   * A failed read falls back to the figures the last catalog read kept for this project,
+   * which is the same substitute this route always used — the difference is that it is now
+   * merged with the summary instead of replacing it.
+   *
+   * @param accessToken - bearer for the account.
+   * @param projectId - the account's project.
+   * @param runtime - fetch plus the origins to try.
+   * @returns one rolling window per family that stated a figure.
+   */
+  private async perModelWindows(
+    accessToken: string,
+    projectId: string,
+    runtime: { fetchFn: FetchFn, origins: readonly string[] },
+  ): Promise<UsageWindow[]> {
     try {
       const { quotas } = await fetchAntigravityModels({
         accessToken,
@@ -1234,17 +1372,21 @@ export class AntigravityAdapter extends LlmAdapter {
         fetchFn: runtime.fetchFn,
         origins: runtime.origins,
       })
-      const source = quotas.size > 0 ? quotas : this.quotas
-      return { windows: antigravityWindows(source), usageError: `per-model figures (${summaryError})` }
-    } catch (error: unknown) {
-      this.options.onWarn?.(`Antigravity usage unavailable: summary ${summaryError}; models ${errorChain(error)}`)
-      return { windows: this.antigravityWindowsFromCache(), usageError: summaryError }
+      if (quotas.size > 0) this.quotasByProject.set(projectId, quotas)
+    } catch {
+      // Keep whatever the last catalog read stated; the summary alone still answers.
     }
+    return antigravityRollingFromModels(this.quotasByProject.get(projectId) ?? new Map())
   }
 
-  /** The windows the last catalog read reported, if any. */
-  private antigravityWindowsFromCache(): UsageWindow[] {
-    return antigravityWindows(this.quotas)
+  /**
+   * The windows the last catalog read reported for one project, if any.
+   *
+   * @param projectId - the account's project; a second account has its own figures.
+   * @returns the rolling windows the cache can state.
+   */
+  private antigravityWindowsFromCache(projectId: string): UsageWindow[] {
+    return antigravityWindows(this.quotasByProject.get(projectId) ?? new Map())
   }
 
   /**

@@ -622,6 +622,57 @@ describe('AntigravityAdapter', () => {
     assert.deepEqual(chunks.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
   })
 
+  test('a 400 invalid argument is retried, and a repaired request can finish the turn', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const fetchFn: typeof fetch = async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      if (bodies.length <= 2) {
+        return jsonResponse({ error: { code: 400, message: 'Request contains an invalid argument.', status: 'INVALID_ARGUMENT' } }, 400)
+      }
+      return sseResponse([{ response: { candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }] } }])
+    }
+    const adapter = new AntigravityAdapter(adapterOptions({ fetchFn, tokens: tokenManager() }))
+
+    const chunks = await collect(adapter.stream(request({ model: 'gemini-3-pro', reasoningEffort: ReasoningEffortId('high') })))
+    // Three dispatches: the refusal, one with fresh ids, and the repaired one that served.
+    assert.equal(bodies.length, 3)
+    const config = (index: number): Record<string, unknown> | undefined =>
+      (bodies[index]?.request as { generationConfig?: Record<string, unknown> } | undefined)?.generationConfig
+    // The turn was refused twice with the thinking budget in place, then served without it.
+    assert.notEqual(config(0)?.thinkingConfig, undefined)
+    assert.notEqual(config(1)?.thinkingConfig, undefined)
+    assert.equal(config(2)?.thinkingConfig, undefined)
+    assert.deepEqual(chunks.map((chunk) => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
+  })
+
+  test('a 400 that survives every repair fails, naming the field Google blamed', async () => {
+    let calls = 0
+    const fetchFn: typeof fetch = async () => {
+      calls += 1
+      return jsonResponse({
+        error: {
+          code: 400,
+          message: 'Request contains an invalid argument.',
+          status: 'INVALID_ARGUMENT',
+          details: [{
+            '@type': 'type.googleapis.com/google.rpc.BadRequest',
+            fieldViolations: [{ field: 'request.contents[3].parts[0].inlineData', description: 'Unsupported image.' }],
+          }],
+        },
+      }, 400)
+    }
+    const adapter = new AntigravityAdapter(adapterOptions({ fetchFn, tokens: tokenManager() }))
+
+    await assert.rejects(collect(adapter.stream(request({ model: 'gemini-3-pro' }))), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.failure.code, 'INVALID_REQUEST')
+      // The retries happened, and the failure still names what the service refused.
+      assert.equal(calls, 4)
+      assert.match(error.message, /request\.contents\[3\]\.parts\[0\]\.inlineData/)
+      return true
+    })
+  })
+
   test('a verification-gated account is set aside for one that can serve', async () => {
     const gatedAccount = 'gated-1@example.com'
     const healthyAccount = 'ok-1@example.com'
@@ -795,9 +846,11 @@ describe('the quota probe', () => {
     }))
 
     const read = await adapter.usage('token', 'proj')
-    // Google's own host answers, so the proxy is never even asked — and the complete answer
-    // means the second Google host is not asked either.
-    assert.deepEqual(urls, [`${ANTIGRAVITY_PROD_URL}/v1internal:retrieveUserQuotaSummary`])
+    // Google's own host answers the summary, so the proxy is never even asked — and the
+    // complete answer means the second Google host is not asked either. The per-model read
+    // rides along on the same host, which is where the rolling figure lives.
+    assert.equal(urls[0], `${ANTIGRAVITY_PROD_URL}/v1internal:retrieveUserQuotaSummary`)
+    assert.equal(urls.some((url) => url.startsWith('https://proxy.example') && url.includes('retrieveUserQuotaSummary')), false)
     assert.deepEqual(read.windows.map((window) => window.label), ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'])
     assert.equal(read.windows[0]?.usedPercent, 75)
     assert.equal(read.windows[1]?.usedPercent, 60)
@@ -840,7 +893,8 @@ describe('the quota probe', () => {
     assert.equal(read.windows[2]?.usedPercent, 50)
     assert.equal(read.windows[3]?.usedPercent, 75)
     assert.equal(read.usageError, undefined)
-    assert.equal(urls.length, 2)
+    // The union of the two hosts, and no host asked twice for the summary.
+    assert.equal(urls.filter((url) => url.includes('retrieveUserQuotaSummary')).length, 2)
   })
 
   test('falls back to the configured base for the summary when Google is unreachable', async () => {
@@ -888,5 +942,101 @@ describe('the quota probe', () => {
     assert.equal(read.windows[1]?.usedPercent, 90)
     // The substitute is labelled as one, so the page can say why.
     assert.match(read.usageError ?? '', /per-model figures/)
+  })
+
+  test('the Gemini rolling row follows the per-model quota, not the summary fixture', async () => {
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn: (async (input: RequestInfo | URL) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (url.includes('retrieveUserQuotaSummary')) {
+          // Google states the Gemini rolling bucket as full whatever has been spent; only
+          // the weekly bucket moves there.
+          return new Response(JSON.stringify({ groups: [
+            { displayName: 'Gemini Models', buckets: [
+              { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5 },
+              { bucketId: 'gemini-5h', window: '5h', remainingFraction: 1 },
+            ] },
+            { displayName: 'Claude and GPT models', buckets: [
+              { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.8 },
+            ] },
+          ] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        // The live rolling figure: 60 percent of the five-hour window spent.
+        return new Response(JSON.stringify({
+          models: {
+            'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash', quotaInfo: { remainingFraction: 0.4, resetTime: '2026-10-17T06:58:44Z' } },
+            'claude-sonnet-4-6': { displayName: 'Claude Sonnet 4.6', quotaInfo: { resetTime: '2026-10-20T07:18:48Z' } },
+          },
+          agentModelSorts: [{ groups: [{ modelIds: ['gemini-3.8-flash-tiered', 'claude-sonnet-4-6'] }] }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as never,
+    }))
+
+    const read = await adapter.usage('token', 'proj')
+    assert.deepEqual(read.windows.map((window) => window.label), ['gemini', 'gemini_weekly', 'claude_weekly'])
+    assert.equal(read.windows[0]?.usedPercent, 60)
+    assert.equal(read.windows[0]?.resetsAt, Date.parse('2026-10-17T06:58:44Z'))
+    // The weekly bucket stays the summary's: the catalog names no window for it.
+    assert.equal(read.windows[1]?.usedPercent, 50)
+    assert.equal(read.windows[2]?.usedPercent, 20)
+    // A model that states no fraction is not a spent model, so it adds no row.
+    assert.equal(read.windows.some((window) => window.label === 'claude'), false)
+    assert.equal(read.usageError, undefined)
+  })
+
+  test('a per-model figure never lowers a rolling figure the summary stated', async () => {
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn: (async (input: RequestInfo | URL) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (url.includes('retrieveUserQuotaSummary')) {
+          return new Response(JSON.stringify({ groups: [
+            { displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.25 }] },
+          ] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({
+          models: {
+            'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash', quotaInfo: { remainingFraction: 0.9 } },
+          },
+          agentModelSorts: [{ groups: [{ modelIds: ['gemini-3.8-flash-tiered'] }] }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as never,
+    }))
+
+    const read = await adapter.usage('token', 'proj')
+    assert.equal(read.windows[0]?.usedPercent, 75)
+  })
+
+  test('a second account does not inherit the first one’s per-model figures', async () => {
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input)
+        const body = typeof init?.body === 'string' ? init.body : ''
+        const project = /"project":"([^"]+)"/.exec(body)?.[1] ?? ''
+        if (url.includes('retrieveUserQuotaSummary')) {
+          // Both accounts' summaries state the Gemini rolling bucket as full, which is
+          // exactly why the per-model figures must not leak between them.
+          return new Response(JSON.stringify({ groups: [
+            { displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 1 }] },
+          ] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        const spent = project === 'proj-a' ? 0.2 : 1
+        return new Response(JSON.stringify({
+          models: {
+            'gemini-3.8-flash-tiered': {
+              displayName: 'Gemini 3.8 Flash',
+              quotaInfo: { remainingFraction: spent, resetTime: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
+            },
+          },
+          agentModelSorts: [{ groups: [{ modelIds: ['gemini-3.8-flash-tiered'] }] }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as never,
+    }))
+
+    const first = await adapter.usage('token', 'proj-a')
+    assert.equal(first.windows[0]?.usedPercent, 80)
+    // The second account has spent none of its rolling window; the first account's 80
+    // percent must not be carried over just because its read came first.
+    const second = await adapter.usage('token', 'proj-b')
+    assert.equal(second.windows[0]?.usedPercent, 0)
   })
 })
