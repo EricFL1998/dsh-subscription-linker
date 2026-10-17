@@ -544,11 +544,14 @@ describe('AntigravityAdapter', () => {
   })
 
   test('reports the plan and one allowance per model family', async () => {
+    // Resets a couple of hours out are the rolling bucket of each family.
+    const geminiResets = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    const claudeResets = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()
     const fetchFn: typeof fetch = async () => jsonResponse({
       models: {
-        'gemini-3-pro': { quotaInfo: { remainingFraction: 0.25, resetTime: '2026-11-02T00:00:00Z' } },
-        'gemini-3-flash': { quotaInfo: { remainingFraction: 0.5, resetTime: '2026-11-02T00:00:00Z' } },
-        'claude-sonnet-4': { quotaInfo: { remainingFraction: 0.9, resetTime: '2026-11-03T00:00:00Z' } },
+        'gemini-3-pro': { quotaInfo: { remainingFraction: 0.25, resetTime: geminiResets } },
+        'gemini-3-flash': { quotaInfo: { remainingFraction: 0.5, resetTime: geminiResets } },
+        'claude-sonnet-4': { quotaInfo: { remainingFraction: 0.9, resetTime: claudeResets } },
       },
     })
     const adapter = new AntigravityAdapter(adapterOptions({ discovery: true, fetchFn, tokens: tokenManager() }))
@@ -557,10 +560,10 @@ describe('AntigravityAdapter', () => {
     // Two buckets, Gemini first, each at its worst-spent model.
     assert.deepEqual(usage?.windows.map((window) => window.label), ['gemini', 'claude'])
     assert.equal(usage?.windows[0]?.usedPercent, 75)
-    assert.equal(usage?.windows[0]?.resetsAt, Date.parse('2026-11-02T00:00:00Z'))
+    assert.equal(usage?.windows[0]?.resetsAt, Date.parse(geminiResets))
     // A 0.9 remainder is 10% spent, within float noise.
     assert.ok(Math.abs((usage?.windows[1]?.usedPercent ?? 0) - 10) < 1e-6)
-    assert.equal(usage?.windows[1]?.resetsAt, Date.parse('2026-11-03T00:00:00Z'))
+    assert.equal(usage?.windows[1]?.resetsAt, Date.parse(claudeResets))
   })
 
   test('a catalog with only Gemini models reports one allowance', async () => {
@@ -945,6 +948,8 @@ describe('the quota probe', () => {
   })
 
   test('the Gemini rolling row follows the per-model quota, not the summary fixture', async () => {
+    const rollingResets = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()
+    const weeklyResets = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString()
     const adapter = new AntigravityAdapter(adapterOptions({
       fetchFn: (async (input: RequestInfo | URL) => {
         const url = String(input instanceof Request ? input.url : input)
@@ -961,11 +966,12 @@ describe('the quota probe', () => {
             ] },
           ] }), { status: 200, headers: { 'content-type': 'application/json' } })
         }
-        // The live rolling figure: 60 percent of the five-hour window spent.
+        // The live rolling figure: 60 percent of the five-hour window spent. Claude states
+        // only a weekly reset, which is how a spent allowance reads.
         return new Response(JSON.stringify({
           models: {
-            'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash', quotaInfo: { remainingFraction: 0.4, resetTime: '2026-10-17T06:58:44Z' } },
-            'claude-sonnet-4-6': { displayName: 'Claude Sonnet 4.6', quotaInfo: { resetTime: '2026-10-20T07:18:48Z' } },
+            'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash', quotaInfo: { remainingFraction: 0.4, resetTime: rollingResets } },
+            'claude-sonnet-4-6': { displayName: 'Claude Sonnet 4.6', quotaInfo: { resetTime: weeklyResets } },
           },
           agentModelSorts: [{ groups: [{ modelIds: ['gemini-3.8-flash-tiered', 'claude-sonnet-4-6'] }] }],
         }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -975,13 +981,42 @@ describe('the quota probe', () => {
     const read = await adapter.usage('token', 'proj')
     assert.deepEqual(read.windows.map((window) => window.label), ['gemini', 'gemini_weekly', 'claude_weekly'])
     assert.equal(read.windows[0]?.usedPercent, 60)
-    assert.equal(read.windows[0]?.resetsAt, Date.parse('2026-10-17T06:58:44Z'))
-    // The weekly bucket stays the summary's: the catalog names no window for it.
+    assert.equal(read.windows[0]?.resetsAt, Date.parse(rollingResets))
+    // The weekly bucket keeps the summary's accounting.
     assert.equal(read.windows[1]?.usedPercent, 50)
-    assert.equal(read.windows[2]?.usedPercent, 20)
-    // A model that states no fraction is not a spent model, so it adds no row.
+    // A Claude entry that states only its weekly reset has spent that weekly allowance, so
+    // it confirms the summary's figure instead of reading as a free five hours.
+    assert.equal(read.windows[2]?.usedPercent, 100)
+    // Its reset is a week out, so it is no rolling figure: no Claude five-hour row is invented.
     assert.equal(read.windows.some((window) => window.label === 'claude'), false)
     assert.equal(read.usageError, undefined)
+  })
+
+  test('a disabled five-hour bucket is not reported as a free five hours', async () => {
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn: (async (input: RequestInfo | URL) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (url.includes('retrieveUserQuotaSummary')) {
+          // The weekly limit is what binds, so Google reports the group's five-hour bucket
+          // as full and disables it.
+          return new Response(JSON.stringify({ groups: [{
+            displayName: 'Claude and GPT models',
+            buckets: [
+              { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0, resetTime: '2026-10-20T07:18:48Z' },
+              { bucketId: '3p-5h', window: '5h', remainingFraction: 1, disabled: true },
+            ],
+          }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({
+          models: { 'claude-sonnet-4-6': { quotaInfo: { resetTime: '2026-10-20T07:18:48Z' } } },
+          agentModelSorts: [{ groups: [{ modelIds: ['claude-sonnet-4-6'] }] }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as never,
+    }))
+
+    const read = await adapter.usage('token', 'proj')
+    assert.deepEqual(read.windows.map((window) => window.label), ['claude_weekly'])
+    assert.equal(read.windows[0]?.usedPercent, 100)
   })
 
   test('a per-model figure never lowers a rolling figure the summary stated', async () => {

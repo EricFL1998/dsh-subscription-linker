@@ -157,11 +157,19 @@ is logged (`model X unavailable … falling back to Y`).
 states, with a meter and a reset time: Kimi's rolling 5-hour window, weekly window
 and included credit (`GET /coding/v1/usages`); Grok's weekly included credit
 (`cli-chat-proxy.grok.com/v1/billing?format=credits`, plus the plan tier from the
-token's own `tier` claim); and Antigravity's **four** buckets — Gemini and Claude,
-each rolling and weekly — read from `v1internal:retrieveUserQuotaSummary`, falling
-back to the per-model `quotaInfo` of `fetchAvailableModels` (worst-spent model per
+token's own `tier` claim); and Antigravity's buckets — Gemini and Claude, each
+rolling and weekly — read from `v1internal:retrieveUserQuotaSummary` and merged
+with the per-model `quotaInfo` of `fetchAvailableModels` (worst-spent model per
 family, classified by id, display name and tier, so an `Opus` row counts as
-Claude). A provider that states nothing says so instead of inventing a figure.
+Claude). Each row takes whichever of the two reports more spent, because the
+summary's rolling bucket can answer "full" however much has been spent. Two
+things that look like data are not: a bucket marked `disabled` states no window
+(with the weekly limit spent, Google reports the five-hour one as full and
+disables it, so counting it would read as a free five hours), and a per-model
+`quotaInfo` that states its reset but no `remainingFraction` is a **spent**
+allowance — the service drops the fraction once nothing is left. A per-model
+figure whose reset is a week out is the weekly bucket, not the rolling one. A
+provider that states nothing says so instead of inventing a figure.
 
 A reset is stated by how far off it is, on every route: **minutes** within the hour
 (`40 分钟后重置`), **hours** within the day (`4 小时后重置`), and the date beyond that

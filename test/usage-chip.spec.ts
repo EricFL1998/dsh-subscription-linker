@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { accountReadingsOf, balanceOf, formatBalance, formatReset, mergeAccountWindows, pickWindow, providerOf, readingOf, shortLabel, shortWindow } from '../src/client/UsageChip.js'
+import { accountReadingsOf, balanceOf, formatBalance, formatReset, mergeAccountWindows, pickWindow, providerOf, readingOf, shortLabel, shortWindow, windowName } from '../src/client/UsageChip.js'
 import type { AccountReading } from '../src/client/UsageChip.js'
 import type { ProviderUsage, UsageWindow } from '../src/protocol.js'
 
@@ -77,6 +77,27 @@ describe('shortWindow', () => {
 
   test('truncates a long unrecognised name rather than dropping it', () => {
     assert.equal(shortWindow('fortnightly'), 'fort')
+  })
+
+  test('names an Antigravity family and its window, not just its first four letters', () => {
+    // `gemini` and `gemini_weekly` both shortened to `gemi`, so four cells named one thing.
+    assert.equal(shortWindow('gemini'), 'G5h')
+    assert.equal(shortWindow('gemini_weekly'), 'G7d')
+    assert.equal(shortWindow('claude'), 'C5h')
+    assert.equal(shortWindow('claude_weekly'), 'C7d')
+  })
+})
+
+describe('windowName', () => {
+  const t = ((key: string) => key) as unknown as Parameters<typeof windowName>[0]
+
+  test('names a window this build has copy for', () => {
+    assert.equal(windowName(t, 'gemini_weekly'), 'usage_gemini_weekly')
+    assert.equal(windowName(t, 'claude'), 'usage_claude')
+  })
+
+  test('keeps a label this build has no copy for', () => {
+    assert.equal(windowName(t, 'chat_widget'), 'chat_widget')
   })
 })
 

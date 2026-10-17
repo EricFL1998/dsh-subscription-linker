@@ -22,6 +22,8 @@ import type { SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 
 import type { SubscriptionsCall, AccountBalanceCall, CcSwitchBalanceCall } from './subscriptions-rpc.js'
 import { usageChipCss } from './styles.js'
+import { en } from './locales.js'
+import type { SubscriptionsKey } from './locales.js'
 import type { ProviderUsage, UsageWindow } from '../protocol.js'
 
 /** How often a visible chip refreshes its figures. */
@@ -58,6 +60,13 @@ const SHORT_WINDOWS: Record<string, string> = {
   'credits': 'cr',
   'free': 'free',
   'session': 's',
+  // Antigravity meters each family twice, and its labels are wire ids: without these the
+  // compact line would show four cells all reading `gemi` and name neither the family nor
+  // the window it belongs to.
+  'gemini': 'G5h',
+  'gemini_weekly': 'G7d',
+  'claude': 'C5h',
+  'claude_weekly': 'C7d',
 }
 
 /** Injected props the chip is registered with. */
@@ -65,7 +74,7 @@ export interface UsageChipInjected {
   /** The plugin's own RPC caller. */
   call: SubscriptionsCall
   /** Copy for the active locale. */
-  t: (key: 'usageChipTitle' | 'usageChipFull', values?: Record<string, string | number>) => string
+  t: (key: SubscriptionsKey, values?: Record<string, string | number>) => string
   /** Whether the provider is one this plugin serves. */
   isOwnProvider: (provider: string) => boolean
   /**
@@ -208,6 +217,22 @@ export function shortWindow(label: string): string {
   const known = SHORT_WINDOWS[label.toLowerCase()]
   if (known !== undefined) return known
   return label.length <= 4 ? label : label.slice(0, 4)
+}
+
+/**
+ * The name a window reads as in the panel.
+ *
+ * A provider's window label is a wire id — `gemini_weekly` is not something to put in front
+ * of a reader — so a label this build has copy for is named in the reader's language, and
+ * anything else keeps the name its provider gave it.
+ *
+ * @param t - copy for the active locale.
+ * @param label - the window's own label.
+ * @returns the display name.
+ */
+export function windowName(t: UsageChipInjected['t'], label: string): string {
+  const key = `usage_${label}` as SubscriptionsKey
+  return key in en ? t(key) : label
 }
 
 /**
@@ -664,9 +689,11 @@ export function UsageChip({ call, t, isOwnProvider, accountBalance, ccSwitchBala
                 return (
                   <span className="dsh-subscription-usage-chip-meter" key={window.label}>
                     <span className="dsh-subscription-usage-chip-meterHead">
-                      <span>{window.label}</span>
+                      <span>{windowName(t, window.label)}</span>
                       <span className="dsh-subscription-usage-chip-detail">
-                        {`${windowAmount(window)}${windowReset === undefined ? '' : ` · ${windowReset}`}`}
+                        {/* A shift of the allowance is a share spent, which is what the bar
+                            fills to; saying so is what keeps "0%" from reading as "none left". */}
+                        {`${t('usageSpent', { value: windowAmount(window) })}${windowReset === undefined ? '' : ` · ${windowReset}`}`}
                       </span>
                     </span>
                     {window.usedPercent !== undefined && (

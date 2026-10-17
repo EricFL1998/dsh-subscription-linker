@@ -5,13 +5,16 @@ import { describe, test } from 'node:test'
 
 import {
   antigravityEffortsFor,
-  antigravityRollingFromModels,
-  mergeRollingWindows,
+  antigravityWindowsFromModels,
+  mergeQuotaWindows,
   parseAntigravityModelQuota,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
   wireIdFor,
 } from '../src/providers/antigravity-catalog.js'
+
+/** The instant every quota test measures a reset from. */
+const NOW = Date.parse('2026-10-17T03:00:00Z')
 
 /** A `fetchAvailableModels` body with both agent and non-agent surfaces. */
 function availableModels(): unknown {
@@ -173,6 +176,36 @@ describe('parseAntigravityQuotaSummary', () => {
     assert.deepEqual(windows, [])
   })
 
+  test('a bucket with no remainder left is spent, not unknown', () => {
+    // Google drops `remainingFraction` once a bucket is gone; the weekly one below is
+    // therefore exhausted rather than unreported.
+    const windows = parseAntigravityQuotaSummary({
+      groups: [{
+        displayName: 'Claude and GPT models',
+        buckets: [{ bucketId: '3p-weekly', window: 'weekly', resetTime: '2026-10-20T07:18:48Z' }],
+      }],
+    })
+    assert.deepEqual(windows.map((window) => window.label), ['claude_weekly'])
+    assert.equal(windows[0]?.usedPercent, 100)
+    assert.equal(windows[0]?.resetsAt, Date.parse('2026-10-20T07:18:48Z'))
+  })
+
+  test('a disabled bucket states no window at all', () => {
+    // The weekly limit is the one being enforced, so Google reports the group's five-hour
+    // bucket as full and disables it. Its "full" remainder is not a free five hours.
+    const windows = parseAntigravityQuotaSummary({
+      groups: [{
+        displayName: 'Claude and GPT models',
+        buckets: [
+          { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0, resetTime: '2026-10-20T07:18:48Z' },
+          { bucketId: '3p-5h', window: '5h', remainingFraction: 1, disabled: true },
+        ],
+      }],
+    })
+    assert.deepEqual(windows.map((window) => window.label), ['claude_weekly'])
+    assert.equal(windows[0]?.usedPercent, 100)
+  })
+
   test('an unknown shape yields nothing', () => {
     assert.deepEqual(parseAntigravityQuotaSummary({}), [])
     assert.deepEqual(parseAntigravityQuotaSummary(null), [])
@@ -180,19 +213,33 @@ describe('parseAntigravityQuotaSummary', () => {
 })
 
 describe('parseAntigravityModelQuota', () => {
-  test('falls back to the per-model figures, one per family', () => {
+  test('falls back to the per-model figures, one per family and bucket', () => {
     const windows = parseAntigravityModelQuota({
       models: {
         'gemini-3.1-pro-low': { quotaInfo: { remainingFraction: 0.4 } },
         'gemini-3.8-flash': { quotaInfo: { remainingFraction: 0.7 } },
-        'claude-sonnet-4-6': { quotaInfo: { remainingFraction: 0.2, resetTime: '2026-11-03T00:00:00Z' } },
+        'claude-sonnet-4-6': { quotaInfo: { remainingFraction: 0.2, resetTime: '2026-10-24T03:00:00Z' } },
       },
-    })
-    assert.deepEqual(windows.map((window) => window.label), ['gemini', 'claude'])
+    }, NOW)
+    assert.deepEqual(windows.map((window) => window.label), ['gemini', 'claude_weekly'])
     // Each family reports its worst-spent model.
     assert.equal(windows[0]?.usedPercent, 60)
     assert.equal(windows[1]?.usedPercent, 80)
-    assert.equal(windows[1]?.resetsAt, Date.parse('2026-11-03T00:00:00Z'))
+    assert.equal(windows[1]?.resetsAt, Date.parse('2026-10-24T03:00:00Z'))
+  })
+
+  test('a model whose quota states only a reset has spent its allowance', () => {
+    // This is what an exhausted Claude allowance looks like from the catalog: the weekly
+    // bucket spent, so only its reset is left to state.
+    const windows = parseAntigravityModelQuota({
+      models: {
+        'claude-sonnet-4-6': { quotaInfo: { resetTime: '2026-10-24T03:00:00Z' } },
+        'gemini-3.8-flash-tiered': { quotaInfo: { remainingFraction: 0.35, resetTime: '2026-10-17T05:00:00Z' } },
+      },
+    }, NOW)
+    assert.deepEqual(windows.map((window) => window.label), ['gemini', 'claude_weekly'])
+    assert.equal(Math.round(windows[0]?.usedPercent ?? 0), 65)
+    assert.equal(windows[1]?.usedPercent, 100)
   })
 
   test('classifies by display name and tier, not only by id', () => {
@@ -200,40 +247,48 @@ describe('parseAntigravityModelQuota', () => {
       models: {
         'third-party-model': { displayName: 'Opus 4.6', quotaInfo: { remainingFraction: 0.5 } },
       },
-    })
+    }, NOW)
     assert.deepEqual(windows.map((window) => window.label), ['claude'])
   })
 })
 
-describe('antigravityRollingFromModels', () => {
-  test('keeps a five-hour figure and ignores a weekly one', () => {
-    const now = Date.parse('2026-10-17T03:00:00Z')
-    const windows = antigravityRollingFromModels(new Map([
-      // A reset two hours out is the rolling window.
+describe('antigravityWindowsFromModels', () => {
+  test('a reset a few hours out is the rolling bucket of its family', () => {
+    const windows = antigravityWindowsFromModels(new Map([
       ['gemini-3.8-flash-tiered', { remainingFraction: 0.4, resetTime: '2026-10-17T05:00:00Z' }],
-      // A reset a week out is the weekly bucket, which the summary already reports.
-      ['claude-sonnet-4-6', { remainingFraction: 0.9, resetTime: '2026-10-24T03:00:00Z' }],
-    ]), now)
+    ]), NOW)
     assert.deepEqual(windows.map((window) => window.label), ['gemini'])
     assert.equal(windows[0]?.usedPercent, 60)
+    assert.equal(windows[0]?.resetsAt, Date.parse('2026-10-17T05:00:00Z'))
   })
 
-  test('takes the worst model of a family and skips one that states nothing', () => {
-    const now = Date.parse('2026-10-17T03:00:00Z')
-    const windows = antigravityRollingFromModels(new Map([
+  test('a reset a week out is the weekly bucket, which the service states instead', () => {
+    // Once the weekly limit binds, the per-model entry carries the weekly figure rather
+    // than the five-hour one; it is a weekly reading and must not be shown as a rolling one.
+    const windows = antigravityWindowsFromModels(new Map([
+      ['gemini-3.8-flash-tiered', { remainingFraction: 0.1, resetTime: '2026-10-19T02:31:28Z' }],
+    ]), NOW)
+    assert.deepEqual(windows.map((window) => window.label), ['gemini_weekly'])
+    assert.equal(windows[0]?.usedPercent, 90)
+  })
+
+  test('takes the worst model of a bucket and skips one that states nothing', () => {
+    const windows = antigravityWindowsFromModels(new Map([
       ['gemini-3-flash', { remainingFraction: 0.8, resetTime: '2026-10-17T06:00:00Z' }],
       ['gemini-2.5-pro', { remainingFraction: 0.35, resetTime: '2026-10-17T06:00:00Z' }],
-      ['gemini-3.1-flash-lite', { resetTime: '2026-10-17T06:00:00Z' }],
+      ['gemini-3.1-flash-lite', {}],
       ['claude-opus-4-6-thinking', { resetTime: '2026-10-17T05:00:00Z' }],
-    ]), now)
-    assert.deepEqual(windows.map((window) => window.label), ['gemini'])
+    ]), NOW)
+    assert.deepEqual(windows.map((window) => window.label), ['gemini', 'claude'])
     assert.equal(Math.round(windows[0]?.usedPercent ?? 0), 65)
+    // A rolling quota that states only its reset is spent.
+    assert.equal(windows[1]?.usedPercent, 100)
   })
 })
 
-describe('mergeRollingWindows', () => {
-  test('raises a rolling row to the per-model figure and keeps the weekly one', () => {
-    const windows = mergeRollingWindows(
+describe('mergeQuotaWindows', () => {
+  test('raises a row to the per-model figure and keeps a higher summary one', () => {
+    const windows = mergeQuotaWindows(
       [
         { label: 'gemini', usedPercent: 0, resetsAt: 1 },
         { label: 'gemini_weekly', usedPercent: 99.5 },
@@ -248,25 +303,33 @@ describe('mergeRollingWindows', () => {
     // The live rolling figure wins, and it carries its own reset.
     assert.equal(windows[0]?.usedPercent, 60.4)
     assert.equal(windows[0]?.resetsAt, 2)
-    // A weekly row is never taken from the catalog: it names no window.
     assert.equal(windows[1]?.usedPercent, 99.5)
-    // A rolling row the summary omitted is added rather than dropped.
+    // A row the summary omitted is added rather than dropped.
     assert.equal(windows[2]?.usedPercent, 100)
     assert.equal(windows[3]?.usedPercent, 100)
   })
 
+  test('a per-model weekly figure can confirm or raise the weekly row', () => {
+    const windows = mergeQuotaWindows(
+      [{ label: 'gemini_weekly', usedPercent: 40 }],
+      [{ label: 'gemini_weekly', usedPercent: 90, resetsAt: 3 }],
+    )
+    assert.deepEqual(windows, [{ label: 'gemini_weekly', usedPercent: 90, resetsAt: 3 }])
+  })
+
   test('a summary figure higher than the per-model one is kept', () => {
-    const windows = mergeRollingWindows(
+    const windows = mergeQuotaWindows(
       [{ label: 'gemini', usedPercent: 75 }],
       [{ label: 'gemini', usedPercent: 40 }, { label: 'gemini_weekly', usedPercent: 10 }],
     )
-    assert.deepEqual(windows.map((window) => window.label), ['gemini'])
+    assert.deepEqual(windows.map((window) => window.label), ['gemini', 'gemini_weekly'])
     assert.equal(windows[0]?.usedPercent, 75)
+    assert.equal(windows[1]?.usedPercent, 10)
   })
 
   test('an empty summary is just the per-model windows', () => {
-    assert.deepEqual(mergeRollingWindows([], []), [])
-    const windows = mergeRollingWindows([], [{ label: 'gemini', usedPercent: 70 }])
+    assert.deepEqual(mergeQuotaWindows([], []), [])
+    const windows = mergeQuotaWindows([], [{ label: 'gemini', usedPercent: 70 }])
     assert.deepEqual(windows, [{ label: 'gemini', usedPercent: 70 }])
   })
 })

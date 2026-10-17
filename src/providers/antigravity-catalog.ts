@@ -389,10 +389,16 @@ export function parseAntigravityModels(payload: unknown): CatalogEntry[] {
   return collapseFamilies(raw)
 }
 
-/** A quota reading normalised to a percentage spent. */
-function usedPercentOf(raw: unknown): number | undefined {
+/** The object that states one quota reading, unwrapping a nested `remaining`. */
+function quotaTargetOf(raw: unknown): Record<string, unknown> | undefined {
   if (!isRecord(raw)) return undefined
-  const target = isRecord(raw.remaining) ? raw.remaining : raw
+  return isRecord(raw.remaining) ? raw.remaining : raw
+}
+
+/** A quota reading normalised to a percentage spent, or undefined when it states none. */
+function usedPercentOf(raw: unknown): number | undefined {
+  const target = quotaTargetOf(raw)
+  if (target === undefined) return undefined
   const fraction = typeof target.remainingFraction === 'number' && Number.isFinite(target.remainingFraction)
     ? target.remainingFraction
     : undefined
@@ -402,6 +408,26 @@ function usedPercentOf(raw: unknown): number | undefined {
   const remaining = fraction !== undefined ? fraction * 100 : percentage
   if (remaining === undefined) return undefined
   return Math.max(0, Math.min(100, 100 - remaining))
+}
+
+/**
+ * A quota reading as a percentage spent, counting an unstated remainder as spent.
+ *
+ * The service drops `remainingFraction` from a bucket once that allowance is gone — a spent
+ * bucket states only its reset — so an object that says anything at all but states no
+ * remainder is a spent one, not an unknown one. Reading it as unknown is what left the
+ * Claude allowance pinned at zero while the account's own summary called it exhausted.
+ *
+ * @param raw - one bucket or one model's `quotaInfo`.
+ * @returns the percentage spent, or undefined when the object states nothing.
+ */
+function spentPercentOf(raw: unknown): number | undefined {
+  const stated = usedPercentOf(raw)
+  if (stated !== undefined) return stated
+  const target = quotaTargetOf(raw)
+  if (target === undefined) return undefined
+  // An empty object names no allowance, so it states nothing either way.
+  return Object.keys(target).length > 0 ? 100 : undefined
 }
 
 /** A reset instant from an RFC 3339 string. */
@@ -422,11 +448,25 @@ function resetOf(raw: unknown): number | undefined {
 export const QUOTA_WINDOW_LABELS = ['gemini', 'gemini_weekly', 'claude', 'claude_weekly'] as const
 
 /**
+ * How far ahead a weekly bucket resets, and so the least a reset must be to be the weekly one.
+ *
+ * The service states one bucket per model: whichever one it is enforcing. A reset a few hours
+ * out is the rolling window; one a week out is the weekly bucket the summary also reports.
+ */
+const ROLLING_RESET_MAX_MS = 8 * 60 * 60 * 1000
+
+/**
  * Read the two allowances from a `retrieveUserQuotaSummary` response.
  *
  * The summary groups models by family and reports a rolling and a weekly bucket per
  * group, which is what a user recognises as "the Gemini allowance" and "the Claude
  * allowance".
+ *
+ * A bucket the service marks `disabled` does not apply at that instant — with the weekly
+ * limit spent, Google reports the group's five-hour bucket as full and disables it, and the
+ * five-hour limit is not what is holding the account back. Reporting that as "0% used" tells
+ * a user the family is free for the next five hours, which is the opposite of the truth, so
+ * a disabled bucket states no window at all.
  *
  * @param payload - the decoded response.
  * @returns one window per bucket found, Gemini first.
@@ -443,13 +483,14 @@ export function parseAntigravityQuotaSummary(payload: unknown): UsageWindow[] {
     if (family === undefined || !Array.isArray(raw.buckets)) continue
     for (const rawBucket of raw.buckets) {
       if (!isRecord(rawBucket)) continue
+      if (rawBucket.disabled === true) continue
       const window = `${text(rawBucket.window) ?? ''} ${text(rawBucket.bucketId) ?? ''} ${text(rawBucket.displayName) ?? ''}`.toLowerCase()
       const weekly = window.includes('week')
       const rolling = window.includes('5h') || window.includes('five')
       if (!weekly && !rolling) continue
       const key = weekly ? `${family}_weekly` : family
       if (found.has(key)) continue
-      const usedPercent = usedPercentOf(rawBucket)
+      const usedPercent = spentPercentOf(rawBucket)
       if (usedPercent === undefined) continue
       const resetsAt = resetOf(rawBucket)
       found.set(key, { label: key, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
@@ -462,16 +503,21 @@ export function parseAntigravityQuotaSummary(payload: unknown): UsageWindow[] {
 }
 
 /**
- * Read per-model quota as a fallback, when the summary is unavailable.
+ * Read the per-model quota as this account's allowance windows.
  *
- * A per-model entry sometimes names its own window (`window`/`bucketId`), in which
- * case the rolling and weekly buckets are reported separately; when it names none,
- * the model's figure is the family's rolling bucket, which is all the entry states.
+ * Each model states one bucket: whichever the service is enforcing right now. A reset a few
+ * hours out is the rolling window and one a week out is the weekly bucket, so the reset is
+ * what tells the two apart — which matters once the weekly limit is what binds, because the
+ * per-model figure then carries the weekly one instead of the five-hour one.
+ *
+ * A model whose `quotaInfo` states its reset but no remainder has spent its allowance: the
+ * service drops `remainingFraction` once nothing is left.
  *
  * @param payload - the decoded `fetchAvailableModels` body.
- * @returns one window per family and window kind, at the worst-spent model.
+ * @param now - the instant a reset is measured from.
+ * @returns one window per family and bucket, at the worst-spent model.
  */
-export function parseAntigravityModelQuota(payload: unknown): UsageWindow[] {
+export function parseAntigravityModelQuota(payload: unknown, now: number = Date.now()): UsageWindow[] {
   if (!isRecord(payload) || !isRecord(payload.models)) return []
   const models = payload.models as Record<string, unknown>
   const worst = new Map<string, UsageWindow>()
@@ -486,15 +532,16 @@ export function parseAntigravityModelQuota(payload: unknown): UsageWindow[] {
         : /claude|opus|sonnet|gpt-oss|gpt_oss/.test(haystack) ? 'claude'
           : undefined
       if (family === undefined) continue
-      const usedPercent = usedPercentOf(quota)
+      const usedPercent = spentPercentOf(quota)
       if (usedPercent === undefined) continue
-      // An entry that states a window separates the buckets; one that states none
-      // is the rolling bucket, so it never overwrites a stated weekly figure.
-      const window = `${text(quota.window) ?? ''} ${text(quota.bucketId) ?? ''} ${text(raw.window) ?? ''}`.toLowerCase()
-      const key = window.includes('week') ? `${family}_weekly` : family
+      // An entry that names a window says which bucket it means; one that names none states
+      // whichever bucket the service is enforcing, which its reset tells apart.
+      const window = `${text(quota.window) ?? ''} ${text(quota.bucketId) ?? ''} ${text(raw.window) ?? ''} ${text(raw.bucketId) ?? ''}`.toLowerCase()
+      const resetsAt = resetOf(quota) ?? resetOf(raw)
+      const weekly = window.includes('week') || (resetsAt !== undefined && resetsAt - now > ROLLING_RESET_MAX_MS)
+      const key = weekly ? `${family}_weekly` : family
       const seen = worst.get(key)
       if (seen !== undefined && (seen.usedPercent ?? 0) >= usedPercent) continue
-      const resetsAt = resetOf(quota) ?? resetOf(raw)
       worst.set(key, { label: key, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
     }
   }
@@ -504,73 +551,46 @@ export function parseAntigravityModelQuota(payload: unknown): UsageWindow[] {
   })
 }
 
-/** The two families whose rolling figure is metered per model. */
-const ROLLING_LABELS = new Set<string>(['gemini', 'claude'])
-
-/** How far ahead a rolling window may reset and still be the rolling bucket. */
-const ROLLING_RESET_MAX_MS = 8 * 60 * 60 * 1000
-
 /**
- * Reduce the per-model quota to each family's live rolling window.
+ * Reduce the catalog's per-model quota to this account's allowance windows.
  *
- * A per-model entry states whichever bucket the service is enforcing right now: while the
- * five-hour window binds it carries that figure (a reset a few hours out), and once the
- * weekly one binds the same entry carries the weekly figure instead (a reset a week out).
- * Only the first kind is a rolling reading, so an entry whose reset is far away is left
- * out — the summary already owns the weekly row, and counting a weekly figure as the
- * rolling one would print the same number twice under two names.
+ * The catalog is rebuilt into the wire shape the shared parser reads, so both this route's
+ * cache fallback and its merge read a per-model figure the same way.
  *
  * @param quotas - quota per model id, as the catalog stated it.
- * @param now - the instant the reset is measured from.
- * @returns one rolling window per family that stated one, Gemini first.
+ * @param now - the instant a reset is measured from.
+ * @returns one window per family and bucket that stated a figure, Gemini first.
  */
-export function antigravityRollingFromModels(
+export function antigravityWindowsFromModels(
   quotas: ReadonlyMap<string, { remainingFraction?: number, resetTime?: string }>,
   now: number = Date.now(),
 ): UsageWindow[] {
-  const worst = new Map<string, UsageWindow>()
-  for (const [id, quota] of quotas) {
-    const haystack = id.toLowerCase()
-    const family = haystack.includes('gemini') ? 'gemini'
-      : /claude|opus|sonnet|gpt-oss|gpt_oss/.test(haystack) ? 'claude'
-        : undefined
-    if (family === undefined) continue
-    const resetsAt = typeof quota.resetTime === 'string' ? Date.parse(quota.resetTime) : Number.NaN
-    // A reset a week out is the weekly bucket, which is the summary's to report.
-    if (Number.isFinite(resetsAt) && resetsAt - now > ROLLING_RESET_MAX_MS) continue
-    const usedPercent = usedPercentOf({ remaining: quota })
-    if (usedPercent === undefined) continue
-    const seen = worst.get(family)
-    if (seen !== undefined && (seen.usedPercent ?? 0) >= usedPercent) continue
-    worst.set(family, { label: family, usedPercent, ...Number.isFinite(resetsAt) ? { resetsAt } : {} })
-  }
-  return [...worst.values()].sort((left, right) => left.label === 'gemini' ? -1 : right.label === 'gemini' ? 1 : 0)
+  const models: Record<string, unknown> = {}
+  for (const [id, quota] of quotas) models[id] = { quotaInfo: quota }
+  return parseAntigravityModelQuota({ models }, now)
 }
 
 /**
- * Take a family's rolling figure from the per-model quota when it reports more spent.
+ * Take a row's figure from the per-model quota when it reports more spent.
  *
- * The summary's Gemini group states a five-hour bucket that never moves: it answers
- * `remainingFraction: 1` no matter how much the account has spent, so a card fed only by
- * the summary pins the Gemini rolling row — and the figures never change however long the
- * user works. The same family's rolling quota is metered per model (`fetchAvailableModels`
- * states it per model id), which is the live number, so a rolling row takes whichever
- * source reports more spent. Weekly buckets stay the summary's: the per-model catalog names
- * no window, so it can only ever speak for the rolling one.
+ * The summary is not always the live number. Its Gemini group states a five-hour bucket that
+ * can answer `remainingFraction: 1` however much the account has spent, which pins the
+ * rolling row at zero for as long as the account is used. The same family's quota is metered
+ * per model, and `fetchAvailableModels` states the enforced bucket there, so a row takes
+ * whichever source reports more spent — the account summary's own accounting, or the
+ * per-model reading of the bucket it names.
  *
  * @param summary - windows from `retrieveUserQuotaSummary`, in card order.
  * @param perModel - windows reduced from the catalog's per-model quota.
- * @returns the summary's windows with each rolling figure raised to the per-model one.
+ * @returns one row per window either source stated, in card order.
  */
-export function mergeRollingWindows(
+export function mergeQuotaWindows(
   summary: readonly UsageWindow[],
   perModel: readonly UsageWindow[],
 ): UsageWindow[] {
   const found = new Map<string, UsageWindow>()
   for (const window of summary) found.set(window.label, window)
   for (const window of perModel) {
-    // Only a rolling row merges: a weekly figure from the catalog would be a guess.
-    if (!ROLLING_LABELS.has(window.label)) continue
     const stated = found.get(window.label)
     if (stated !== undefined && (stated.usedPercent ?? 0) >= (window.usedPercent ?? 0)) continue
     found.set(window.label, window)

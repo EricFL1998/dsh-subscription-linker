@@ -367,6 +367,18 @@ function windowAmount(window: UsageWindow): string {
   return '—'
 }
 
+/**
+ * A window's figure, marked as the share spent.
+ *
+ * The meter fills as the allowance is spent, so the number beside it is a share spent, not a
+ * share left — saying which is what keeps "0%" from reading as "no allowance left". A window
+ * that states no figure at all keeps its dash rather than claiming nothing is spent.
+ */
+function windowSpentLabel(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
+  const amount = windowAmount(window)
+  return amount === '—' ? amount : t('usageSpent', { value: amount })
+}
+
 /** One account's metered windows and check-in, rendered under its account row. */
 function AccountUsage(props: {
   entry: ProviderUsage | undefined
@@ -417,7 +429,7 @@ function AccountUsage(props: {
             <span style={styles.modelName}>
               {windowLabel(t, window)}
               {' · '}
-              {windowAmount(window)}
+              {windowSpentLabel(t, window)}
             </span>
             <span style={styles.modelMeta}>
               {window.resetsAt === undefined ? '' : formatReset(window.resetsAt, t)}

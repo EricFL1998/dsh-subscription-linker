@@ -45,9 +45,8 @@ import { fallbackEntry, findEntry, resolveCatalog } from './catalog.js'
 import { idleWatchdog, mapFetchFailure, httpLlmError } from './common.js'
 import {
   QUOTA_WINDOW_LABELS,
-  antigravityRollingFromModels,
-  mergeRollingWindows,
-  parseAntigravityModelQuota,
+  antigravityWindowsFromModels,
+  mergeQuotaWindows,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
   geminiTierId,
@@ -1313,11 +1312,11 @@ export class AntigravityAdapter extends LlmAdapter {
   /**
    * Read the account summary and the per-model figures, then merge them.
    *
-   * Both are read on every call: the summary owns the weekly buckets, but its Gemini
-   * rolling bucket is a fixture (`remainingFraction: 1` however much the account has
-   * spent), so a summary-only read leaves that row frozen at zero. The per-model catalog
-   * is where the rolling figure actually lives, which is why it is always consulted and
-   * its rolling rows are merged in rather than used only as a substitute.
+   * Both are read on every call: the summary owns the account's accounting, but its rolling
+   * bucket can be a fixture (`remainingFraction: 1` however much the account has spent), and
+   * the per-model reading is where a live rolling figure lives. The per-model entry states
+   * whichever bucket the service enforces, so it can also confirm a weekly figure; each row
+   * takes whichever source reports more spent.
    *
    * @param accessToken - bearer for the account.
    * @param projectId - the account's project.
@@ -1338,7 +1337,7 @@ export class AntigravityAdapter extends LlmAdapter {
       summaryError = errorChain(error)
     }
     const perModel = await this.perModelWindows(accessToken, projectId, runtime)
-    const windows = mergeRollingWindows(summaryWindows, perModel)
+    const windows = mergeQuotaWindows(summaryWindows, perModel)
     if (windows.length === 0) {
       this.options.onWarn?.(`Antigravity usage unavailable: summary ${summaryError ?? 'no bucket'}; no per-model figure`)
       return { windows: this.antigravityWindowsFromCache(projectId), ...summaryError === undefined ? {} : { usageError: summaryError } }
@@ -1349,16 +1348,16 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   /**
-   * Reduce the catalog's per-model quota to the rolling windows it can state.
+   * Reduce the catalog's per-model quota to the windows it can state.
    *
-   * A failed read falls back to the figures the last catalog read kept for this project,
-   * which is the same substitute this route always used — the difference is that it is now
-   * merged with the summary instead of replacing it.
+   * A failed read falls back to the figures the last catalog read kept for this project, and
+   * says so: a silent fallback is how a card ends up showing only the summary's frozen
+   * rolling bucket with nothing to explain why.
    *
    * @param accessToken - bearer for the account.
    * @param projectId - the account's project.
    * @param runtime - fetch plus the origins to try.
-   * @returns one rolling window per family that stated a figure.
+   * @returns one window per bucket the per-model figures state.
    */
   private async perModelWindows(
     accessToken: string,
@@ -1373,10 +1372,10 @@ export class AntigravityAdapter extends LlmAdapter {
         origins: runtime.origins,
       })
       if (quotas.size > 0) this.quotasByProject.set(projectId, quotas)
-    } catch {
-      // Keep whatever the last catalog read stated; the summary alone still answers.
+    } catch (error: unknown) {
+      this.options.onWarn?.(`Antigravity per-model quota unavailable (${errorChain(error)}); keeping the last reading`)
     }
-    return antigravityRollingFromModels(this.quotasByProject.get(projectId) ?? new Map())
+    return antigravityWindowsFromModels(this.quotasByProject.get(projectId) ?? new Map())
   }
 
   /**
@@ -1466,18 +1465,15 @@ export class AntigravityAdapter extends LlmAdapter {
 }
 
 /**
- * Reduce per-model quota figures to the two allowances an account has.
+ * Reduce per-model quota figures to the allowances an account has.
  *
  * @param quotas - quota per model id, as the catalog reported it.
- * @returns one window per family, Gemini first, worst-spend first within a family.
+ * @returns one window per family and bucket the figures state, Gemini first.
  */
 export function antigravityWindows(
   quotas: ReadonlyMap<string, { remainingFraction?: number, resetTime?: string }>,
 ): UsageWindow[] {
-  // Rebuild the wire shape the shared parser reads, so both paths agree.
-  const models: Record<string, unknown> = {}
-  for (const [id, quota] of quotas) models[id] = { quotaInfo: quota }
-  return parseAntigravityModelQuota({ models })
+  return antigravityWindowsFromModels(quotas)
 }
 
 /** Whether a refusal is worth answering with another model. */
