@@ -145,6 +145,21 @@ describe('mergeAccountWindows', () => {
     assert.deepEqual(merged.map((window) => window.label), ['5h', 'weekly'])
   })
 
+  test('orders a family’s rolling window before its weekly one', () => {
+    // Antigravity names its rolling window after the family, so the period is only in the
+    // abbreviation; reading the label alone left `claude_weekly` ahead of `claude`. The
+    // windows arrive in the route's own order, which is what equal periods keep.
+    const merged = mergeAccountWindows([
+      reading('a', [
+        { label: 'gemini', usedPercent: 0 },
+        { label: 'gemini_weekly', usedPercent: 90 },
+        { label: 'claude', usedPercent: 0 },
+        { label: 'claude_weekly', usedPercent: 51 },
+      ]),
+    ])
+    assert.deepEqual(merged.map((window) => window.label), ['gemini', 'claude', 'gemini_weekly', 'claude_weekly'])
+  })
+
   test('leaves a credit balance out of the merge, since money is not a shared allowance', () => {
     const merged = mergeAccountWindows([
       reading('a', [{ label: 'credits', used: 1, limit: 2 }]),

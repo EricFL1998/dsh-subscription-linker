@@ -1074,4 +1074,44 @@ describe('the quota probe', () => {
     const second = await adapter.usage('token', 'proj-b')
     assert.equal(second.windows[0]?.usedPercent, 0)
   })
+
+  test('a host still calling an allowance full does not hide the other host’s figure', async () => {
+    // Google runs two Code Assist deployments, and one can answer "full" for every model of
+    // a family while the other — the one Antigravity itself uses — reports the same models
+    // nearly spent. Reading whichever host answered first showed a comfortable 0 % next to
+    // an allowance that was 90 % gone.
+    const weeklyResets = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString()
+    const adapter = new AntigravityAdapter(adapterOptions({
+      fetchFn: (async (input: RequestInfo | URL) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (url.includes('retrieveUserQuotaSummary')) {
+          // Both hosts state the weekly bucket as full here; the catalog is where they differ.
+          return new Response(JSON.stringify({ groups: [{
+            displayName: 'Gemini Models',
+            buckets: [
+              { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 1 },
+              { bucketId: 'gemini-5h', window: '5h', remainingFraction: 1 },
+            ],
+          }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        const remaining = url.startsWith(ANTIGRAVITY_PROD_URL) ? 1 : 0.1
+        return new Response(JSON.stringify({
+          models: {
+            'gemini-3.8-flash-tiered': {
+              displayName: 'Gemini 3.8 Flash',
+              quotaInfo: { remainingFraction: remaining, resetTime: weeklyResets },
+            },
+          },
+          agentModelSorts: [{ groups: [{ modelIds: ['gemini-3.8-flash-tiered'] }] }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as never,
+    }))
+
+    const read = await adapter.usage('token', 'proj')
+    const weekly = read.windows.find((window) => window.label === 'gemini_weekly')
+    // The daily host's 90 % is the allowance that is really being consumed.
+    assert.equal(Math.round(weekly?.usedPercent ?? 0), 90)
+    // The summary's claim that the same bucket is full loses to it.
+    assert.equal(read.windows.find((window) => window.label === 'gemini')?.usedPercent, 0)
+  })
 })

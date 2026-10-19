@@ -375,14 +375,15 @@ export function mergeAccountWindows(readings: readonly AccountReading[]): readon
       ...resets.length === 0 ? {} : { resetsAt: Math.min(...resets) },
     })
   }
-  // Order by window period, shortest first: the rolling `5h` window reads before the
-  // `weekly` one, the way the providers state them and the way a reader scans (what
-  // resets soonest is the nearer limit). Unrecognised labels keep their input order.
+  // Order by window period, shortest first: the rolling window reads before the weekly one,
+  // the way the providers state them and the way a reader scans (what resets soonest is the
+  // nearer limit). A family's rolling window is named after the family (`gemini`, `claude`),
+  // so it is the abbreviation — not the label — that says which period a cell is.
   const order = (label: string): number => {
-    const short = shortWindow(label)
-    if (short === '5h' || short === 's') return 0
+    const short = shortWindow(label).toLowerCase()
+    if (short.endsWith('5h') || short === 's') return 0
     if (short === '1d' || short === 'mo') return 1
-    if (short === '7d') return 2
+    if (short.endsWith('7d')) return 2
     return 3
   }
   return merged.sort((left, right) => order(left.label) - order(right.label))

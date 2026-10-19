@@ -161,15 +161,21 @@ token's own `tier` claim); and Antigravity's buckets — Gemini and Claude, each
 rolling and weekly — read from `v1internal:retrieveUserQuotaSummary` and merged
 with the per-model `quotaInfo` of `fetchAvailableModels` (worst-spent model per
 family, classified by id, display name and tier, so an `Opus` row counts as
-Claude). Each row takes whichever of the two reports more spent, because the
-summary's rolling bucket can answer "full" however much has been spent. Two
-things that look like data are not: a bucket marked `disabled` states no window
-(with the weekly limit spent, Google reports the five-hour one as full and
-disables it, so counting it would read as a free five hours), and a per-model
-`quotaInfo` that states its reset but no `remainingFraction` is a **spent**
-allowance — the service drops the fraction once nothing is left. A per-model
-figure whose reset is a week out is the weekly bucket, not the rolling one. A
-provider that states nothing says so instead of inventing a figure.
+Claude). Each row takes whichever report says more has been spent, because the
+summary's rolling bucket can answer "full" however much has been spent. Both reads
+are repeated on every accounting host, and the worst statement wins: Google runs two
+Code Assist deployments and they disagree — one can answer "full" for every model of
+a family while the other, the one Antigravity itself talks to, reports the same
+models 90 % gone, so reading whichever host answered first showed a comfortable 0 %
+next to an allowance that was nearly spent. Three things that look like data are not:
+a bucket marked `disabled` states no window (with the weekly limit spent, Google
+reports the five-hour one as full and disables it, so counting it would read as a
+free five hours), a per-model `quotaInfo` that states its reset but no
+`remainingFraction` is a **spent** allowance — the service drops the fraction once
+nothing is left — and a per-model figure whose reset is a week out is the weekly
+bucket, not the rolling one. A provider that states nothing says so instead of
+inventing a figure. The card keeps one row per account; the composer chip
+integrates the pool into one figure per window.
 
 A reset is stated by how far off it is, on every route: **minutes** within the hour
 (`40 分钟后重置`), **hours** within the day (`4 小时后重置`), and the date beyond that

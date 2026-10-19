@@ -49,6 +49,7 @@ import {
   mergeQuotaWindows,
   parseAntigravityModels,
   parseAntigravityQuotaSummary,
+  quotaSpentPercent,
   geminiTierId,
   wireIdFor,
 } from './antigravity-catalog.js'
@@ -601,6 +602,73 @@ function displayNameOf(id: string, stated?: string): string {
   return id.split('-').map((word) => word.length === 0 ? word : word[0]?.toUpperCase() + word.slice(1)).join(' ')
 }
 
+/** One model's stated allowance, as `fetchAvailableModels` reports it. */
+export type AntigravityQuota = { remainingFraction?: number, resetTime?: string }
+
+/** Every model's stated allowance, by model id. */
+export type AntigravityQuotaMap = Map<string, AntigravityQuota>
+
+/**
+ * Read every configured host's per-model allowance, keeping the worst-spent figure.
+ *
+ * Google runs two Code Assist deployments and they do not agree: for one account the
+ * production host answers "full" for every Gemini model while the daily host — the one
+ * Antigravity itself talks to — reports the same models nearly spent. Asking a single host
+ * and taking whatever it said is how a card ends up showing a comfortable 0% next to an
+ * allowance that is 90% gone.
+ *
+ * @param input - bearer, project, and fetch configuration.
+ * @returns the worst-spent statement per model id.
+ * @throws {LlmError} when no host answers.
+ */
+export async function fetchAntigravityQuotas(input: {
+  accessToken: string
+  projectId: string
+  fetchFn: FetchFn
+  signal?: AbortSignal
+  origins?: readonly string[]
+}): Promise<AntigravityQuotaMap> {
+  const origins = input.origins ?? [ANTIGRAVITY_BASE_URL, ANTIGRAVITY_PROD_URL]
+  const quotas: AntigravityQuotaMap = new Map()
+  let answered = false
+  let lastError: unknown
+  for (const origin of origins) {
+    let payload: AntigravityModelsResponse
+    try {
+      payload = await callInternal<AntigravityModelsResponse>(
+        'fetchAvailableModels',
+        { project: input.projectId },
+        input.accessToken,
+        { fetchFn: input.fetchFn, origins: [origin] },
+        input.signal,
+      )
+    } catch (error: unknown) {
+      lastError = error
+      continue
+    }
+    answered = true
+    for (const [id, model] of Object.entries(payload.models ?? {})) {
+      const quota = (model as { quotaInfo?: AntigravityQuota } | null)?.quotaInfo
+      if (quota === undefined) continue
+      const stated = quotas.get(id)
+      if (stated !== undefined && spentPercentOfQuota(stated) >= spentPercentOfQuota(quota)) continue
+      quotas.set(id, quota)
+    }
+  }
+  if (!answered) {
+    throw lastError instanceof Error
+      ? lastError
+      : new LlmError('Antigravity has no host answering fetchAvailableModels', 'MALFORMED_RESPONSE')
+  }
+  return quotas
+}
+
+/** How much of one model's allowance has been spent, counting an unstated remainder as spent. */
+function spentPercentOfQuota(quota: AntigravityQuota): number {
+  const stated = quotaSpentPercent({ remaining: quota })
+  return stated ?? 0
+}
+
 /**
  * Read the account's live model catalog.
  *
@@ -617,7 +685,7 @@ export async function fetchAntigravityModels(input: {
   signal?: AbortSignal
   /** Origins to try in order, when the caller must not inherit one request base. */
   origins?: readonly string[]
-}): Promise<{ entries: CatalogEntry[], quotas: Map<string, { remainingFraction?: number, resetTime?: string }>, raw: Record<string, unknown> }> {
+}): Promise<{ entries: CatalogEntry[], quotas: AntigravityQuotaMap, raw: Record<string, unknown> }> {
   const payload = await callInternal<AntigravityModelsResponse>(
     'fetchAvailableModels',
     { project: input.projectId },
@@ -635,9 +703,9 @@ export async function fetchAntigravityModels(input: {
   if (entries.length === 0) {
     throw new LlmError('Antigravity models endpoint returned no agent-callable model', 'MALFORMED_RESPONSE')
   }
-  const quotas = new Map<string, { remainingFraction?: number, resetTime?: string }>()
+  const quotas: AntigravityQuotaMap = new Map()
   for (const [id, model] of Object.entries(models)) {
-    const quota = (model as { quotaInfo?: { remainingFraction?: number, resetTime?: string } } | null)?.quotaInfo
+    const quota = (model as { quotaInfo?: AntigravityQuota } | null)?.quotaInfo
     if (quota !== undefined) quotas.set(id, quota)
   }
   return { entries, quotas, raw: models }
@@ -1365,7 +1433,7 @@ export class AntigravityAdapter extends LlmAdapter {
     runtime: { fetchFn: FetchFn, origins: readonly string[] },
   ): Promise<UsageWindow[]> {
     try {
-      const { quotas } = await fetchAntigravityModels({
+      const quotas = await fetchAntigravityQuotas({
         accessToken,
         projectId,
         fetchFn: runtime.fetchFn,
@@ -1391,17 +1459,19 @@ export class AntigravityAdapter extends LlmAdapter {
   /**
    * Read the allowance summary from every accounting host and union the groups.
    *
-   * The hosts do not agree on what the summary contains: one answers 200 while naming only
-   * some of the groups — the daily host stopped stating the Gemini group, which left the
-   * card showing Claude alone and hid a nearly spent Gemini weekly allowance. A 200 is
-   * therefore not proof of a complete answer, so each host is asked until every window the
-   * card can show has been named; the first host to state a given window keeps it, and a
-   * host that refuses or is down is skipped rather than failing the read.
+   * The hosts do not agree, either on which groups the summary names or on what it says
+   * about them: one answers 200 while naming only some of the groups — the daily host
+   * stopped stating the Gemini group, which left the card showing Claude alone and hid a
+   * nearly spent Gemini weekly allowance — and the two report different figures for the
+   * same bucket. A 200 is therefore not proof of a complete or a truthful answer, so each
+   * host is asked until every window the card can show has been named, and the
+   * more-spent statement of a window wins: a host still saying "full" while another
+   * reports the allowance nearly gone is the stale one.
    *
    * @param accessToken - bearer for the account.
    * @param projectId - the account's project.
    * @param runtime - fetch plus the origins to try, most authoritative first.
-   * @returns the union of the windows the hosts stated, in card order.
+   * @returns the worst statement of each window the hosts named, in card order.
    */
   private async summaryWindows(
     accessToken: string,
@@ -1414,7 +1484,9 @@ export class AntigravityAdapter extends LlmAdapter {
       try {
         const payload = await this.summary(accessToken, projectId, { fetchFn: runtime.fetchFn, origins: [origin] })
         for (const window of parseAntigravityQuotaSummary(payload)) {
-          if (!found.has(window.label)) found.set(window.label, window)
+          const stated = found.get(window.label)
+          if (stated !== undefined && (stated.usedPercent ?? 0) >= (window.usedPercent ?? 0)) continue
+          found.set(window.label, window)
         }
       } catch {
         // This host had nothing to say; the ones after it still might.

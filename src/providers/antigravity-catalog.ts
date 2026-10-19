@@ -421,7 +421,7 @@ function usedPercentOf(raw: unknown): number | undefined {
  * @param raw - one bucket or one model's `quotaInfo`.
  * @returns the percentage spent, or undefined when the object states nothing.
  */
-function spentPercentOf(raw: unknown): number | undefined {
+export function quotaSpentPercent(raw: unknown): number | undefined {
   const stated = usedPercentOf(raw)
   if (stated !== undefined) return stated
   const target = quotaTargetOf(raw)
@@ -490,7 +490,7 @@ export function parseAntigravityQuotaSummary(payload: unknown): UsageWindow[] {
       if (!weekly && !rolling) continue
       const key = weekly ? `${family}_weekly` : family
       if (found.has(key)) continue
-      const usedPercent = spentPercentOf(rawBucket)
+      const usedPercent = quotaSpentPercent(rawBucket)
       if (usedPercent === undefined) continue
       const resetsAt = resetOf(rawBucket)
       found.set(key, { label: key, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
@@ -532,7 +532,7 @@ export function parseAntigravityModelQuota(payload: unknown, now: number = Date.
         : /claude|opus|sonnet|gpt-oss|gpt_oss/.test(haystack) ? 'claude'
           : undefined
       if (family === undefined) continue
-      const usedPercent = spentPercentOf(quota)
+      const usedPercent = quotaSpentPercent(quota)
       if (usedPercent === undefined) continue
       // An entry that names a window says which bucket it means; one that names none states
       // whichever bucket the service is enforcing, which its reset tells apart.
