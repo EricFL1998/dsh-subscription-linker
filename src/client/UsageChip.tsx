@@ -69,6 +69,16 @@ import type { AccountReading, ChipBalance, ChipReading, ModelSelectionProjection
 /** How often a visible chip refreshes its figures. */
 const REFRESH_INTERVAL_MS = 60_000
 
+/**
+ * The panel's placement before its first measurement.
+ *
+ * `useAnchoredPosition` reports `null` until it has run, and the panel must be
+ * mounted for that run to read its real size. It renders at the origin and
+ * hidden for that one layout pass instead of not rendering at all, so the
+ * measurement and the first paint agree.
+ */
+const HIDDEN_POSITION = { left: 0, top: 0, visibility: 'hidden' } as const
+
 
 /**
  * The composer's usage chip.
@@ -413,13 +423,17 @@ function ChipFrame({
         {children}
         {cells}
       </button>
-      {open && position !== null && createPortal(
+      {open && createPortal(
         <div
           ref={setPanelRef}
           className="dsh-subscription-usage-chip-panel"
           role="dialog"
           aria-label={panelLabel}
-          style={position}
+          // The first measurement happens in the layout effect that opened the
+          // panel, so it needs the panel mounted to read its real size. Until a
+          // position exists the panel is mounted but invisible, which keeps the
+          // clamp honest without flashing it at the origin.
+          style={position ?? HIDDEN_POSITION}
         >
           {panel}
         </div>,

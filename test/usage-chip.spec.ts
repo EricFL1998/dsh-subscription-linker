@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { accountReadingsOf, balanceOf, formatBalance, formatReset, mergeAccountWindows, pickWindow, providerOf, readingOf, shortLabel, shortWindow, windowName } from '../src/client/chip-helpers.js'
+import { usageChipCss } from '../src/client/styles.js'
 import type { AccountReading } from '../src/client/chip-helpers.js'
 import type { ProviderUsage, UsageWindow } from '../src/protocol.js'
 
@@ -316,5 +317,39 @@ describe('formatReset', () => {
 
   test('no stated reset formats as nothing', () => {
     assert.equal(formatReset(undefined, now), undefined)
+  })
+})
+
+describe('the chip panel stylesheet', () => {
+  /** The declaration block of one selector, for a targeted assertion. */
+  function blockOf(selector: string): string {
+    const at = usageChipCss.indexOf(`${selector} {`)
+    assert.notEqual(at, -1, `${selector} is missing from the chip stylesheet`)
+    const end = usageChipCss.indexOf('}', at)
+    return usageChipCss.slice(at, end)
+  }
+
+  test('positions the panel fixed, because its coordinates are viewport-relative', () => {
+    // The chip portals the panel to the body and places it from the trigger's
+    // getBoundingClientRect, so the panel MUST be fixed. An absolute panel that
+    // also carries an anchor offset collapses, which is what shipped once.
+    const panel = blockOf('.dsh-subscription-usage-chip-panel')
+    assert.match(panel, /position:\s*fixed/)
+    assert.doesNotMatch(panel, /position:\s*absolute/)
+    // An anchor box would fight the inline left/top the hook writes.
+    assert.doesNotMatch(panel, /\bbottom:/)
+    assert.doesNotMatch(panel, /\bright:/)
+  })
+
+  test('stacks above the shell modal layer', () => {
+    const panel = blockOf('.dsh-subscription-usage-chip-panel')
+    const z = /z-index:\s*(\d+)/.exec(panel)
+    assert.ok(z !== null, 'the panel declares no z-index')
+    // The shell's modal layer is 1000; a portaled panel must clear it.
+    assert.ok(Number(z[1]) > 1000, `panel z-index ${z[1]} does not clear the modal layer`)
+  })
+
+  test('bounds its width to the viewport so a narrow window cannot overflow it', () => {
+    assert.match(blockOf('.dsh-subscription-usage-chip-panel'), /max-width:/)
   })
 })

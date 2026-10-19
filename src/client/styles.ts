@@ -347,14 +347,17 @@ export const usageChipCss = `
   border-top: 0;
 }
 .dsh-subscription-usage-chip-panel {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  z-index: 20;
+  /* The chip portals this to the body and positions it from the trigger's
+     viewport rect, so the coordinates useAnchoredPosition returns are
+     viewport-relative: the panel must be fixed. It sits above the shell's
+     modal layer, which is z-index 1000. */
+  position: fixed;
+  z-index: 1100;
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 180px;
+  max-width: min(360px, calc(100vw - 24px));
   padding: 12px 14px;
   border: 1px solid var(--dsw-alias-border-l2, #ffffff1f);
   border-radius: var(--dsw-radius-md, 10px);
