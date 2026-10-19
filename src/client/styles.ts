@@ -28,11 +28,14 @@ export const subscriptionsCss = `
   font-family: inherit;
   font-size: 13px;
   line-height: 1.5;
-  /* Native controls (checkbox, dialog) follow the host theme, not the OS. */
+  /* Native controls (checkbox, dialog) follow the host theme, not the OS. Dark
+     is signalled by the alias tokens themselves: body[data-ds-dark-theme]
+     only remaps the --dsw-alias-* values at the root (design-platform.css), so
+     a scope reading the tokens is already themed and needs no selector of its
+     own. color-scheme names the palette for the *platform* control chrome —
+     set per scope rather than inherited, the way the shell does for its own
+     forced-light surfaces. */
   color-scheme: light;
-}
-body[data-ds-dark-theme] ${scope} {
-  color-scheme: dark;
 }
 .dsh-subscription-manager {
   box-sizing: border-box;
@@ -120,7 +123,7 @@ ${scope} input[type="checkbox"].dsh-subscription-switch::after {
 }
 ${scope} input[type="checkbox"].dsh-subscription-switch:checked {
   border-color: transparent;
-  background: var(--dsw-alias-state-success-primary, var(--dsw-alias-brand-primary, #067647));
+  background: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary, #067647));
 }
 ${scope} input[type="checkbox"].dsh-subscription-switch:checked::after {
   transform: translateX(14px);
@@ -310,7 +313,7 @@ export const usageChipCss = `
   background: var(--dsw-alias-interactive-bg-hover, #ffffff14);
 }
 .dsh-subscription-usage-chip-trigger:focus-visible {
-  outline: 2px solid var(--dsw-alias-border-focus, #4d6bfe);
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 1px;
 }
 .dsh-subscription-usage-chip-label {
@@ -337,7 +340,7 @@ export const usageChipCss = `
   gap: 6px;
   /* A hairline between accounts, so two sign-ins read as two groups not one run. */
   padding-top: 6px;
-  border-top: 1px solid var(--dsw-alias-border-secondary, #ffffff14);
+  border-top: 1px solid var(--dsw-alias-border-l2, #ffffff14);
 }
 .dsh-subscription-usage-chip-account:first-of-type {
   padding-top: 0;
@@ -353,7 +356,7 @@ export const usageChipCss = `
   gap: 10px;
   min-width: 180px;
   padding: 12px 14px;
-  border: 1px solid var(--dsw-alias-border-secondary, #ffffff1f);
+  border: 1px solid var(--dsw-alias-border-l2, #ffffff1f);
   border-radius: var(--dsw-radius-md, 10px);
   background: var(--dsw-alias-bg-layer-2, #26262a);
   box-shadow: var(--dsw-elevation-prominent, 0 12px 32px #0007);
@@ -399,6 +402,124 @@ export const usageChipCss = `
 `
 
 /**
+ * The Models-page provider-card block's stylesheet.
+ *
+ * Scoped to its own root so nothing reaches the section's own cards. It borrows
+ * the section page's own dot and meter geometry so a subscription card reads as
+ * one row of the same family rather than a foreign design. Tokens carry
+ * fallbacks for hosts that define none.
+ */
+export const providerCardCss = `
+.dsh-subscription-models-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-subscription-models-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dsh-subscription-models-card-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--dsw-alias-label-dimmed);
+  border-radius: 50%;
+  background: transparent;
+}
+.dsh-subscription-models-card-dot-live {
+  border-color: var(--dsw-alias-state-success-primary, #067647);
+  background: var(--dsw-alias-state-success-primary, #067647);
+}
+.dsh-subscription-models-card-dot-busy {
+  border-color: var(--dsw-alias-state-warn-primary, #f5a524);
+  background: var(--dsw-alias-state-warn-primary, #f5a524);
+}
+.dsh-subscription-models-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-subscription-models-card-state {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-subscription-models-card-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dsh-subscription-models-card-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.dsh-subscription-models-card-meterHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.dsh-subscription-models-card-detail {
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-subscription-models-card-track {
+  display: block;
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: #8a8f9826;
+  box-shadow: inset 0 0 0 1px #8a8f9833;
+  overflow: hidden;
+}
+.dsh-subscription-models-card-fill {
+  display: block;
+  height: 100%;
+  background: var(--dsw-alias-state-success-primary, #067647);
+}
+.dsh-subscription-models-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.dsh-subscription-models-card-actions button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.dsh-subscription-models-card-actions button:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-3));
+}
+.dsh-subscription-models-card-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+`
+
+/**
  * The composer's quick-mode button stylesheet.
  *
  * It renders in the composer's own control row — the same row as the model selector —
@@ -426,7 +547,7 @@ export const fastModeCss = `
 }
 /* A click has to look like one, even before the selection lands. */
 .dsh-subscription-fast-mode:active {
-  background: var(--dsw-alias-interactive-bg-pressed, #ffffff2e);
+  background: var(--dsw-alias-interactive-bg-active, #ffffff2e);
 }
 .dsh-subscription-fast-mode[data-pending="true"] {
   opacity: 0.7;
@@ -438,7 +559,7 @@ export const fastModeCss = `
   color: var(--dsw-alias-state-error-primary, #b42318);
 }
 .dsh-subscription-fast-mode:focus-visible {
-  outline: 2px solid var(--dsw-alias-border-focus, #4d6bfe);
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 1px;
 }
 /* Off: the bolt is dim, so an available mode reads as an invitation, not a state. */
@@ -448,8 +569,8 @@ export const fastModeCss = `
 /* On: the bolt takes the accent and glows, which is the only thing distinguishing the
    fast variant from its base — both answer with the same model name. */
 .dsh-subscription-fast-mode[data-active="true"] .dsh-subscription-fast-mode-bolt {
-  color: var(--dsw-alias-state-warning-primary, #f5a524);
-  filter: drop-shadow(0 0 6px var(--dsw-alias-state-warning-primary, #f5a52455));
+  color: var(--dsw-alias-state-warn-primary, #f5a524);
+  filter: drop-shadow(0 0 6px var(--dsw-alias-state-warn-primary, #f5a52455));
 }
 .dsh-subscription-fast-mode-reason {
   max-width: 14ch;

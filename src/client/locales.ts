@@ -112,6 +112,10 @@ export const en = {
   actionFailed: 'Action failed: {message}',
   usageChipTitle: '{provider} subscription usage',
   usageChipFull: '{provider} allowance',
+  fastModeOn: 'Fast mode is on; press to go back to the standard model',
+  fastModeOff: 'Fast mode: switch to this model’s fast variant',
+  fastModeRefused: 'The switch was refused',
+  fastModeUnavailable: 'the model directory is unavailable on this host',
 } as const
 
 /** The Subscriptions namespace key union. */
@@ -223,4 +227,8 @@ export const zh = {
   actionFailed: '操作失败：{message}',
   usageChipTitle: '{provider} 订阅用量',
   usageChipFull: '{provider} 额度',
+  fastModeOn: '已开启快速模式；按下回到标准模型',
+  fastModeOff: '快速模式：切换到此模型的快速变体',
+  fastModeRefused: '切换被拒绝',
+  fastModeUnavailable: '此宿主上的模型目录不可用',
 } satisfies Record<SubscriptionsKey, string>

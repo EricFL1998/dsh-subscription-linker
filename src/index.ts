@@ -31,6 +31,7 @@ import {
   resolveOAuthHost,
 } from './constants.js'
 import { proxiedFetch } from './http.js'
+import { SETTINGS_NS } from './protocol.js'
 import { AUTO_PROVIDER_ID, createAutoProvider } from './providers/auto.js'
 import { createAntigravityProvider } from './providers/antigravity.js'
 import { createGrokProvider } from './providers/grok.js'
@@ -301,6 +302,35 @@ export function apply(ctx: Context, config: Config = {}): void {
     const handle = ctx.llm.registerAdapter([route.id], route.adapter)
     handles.set(route.id, handle)
     ctx.effect(() => () => handle(), `${name}: ${route.id} provider route`)
+  }
+  // Declare the same routes in the configurable-provider directory, so the
+  // Models settings page renders one card per route instead of treating every
+  // subscription route as foreign. The settings namespace is the Cordis row id
+  // that mounted this plugin (the settings service projects a plugin's Config
+  // under it), which is also the key the Models page dispatches its
+  // provider-card extension slot with — the seat the browser half's Connect
+  // block registers into. `settingsPath` is empty because the whole section is
+  // this plugin's own configuration: the extension owns the card's content
+  // rather than pointing at a nested profile. `auto` is excluded: it is a chain
+  // over the other routes, not a sign-in of its own, so it gets no card.
+  const settingsNs = SETTINGS_NS
+  const directoryEntries = registry.ids()
+    .filter((id) => id !== AUTO_PROVIDER_ID)
+    .map((id) => {
+      const route = registry.get(id)
+      if (route === undefined) return undefined
+      return {
+        provider: route.id,
+        displayName: route.displayName,
+        settingsNs,
+        settingsPath: [] as readonly string[],
+        declared: false,
+      }
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
+  if (directoryEntries.length > 0) {
+    const directory = ctx.llm.registerConfigurableProviders(directoryEntries)
+    ctx.effect(() => () => directory(), `${name}: provider directory`)
   }
   // A non-subscription provider's balance is read by cc-switch's query against the
   // provider's own base URL (the balance endpoint lives beside its OpenAI-compatible

@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
 import { apply, Config, IMPLEMENTED_PROVIDER_IDS, inject, name } from '../src/index.js'
+import { SETTINGS_NS } from '../src/protocol.js'
 import { KimiAdapter } from '../src/providers/kimi.js'
 
 let home: string
@@ -36,10 +37,17 @@ interface Registration {
 }
 
 /** A stub cordis context recording what the plugin registers. */
-function stubContext(): { ctx: Context, registrations: Registration[], warnings: string[], injections: string[][] } {
+function stubContext(): {
+  ctx: Context
+  registrations: Registration[]
+  warnings: string[]
+  injections: string[][]
+  directory: { provider: string, displayName: string, settingsNs: string, settingsPath: readonly string[] }[][]
+} {
   const registrations: Registration[] = []
   const warnings: string[] = []
   const injections: string[][] = []
+  const directory: { provider: string, displayName: string, settingsNs: string, settingsPath: readonly string[] }[][] = []
   const ctx = {
     logger: {
       warn: (message: string) => { warnings.push(message) },
@@ -74,9 +82,18 @@ function stubContext(): { ctx: Context, registrations: Registration[], warnings:
       // does not serve models, so Auto has nothing to chain to.
       listProviders: () => [],
       listModels: async () => [],
+      // The configurable-provider directory the Models page reads. The stub
+      // records what the plugin declared so the settings-namespace contract can
+      // be asserted without a client.
+      registerConfigurableProviders: (entries: readonly { provider: string, displayName: string, settingsNs: string, settingsPath: readonly string[] }[]) => {
+        directory.push([...entries])
+        const handle = (() => undefined) as (() => void) & { replace: (next: readonly unknown[]) => void }
+        handle.replace = () => undefined
+        return handle
+      },
     },
   }
-  return { ctx: ctx as unknown as Context, registrations, warnings, injections }
+  return { ctx: ctx as unknown as Context, registrations, warnings, injections, directory }
 }
 
 describe('plugin identity', () => {
@@ -119,6 +136,21 @@ describe('apply', () => {
     apply(ctx, { providers: ['grok'] })
     // `auto` spans whatever is registered, so it follows the configured routes.
     assert.deepEqual(registrations.map((entry) => entry.providers), [['auto'], ['grok']])
+  })
+
+  test('declares each route in the Models directory under the plugin settings namespace', () => {
+    const { ctx, directory } = stubContext()
+    apply(ctx, { providers: ['kimi', 'grok'] })
+    assert.equal(directory.length, 1)
+    const entries = directory[0] ?? []
+    // `auto` is a chain over the other routes, not a sign-in, so it gets no card.
+    assert.deepEqual(entries.map((entry) => entry.provider), ['kimi', 'grok'])
+    // The page dispatches its provider-card seat by this namespace, and the
+    // settings service projects a plugin's Config under its Cordis row id — so
+    // both sides must use the same constant.
+    assert.deepEqual([...new Set(entries.map((entry) => entry.settingsNs))], [SETTINGS_NS])
+    assert.deepEqual(entries.map((entry) => entry.settingsPath), [[], []])
+    assert.ok(entries.every((entry) => entry.displayName.length > 0))
   })
 
   test('a configured route this build cannot serve is reported', () => {

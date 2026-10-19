@@ -24,10 +24,13 @@ import type { FastModeButtonInjected } from './FastModeButton.js'
 
 import { UsageChip } from './UsageChip.js'
 import type { UsageChipInjected } from './UsageChip.js'
+import { ProviderCardExtras } from './ProviderCardExtras.js'
+import type { ProviderCardExtrasInjected } from './ProviderCardExtras.js'
 import { createSubscriptionsCall, createAccountBalanceCall, createCcSwitchBalanceCall } from './subscriptions-rpc.js'
 import type { AccountBalanceCall } from './subscriptions-rpc.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
+import { SETTINGS_NS } from '../protocol.js'
 
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
 export type { FastModeButtonInjected } from './FastModeButton.js'
@@ -58,6 +61,29 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * one entry, which is what puts it at the model selector's left.
      */
     'conversation.input.right': { kind: 'list', scope: 'session' }
+    /**
+     * One provider card's adapter extension area on the Models settings page.
+     *
+     * Declared by the Models section at runtime and dispatched with
+     * `entryKey = settingsNs`, so a plugin whose routes share one settings
+     * namespace registers once under that namespace and receives every card of
+     * the family. The owning package ships no type declarations a plugin can
+     * see, so the seat is declared here as the shell declares it — a keyed,
+     * root-scoped slot — with the owner share the page passes to each
+     * occurrence.
+     */
+    'settings.models.provider-card': {
+      kind: 'keyed'
+      scope: 'root'
+      owner: {
+        /** The card's directory row (route id and display name). */
+        provider: { provider: string; displayName: string }
+        /** Whether any layer configures this provider. */
+        configured: boolean
+        /** Whether the row's referenced api-key credential is configured. */
+        keyConfigured: boolean
+      }
+    }
   }
 
   /**
@@ -111,11 +137,15 @@ interface ModelDirectories {
 
 /**
  * Required services: `slots` carries the registration seat, `connection` the
- * RPC caller, `locale` the copy dictionaries, and `modelDirectories` the picker's
- * per-session model directory (written when the quick-mode button routes to a fast
- * variant).
+ * RPC caller, and `locale` the copy dictionaries.
+ *
+ * `modelDirectories` is deliberately NOT in this list: the fiber's `inject` is
+ * wait semantics, and the quick-mode button is the only consumer, which reads
+ * the resolver lazily with `ctx.get` (below) and renders nothing when the host
+ * exposes none. Declaring it would park the whole browser half on a service
+ * whose presence is not guaranteed, taking the settings page with it.
  */
-export const inject = ['slots', 'connection', 'locale', 'modelDirectories']
+export const inject = ['slots', 'connection', 'locale']
 
 /**
  * Register the Subscriptions settings section.
@@ -171,9 +201,23 @@ export function apply(ctx: ClientContext): void {
     inject: (sessionId?: string): FastModeButtonInjected => ({
       call,
       isOwnProvider: (provider: string) => OWN_PROVIDER_IDS.has(provider),
+      t: t as unknown as FastModeButtonInjected['t'],
       modelDirectory: modelDirectoryFor(modelDirectories, sessionId),
     }),
   }, FastModeButton))
+
+  // The Models settings page declares a keyed card-extension seat per provider
+  // row, dispatched with `entryKey = settingsNs`. The node half declares every
+  // route under the shared namespace `subscriptions`, so one registration here
+  // gives each of them a Connect block beside the section's own editor.
+  ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
+    name: 'settings.models.provider-card',
+    key: SETTINGS_NS,
+    inject: (): ProviderCardExtrasInjected => ({
+      call,
+      t: t as unknown as ProviderCardExtrasInjected['t'],
+    }),
+  }, ProviderCardExtras))
 }
 
 /**

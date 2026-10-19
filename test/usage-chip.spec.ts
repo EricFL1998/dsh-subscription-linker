@@ -11,8 +11,8 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { accountReadingsOf, balanceOf, formatBalance, formatReset, mergeAccountWindows, pickWindow, providerOf, readingOf, shortLabel, shortWindow, windowName } from '../src/client/UsageChip.js'
-import type { AccountReading } from '../src/client/UsageChip.js'
+import { accountReadingsOf, balanceOf, formatBalance, formatReset, mergeAccountWindows, pickWindow, providerOf, readingOf, shortLabel, shortWindow, windowName } from '../src/client/chip-helpers.js'
+import type { AccountReading } from '../src/client/chip-helpers.js'
 import type { ProviderUsage, UsageWindow } from '../src/protocol.js'
 
 /** One account's usage with the given windows. */

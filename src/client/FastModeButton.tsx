@@ -27,12 +27,15 @@ import type { SubscriptionsCall } from './subscriptions-rpc.js'
 import type { ModelSelectionProjection } from './UsageChip.js'
 import { providerOf } from './UsageChip.js'
 import { fastModeCss } from './styles.js'
+import type { SubscriptionsKey } from './locales.js'
 
 /** Injected props the button is registered with. */
 export interface FastModeButtonInjected {  /** The plugin's own RPC caller, for the one `model-variants` read. */
   call: SubscriptionsCall
   /** Whether the provider is one this plugin serves. */
   isOwnProvider: (provider: string) => boolean
+  /** Copy for the active locale (title and refusal reason). */
+  t: (key: SubscriptionsKey, values?: Record<string, string | number>) => string
   /**
    * The session's model directory, when the host exposes one.
    *
@@ -61,7 +64,7 @@ const VARIANT_READ_INTERVAL_MS = 1_000
  * @param props - injected RPC caller, directory, and the session standard kit.
  * @returns the button, or null when this model has no fast variant.
  */
-export function FastModeButton({ call, isOwnProvider, modelDirectory, useProjection }: FastModeButtonInjected & SessionStandardProps): ReactNode {
+export function FastModeButton({ call, isOwnProvider, modelDirectory, t, useProjection }: FastModeButtonInjected & SessionStandardProps): ReactNode {
   const [pair, setPair] = useState<{ rung: string } | undefined>(undefined)
   // A switch that the host refuses must not look like a dead button: the reason is kept
   // and shown, because the only alternative is a control that silently does nothing.
@@ -127,12 +130,10 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
   const active = (selection?.next ?? selection?.lastUsed)?.reasoningEffort === pair.rung
   const target = model
 
-  const base = active
-    ? 'Fast mode is on; press to go back to the standard model'
-    : 'Fast mode: switch to this model’s fast variant'
+  const base = active ? t('fastModeOn') : t('fastModeOff')
   const title = failure === undefined
     ? base
-    : `${base}\nThe switch was refused — ${`${failure.code ?? ''} ${failure.message}`.trim()}`
+    : `${base}\n${t('fastModeRefused')} — ${`${failure.code ?? ''} ${failure.message}`.trim()}`
 
   return (
     <>
@@ -155,7 +156,7 @@ export function FastModeButton({ call, isOwnProvider, modelDirectory, useProject
           // default. The model id is never swapped, so this cannot strand the selection.
           const next = active ? { provider, model: target } : { provider, model: target, reasoningEffort: pair.rung }
           if (modelDirectory?.select === undefined) {
-            setFailure({ message: 'the model directory is unavailable on this host' })
+            setFailure({ message: t('fastModeUnavailable') })
             setPending(false)
             return
           }

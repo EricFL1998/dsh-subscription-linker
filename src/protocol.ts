@@ -13,6 +13,19 @@
 /** Prefix of every RPC method this plugin serves. */
 export const RPC_PREFIX = 'subscription-oauth.'
 
+/**
+ * The settings namespace the Models page keys this plugin's provider cards by.
+ *
+ * The settings service projects a plugin's `Config` schema under the Cordis row
+ * id that mounted it (`settings/src/index.ts`: `ns = entry.options.id`), and the
+ * Models section dispatches `settings.models.provider-card` with that same
+ * namespace as `entryKey`. This constant therefore names the row id declared in
+ * `cordis.patch.yml`; the two must stay in step, or the Models page renders the
+ * routes with no subscription block (the standalone Subscriptions page is
+ * unaffected).
+ */
+export const SETTINGS_NS = 'llm-subscription-oauth'
+
 /** Endpoints the Settings page may call. */
 export const RPC_ENDPOINTS = [
   'status',
