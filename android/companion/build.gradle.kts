@@ -5,6 +5,21 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization") version "2.1.10"
 }
 
+// 伴生 APK 的版本跟随插件版本（仓库根 package.json），这样 Release tag、
+// APK 文件名、Android versionName 三处永远对齐，不再出现 tag 0.17.17 / APK 1.0.1。
+val pluginVersion: String = run {
+    @Suppress("UNCHECKED_CAST")
+    val pkg = groovy.json.JsonSlurper()
+        .parse(rootProject.file("../../package.json")) as Map<String, Any?>
+    pkg["version"] as String
+}
+val pluginVersionCode: Int = run {
+    val parts = pluginVersion.split("-").first().split(".").map { it.toIntOrNull() ?: 0 }
+    (parts.getOrElse(0) { 0 } * 10_000) +
+        (parts.getOrElse(1) { 0 } * 100) +
+        parts.getOrElse(2) { 0 }
+}
+
 android {
     namespace = "com.dsh.mobile.dsh_plugin_subscription_oauth"
     compileSdk = 35
@@ -13,10 +28,9 @@ android {
         applicationId = "com.dsh.mobile.dsh_plugin_subscription_oauth"
         minSdk = 26
         targetSdk = 35
-        // 1.0.1：补上 `settings.section#subscriptions` 的原生设置页注册，
-        // 装了伴生 APK 后设置页不再回退 Web UI。
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = pluginVersionCode
+        versionName = pluginVersion
+        manifestPlaceholders["dshPluginVersion"] = pluginVersionCode.toString()
     }
 
     compileOptions {
