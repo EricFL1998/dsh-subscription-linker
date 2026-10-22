@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
@@ -31,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.deepseek.dsh.plugin.nativesdk.design.DshPanel
 import com.deepseek.dsh.plugin.nativesdk.host.PluginHostApi
 import com.deepseek.dsh.plugin.nativesdk.host.PluginRpcHost
 import com.deepseek.dsh.plugin.nativesdk.pages.PageContent
@@ -323,13 +322,9 @@ private fun SubscriptionProviderCard(
     var addingModel by remember(provider.id) { mutableStateOf(false) }
     var modelDraft by remember(provider.id) { mutableStateOf("") }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = theme.shapeCard,
-        colors = CardDefaults.cardColors(containerColor = theme.colorSurfaceVariant),
-    ) {
+    DshPanel(theme = theme) {
         val context = LocalContext.current
-        Column(modifier = Modifier.padding(theme.spacingUnit * 2)) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
