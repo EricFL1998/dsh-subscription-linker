@@ -44,3 +44,9 @@ AAR 解出）。运行时由宿主 App 以父优先 ClassLoader 提供唯一一�
 - 资产名：`dsh-plugin-subscription-oauth-companion-<js-version>.apk`
   （例如 `dsh-plugin-subscription-oauth-companion-0.17.17.apk`）；
 - 更新 APK 时新建 tag + Release，不覆盖已有资产。
+
+## 身份
+
+- `dsh.plugin.id` 直接用 APK 包名 `com.dsh.mobile.dsh_plugin_subscription_oauth`，不再额外起 `changfenhuang.*` 命名空间；
+- 与 JS 配对的键仍然是 `dsh.plugin.jsPackage = dsh-plugin-subscription-oauth`；
+- 页面接管键是 `<jsPackage>#<PageEntry.id>`，即 `dsh-plugin-subscription-oauth#subscriptions`。

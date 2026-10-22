@@ -29,7 +29,8 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class SubscriptionNativePlugin : DshUiPlugin {
     override val descriptor = PluginDescriptor(
-        id = "changfenhuang.subscription",
+        // 伴生身份直接用 APK 包名，不再额外起一个 namespace。
+        id = "com.dsh.mobile.dsh_plugin_subscription_oauth",
         name = "订阅",
         version = 1,
         capabilities = setOf(

@@ -139,7 +139,7 @@ private fun SubscriptionSettingsContent(
     LaunchedEffect(refreshEvents) {
         refreshEvents?.collect { componentId ->
             if (componentId == "dsh-plugin-subscription-oauth#subscriptions" ||
-                componentId == "changfenhuang.subscription#subscriptions"
+                componentId == "com.dsh.mobile.dsh_plugin_subscription_oauth#subscriptions"
             ) refresh()
         }
     }

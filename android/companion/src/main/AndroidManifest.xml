@@ -11,7 +11,7 @@
             <meta-data android:name="dsh.plugin.apiVersion" android:value="1" />
             <meta-data android:name="dsh.plugin.minAppVersion" android:value="12" />
             <meta-data android:name="dsh.plugin.version" android:value="${dshPluginVersion}" />
-            <meta-data android:name="dsh.plugin.id" android:value="changfenhuang.subscription" />
+            <meta-data android:name="dsh.plugin.id" android:value="com.dsh.mobile.dsh_plugin_subscription_oauth" />
             <meta-data android:name="dsh.plugin.name" android:value="订阅" />
             <!-- 与 JS 插件 package.json 的 name 一致：App 据此配对并连带安装 JS 插件。 -->
             <meta-data android:name="dsh.plugin.jsPackage" android:value="dsh-plugin-subscription-oauth" />
