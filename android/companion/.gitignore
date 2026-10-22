@@ -1,0 +1,7 @@
+# 构建产物与本机配置
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+*.apk
