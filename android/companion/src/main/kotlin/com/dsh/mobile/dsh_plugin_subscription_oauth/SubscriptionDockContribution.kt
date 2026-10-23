@@ -153,12 +153,15 @@ private suspend fun loadDockData(rpc: PluginRpcHost, modelId: String): DockData?
         balanceData(rpc)?.let { return it }
     }
     if (provider != null) {
-        usageData(rpc, status, provider)?.let { return it }
+        // 当前模型属于插件 provider：只展示它的额度窗口（5h / 7d）。
+        // 额度 RPC 失败（如 token 失效）时返回 null 隐藏胶囊，绝不退回其它 provider 的余额。
+        return usageData(rpc, status, provider)
     }
     // 3) 其它 provider（OpenAI 兼容等）：cc-switch 余额。
     val guess = modelId.substringBefore('/').takeIf { it.isNotBlank() && it != modelId }
-    if (guess != null) ccSwitchData(rpc, guess)?.let { return it }
-    // 4) 没有 modelId（旧宿主）/无法判定时：保持原行为，先余额后退回第一个已登录套餐。
+    if (guess != null) return ccSwitchData(rpc, guess)
+    // 4) 没有 modelId（旧宿主）时才用余额/首个套餐兜底；有 modelId 但解析不到 provider 时不显示。
+    if (modelId.isNotBlank()) return null
     balanceData(rpc)?.let { return it }
     return status?.let { fallbackUsageData(it) }
 }
