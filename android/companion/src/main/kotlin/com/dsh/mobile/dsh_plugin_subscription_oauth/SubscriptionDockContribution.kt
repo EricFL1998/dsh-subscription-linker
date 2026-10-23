@@ -6,8 +6,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.ui.draw.clip
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -18,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import com.deepseek.dsh.plugin.nativesdk.host.PluginHostApi
 import com.deepseek.dsh.plugin.nativesdk.host.PluginRpcHost
 import com.deepseek.dsh.plugin.nativesdk.slots.NativeSlot
@@ -60,12 +66,17 @@ class SubscriptionDockContribution : SlotContribution() {
         // 仍可能持有旧类型，若把自定义 DockData 存进 state 会触发 ClassCastException。
         var compact by remember(modelId) { mutableStateOf<String?>(null) }
         var title by remember(modelId) { mutableStateOf("") }
+        var account by remember(modelId) { mutableStateOf("") }
+        // Triple 是 JDK 类，跨 classloader 安全；不要在这里存插件自己的 DockWindow。
+        var windows by remember(modelId) { mutableStateOf<List<Triple<String, Int, String>>>(emptyList()) }
         var rows by remember(modelId) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
         var panelOpen by remember(modelId) { mutableStateOf(false) }
 
         fun apply(next: DockData) {
             compact = next.compact
             title = next.title
+            account = next.account
+            windows = next.windows
             rows = next.rows
         }
 
@@ -113,29 +124,71 @@ class SubscriptionDockContribution : SlotContribution() {
                     onDismiss = { panelOpen = false },
                 ) {
                     Column(
-                        verticalArrangement = Arrangement.spacedBy(theme.spacingUnit),
+                        modifier = Modifier.width(300.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         Text(
                             text = title,
                             style = theme.textPopupTitle,
                             color = theme.colorOnSurfaceVariant,
                         )
-                        rows.forEach { (label, value) ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
+                        if (windows.isNotEmpty()) {
+                            if (account.isNotBlank()) {
                                 Text(
-                                    text = label,
+                                    text = account,
                                     style = theme.textPopupBody,
-                                    color = theme.colorOnSurfaceVariant,
-                                )
-                                Text(
-                                    text = value,
-                                    style = theme.textPopupBody.copy(fontWeight = FontWeight.Medium),
                                     color = theme.colorOnSurface,
                                 )
+                            }
+                            windows.forEach { window ->
+                                val (label, percent, reset) = window
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = windowName(label),
+                                            style = theme.textPopupBody,
+                                            color = theme.colorOnSurface,
+                                        )
+                                        Text(
+                                            text = if (percent < 0) "已用 --"
+                                            else "已用 $percent%" + (if (reset.isNotBlank()) " · $reset" else ""),
+                                            style = theme.textPopupBody.copy(fontWeight = FontWeight.Medium),
+                                            color = theme.colorOnSurfaceVariant,
+                                        )
+                                    }
+                                    LinearProgressIndicator(
+                                        progress = { if (percent < 0) 0f else (percent / 100f).coerceIn(0f, 1f) },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(5.dp)
+                                            .clip(RoundedCornerShape(3.dp)),
+                                        color = theme.colorPrimary,
+                                        trackColor = theme.colorOutline.copy(alpha = 0.25f),
+                                    )
+                                }
+                            }
+                        } else {
+                            rows.forEach { (label, value) ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = label,
+                                        style = theme.textPopupBody,
+                                        color = theme.colorOnSurfaceVariant,
+                                    )
+                                    Text(
+                                        text = value,
+                                        style = theme.textPopupBody.copy(fontWeight = FontWeight.Medium),
+                                        color = theme.colorOnSurface,
+                                    )
+                                }
                             }
                         }
                     }
@@ -148,7 +201,10 @@ class SubscriptionDockContribution : SlotContribution() {
 private data class DockData(
     val compact: String,
     val title: String,
-    val rows: List<Pair<String, String>>,
+    val rows: List<Pair<String, String>> = emptyList(),
+    val account: String = "",
+    /** label, usedPercent(-1 = unknown), reset short text */
+    val windows: List<Triple<String, Int, String>> = emptyList(),
 )
 
 private suspend fun loadDockData(rpc: PluginRpcHost, modelId: String): DockData? {
@@ -230,33 +286,33 @@ private suspend fun usageData(rpc: PluginRpcHost, status: JsonElement?, provider
     val value = rpcValue(rpc.await("subscription-oauth.usage", payload) ?: return null) ?: return null
         ?: return null
     val accounts = value["usage"] as? JsonArray ?: return null
-    val rows = mutableListOf<Pair<String, String>>()
-    // 底部 dock 只显示窗口额度（5h / 7d），不显示账号名或 plan 名。
     val compactWindows = linkedMapOf<String, Int>()
+    val usageWindows = mutableListOf<Triple<String, Int, String>>()
+    var accountId = ""
     for (element in accounts) {
         val account = element as? JsonObject ?: continue
-        val plan = account.str("plan").ifBlank { account.str("account") }
+        if (accountId.isBlank()) accountId = account.str("account").ifBlank { account.str("plan") }
         val windows = account["windows"] as? JsonArray ?: continue
         for (windowElement in windows) {
             val window = windowElement as? JsonObject ?: continue
             val label = window.str("label").ifBlank { "额度" }
             val percent = window["usedPercent"]?.jsonPrimitive?.doubleOrNull ?: continue
-            compactWindows.putIfAbsent(shortWindow(label), percent.roundToInt())
-            val reset = (window["resetsAt"] as? JsonPrimitive)?.longOrNull?.let(::resetLabel)
-            val rowLabel = if (plan.isBlank()) label else "$plan · $label"
-            rows += rowLabel to buildString {
-                append(percent.roundToInt()).append('%')
-                if (!reset.isNullOrBlank()) append(" · ").append(reset)
+            val short = shortWindow(label)
+            val percentInt = percent.roundToInt()
+            if (compactWindows.putIfAbsent(short, percentInt) == null) {
+                val resetShort = (window["resetsAt"] as? JsonPrimitive)?.longOrNull?.let(::resetShort).orEmpty()
+                usageWindows += Triple(short, percentInt, resetShort)
             }
         }
     }
-    if (rows.isEmpty() || compactWindows.isEmpty()) return null
+    if (usageWindows.isEmpty()) return null
     return DockData(
         // 写 provider 名（Kimi / Grok…），但不写账号名或 plan 名。
         compact = shortName(displayName, providerId) + " " +
             compactWindows.entries.joinToString(" · ") { "${it.key} ${it.value}%" },
-        title = "$displayName 用量",
-        rows = rows,
+        title = shortName(displayName, providerId) + " 额度",
+        account = accountId,
+        windows = usageWindows,
     )
 }
 
@@ -282,8 +338,8 @@ private fun unavailableUsageData(status: JsonElement?, providerId: String): Dock
     val name = shortName(displayName, providerId)
     return DockData(
         compact = "$name 5h -- · 7d --",
-        title = "$displayName 用量",
-        rows = listOf("5h" to "--", "7d" to "--"),
+        title = "$name 额度",
+        windows = listOf(Triple("5h", -1, ""), Triple("7d", -1, "")),
     )
 }
 
@@ -340,6 +396,24 @@ private fun rpcValue(body: JsonElement): JsonObject? {
 
 private fun JsonObject.str(key: String): String =
     (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
+
+private fun windowName(label: String): String = when (label.lowercase()) {
+    "5h" -> "5 小时窗口"
+    "weekly", "7d" -> "每周窗口"
+    "monthly", "30d" -> "每月窗口"
+    else -> label
+}
+
+private fun resetShort(resetsAt: Long): String {
+    val remaining = resetsAt - System.currentTimeMillis()
+    if (remaining <= 0) return "即将重置"
+    val hours = remaining / 3_600_000
+    return when {
+        hours < 1 -> "${(remaining / 60_000).coerceAtLeast(1)}m"
+        hours < 24 -> "${hours}h"
+        else -> "${hours / 24}d${hours % 24}h"
+    }
+}
 
 private fun resetLabel(resetsAt: Long): String {
     val remaining = resetsAt - System.currentTimeMillis()
