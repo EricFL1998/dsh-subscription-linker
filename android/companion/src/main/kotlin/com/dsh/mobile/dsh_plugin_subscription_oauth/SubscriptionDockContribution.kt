@@ -56,33 +56,43 @@ class SubscriptionDockContribution : SlotContribution() {
     override fun Render(spec: JsonObject, theme: PluginTheme, host: PluginHostApi) {
         val rpc = host as? PluginRpcHost ?: return
         val modelId = spec["modelId"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        var data by remember(modelId) { mutableStateOf<DockData?>(null) }
+        // 只把字符串/字符串列表放进 Compose 状态：伴生 APK 热更新后旧 classloader
+        // 仍可能持有旧类型，若把自定义 DockData 存进 state 会触发 ClassCastException。
+        var compact by remember(modelId) { mutableStateOf<String?>(null) }
+        var title by remember(modelId) { mutableStateOf("") }
+        var rows by remember(modelId) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
         var panelOpen by remember(modelId) { mutableStateOf(false) }
+
+        fun apply(next: DockData) {
+            compact = next.compact
+            title = next.title
+            rows = next.rows
+        }
 
         LaunchedEffect(modelId) {
             // Host 刚启动时 /api 可能先返回 401；重试几次直到 RPC 就绪。
             repeat(6) { attempt ->
                 val loaded = loadDockData(rpc, modelId)
                 if (loaded != null) {
-                    data = loaded
+                    apply(loaded)
                     return@LaunchedEffect
                 }
                 kotlinx.coroutines.delay(if (attempt == 0) 800L else 2_000L)
             }
         }
         // Web 版 UsageChip 每 60 秒刷新；原生 dock 同样周期刷新。
-        LaunchedEffect(modelId, data != null) {
-            if (data == null) return@LaunchedEffect
+        LaunchedEffect(modelId, compact != null) {
+            if (compact == null) return@LaunchedEffect
             while (true) {
                 kotlinx.coroutines.delay(60_000)
-                loadDockData(rpc, modelId)?.let { data = it }
+                loadDockData(rpc, modelId)?.let { apply(it) }
             }
         }
 
-        val current = data ?: return
+        val currentCompact = compact ?: return
         Box {
             Text(
-                text = current.compact,
+                text = currentCompact,
                 style = theme.textCaption.copy(fontFeatureSettings = "tnum"),
                 color = theme.colorOutline,
                 modifier = Modifier
@@ -106,11 +116,11 @@ class SubscriptionDockContribution : SlotContribution() {
                         verticalArrangement = Arrangement.spacedBy(theme.spacingUnit),
                     ) {
                         Text(
-                            text = current.title,
+                            text = title,
                             style = theme.textPopupTitle,
                             color = theme.colorOnSurfaceVariant,
                         )
-                        current.rows.forEach { (label, value) ->
+                        rows.forEach { (label, value) ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
