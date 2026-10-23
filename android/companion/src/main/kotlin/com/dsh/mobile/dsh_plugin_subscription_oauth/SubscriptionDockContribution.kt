@@ -218,7 +218,8 @@ private suspend fun usageData(rpc: PluginRpcHost, status: JsonElement?, provider
         ?: return null
     val accounts = value["usage"] as? JsonArray ?: return null
     val rows = mutableListOf<Pair<String, String>>()
-    var compactPercent: Int? = null
+    // 底部 dock 只显示窗口额度（5h / 7d），不显示账号名或 plan 名。
+    val compactWindows = linkedMapOf<String, Int>()
     for (element in accounts) {
         val account = element as? JsonObject ?: continue
         val plan = account.str("plan").ifBlank { account.str("account") }
@@ -227,7 +228,7 @@ private suspend fun usageData(rpc: PluginRpcHost, status: JsonElement?, provider
             val window = windowElement as? JsonObject ?: continue
             val label = window.str("label").ifBlank { "额度" }
             val percent = window["usedPercent"]?.jsonPrimitive?.doubleOrNull ?: continue
-            compactPercent = compactPercent ?: percent.roundToInt()
+            compactWindows.putIfAbsent(shortWindow(label), percent.roundToInt())
             val reset = (window["resetsAt"] as? JsonPrimitive)?.longOrNull?.let(::resetLabel)
             val rowLabel = if (plan.isBlank()) label else "$plan · $label"
             rows += rowLabel to buildString {
@@ -236,9 +237,9 @@ private suspend fun usageData(rpc: PluginRpcHost, status: JsonElement?, provider
             }
         }
     }
-    if (rows.isEmpty()) return null
+    if (rows.isEmpty() || compactWindows.isEmpty()) return null
     return DockData(
-        compact = "${shortName(displayName, providerId)} ${rows.first().first} ${compactPercent}%",
+        compact = compactWindows.entries.joinToString(" · ") { "${it.key} ${it.value}%" },
         title = "$displayName 用量",
         rows = rows,
     )
@@ -276,7 +277,7 @@ private fun fallbackUsageData(status: JsonElement): DockData? {
         val percent = window["usedPercent"]?.jsonPrimitive?.doubleOrNull?.roundToInt() ?: continue
         val name = shortName(provider.str("displayName"), provider.str("provider"))
         return DockData(
-            compact = "$name $label $percent%",
+            compact = "${shortWindow(label)} $percent%",
             title = "${provider.str("displayName").ifBlank { name }} 用量",
             rows = listOf(label to "$percent%"),
         )
@@ -330,6 +331,16 @@ private fun formatMoney(currency: String, raw: String): String {    val amount =
         else -> if (currency.isBlank()) "" else "$currency "
     }
     return "$symbol$amount"
+}
+
+private fun shortWindow(label: String): String {
+    val key = label.lowercase()
+    return when {
+        key.contains("week") || key == "7d" -> "7d"
+        key == "5h" || key.contains("5 hour") -> "5h"
+        key == "monthly" || key == "30d" -> "30d"
+        else -> if (label.length <= 4) label else label.take(4)
+    }
 }
 
 private fun shortName(displayName: String, providerId: String): String {
