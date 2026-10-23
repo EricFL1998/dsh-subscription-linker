@@ -164,8 +164,8 @@ private suspend fun loadDockData(rpc: PluginRpcHost, modelId: String): DockData?
     }
     if (provider != null) {
         // 当前模型属于插件 provider：只展示它的额度窗口（5h / 7d）。
-        // 额度 RPC 失败（如 token 失效）时返回 null 隐藏胶囊，绝不退回其它 provider 的余额。
-        return usageData(rpc, status, provider)
+        // 额度 RPC 失败（如 token 失效）时显示占位，不退回其它 provider 的余额。
+        return usageData(rpc, status, provider) ?: unavailableUsageData(status, provider)
     }
     // 3) 其它 provider（OpenAI 兼容等）：cc-switch 余额。
     val guess = modelId.substringBefore('/').takeIf { it.isNotBlank() && it != modelId }
@@ -252,7 +252,9 @@ private suspend fun usageData(rpc: PluginRpcHost, status: JsonElement?, provider
     }
     if (rows.isEmpty() || compactWindows.isEmpty()) return null
     return DockData(
-        compact = compactWindows.entries.joinToString(" · ") { "${it.key} ${it.value}%" },
+        // 写 provider 名（Kimi / Grok…），但不写账号名或 plan 名。
+        compact = shortName(displayName, providerId) + " " +
+            compactWindows.entries.joinToString(" · ") { "${it.key} ${it.value}%" },
         title = "$displayName 用量",
         rows = rows,
     )
@@ -269,6 +271,19 @@ private suspend fun ccSwitchData(rpc: PluginRpcHost, providerId: String): DockDa
         compact = "${shortName(providerId, providerId)} $text",
         title = "$providerId 余额",
         rows = listOf((currency.ifBlank { "余额" }) to text),
+    )
+}
+
+private fun unavailableUsageData(status: JsonElement?, providerId: String): DockData {
+    val provider = rpcValue(status ?: JsonObject(emptyMap()))?.get("providers")?.let { providers ->
+        (providers as? JsonArray)?.mapNotNull { it as? JsonObject }?.firstOrNull { it.str("provider") == providerId }
+    }
+    val displayName = provider?.str("displayName").orEmpty().ifBlank { providerId }
+    val name = shortName(displayName, providerId)
+    return DockData(
+        compact = "$name 5h -- · 7d --",
+        title = "$displayName 用量",
+        rows = listOf("5h" to "--", "7d" to "--"),
     )
 }
 
